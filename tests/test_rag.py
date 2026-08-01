@@ -511,8 +511,30 @@ class TestIndexFailureWithoutRollback(_TmpNovelCase):
         (root / "outlines" / "chapter_plan_ch0001.md").write_text(
             SAMPLE_PLAN_MD, encoding="utf-8")
 
+        # E05: mock must include ## 事实摘要 for deterministic extraction
+        MOCK_ANALYSIS = """# 分析
+## 事实摘要
+### 确定的物品
+扳手
+### 确定的角色状态
+柯林：健康
+### 确定的事件
+柯林醒来
+### 确定的数字/数据
+无
+### 明确未出现的内容
+无
+### 待解悬念
+无
+## 追踪文档变更建议
+无变更
+## 一致性检查
+通过
+## 质量审阅
+通过
+"""
         with mock.patch.object(BaseAgent, "_call_llm",
-                               lambda self, messages: "# 分析\n测试通过\n"):
+                               lambda self, messages: MOCK_ANALYSIS):
             orch = Orchestrator("indexfail_novel")
             # Make index_chapter fail
             with mock.patch.object(ChromaStore, "index_chapter",

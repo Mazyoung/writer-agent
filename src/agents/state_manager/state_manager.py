@@ -10,6 +10,7 @@ from src.storage.file_store import FileStore
 from src.storage.document_formats import (
     FactDigest, CharacterRelationships, ItemsEquipment, CultivationSystem,
     RelationshipChange, ItemLog, ItemEntry, CharacterCultivation,
+    _extract_section,
 )
 from src.storage.sqlite_store import SQLiteStore
 
@@ -65,7 +66,11 @@ class StateManager(BaseAgent):
         return {"raw_analysis": result.content, "filepath": result.filepath}
 
     def extract_fact_digest(self, chapter_text: str, chapter_index: int) -> FactDigest:
-        """从章节正文提取事实摘要。"""
+        """从章节正文提取事实摘要（LLM 调用 — 保留用于独立 fact-digest 场景）。
+
+        E05: review_chapter 主流程不再调用此方法。
+        改为从 raw_analysis 中确定性提取，消除第二次 LLM 调用。
+        """
         user_msg = f"""## 第 {chapter_index} 章正文
 
 {chapter_text}
@@ -79,6 +84,46 @@ class StateManager(BaseAgent):
             save_prefix=f"fact_digest_ch{chapter_index:04d}",
         )
         return FactDigest.from_markdown(result.content)
+
+    def extract_fact_digest_from_analysis(self, analysis_text: str,
+                                          chapter_index: int) -> FactDigest:
+        """E05: 从 review raw_analysis 中确定性提取事实摘要（无 LLM）。
+
+        提取「## 事实摘要」→ 解析六个子节 → 保存
+        → 返回 FactDigest 对象。
+
+        正常路径不产生第二次 LLM 请求。
+        解析失败时输出 [STATE WARNING]，不崩溃也不回滚 canonical state。
+        """
+        # 1. Extract ## 事实摘要 section from raw analysis
+        section = _extract_section(analysis_text, "## 事实摘要")
+        if not section.strip():
+            print(f"  [STATE WARNING] raw_analysis 中未找到「## 事实摘要」区域，"
+                  f"第{chapter_index}章 Fact Digest 未生成")
+            return FactDigest(chapter_index=chapter_index)
+
+        # 2. Parse with FactDigest.from_markdown
+        fd = FactDigest.from_markdown(section)
+        fd.chapter_index = chapter_index
+
+        # 3. Verify at least some sub-sections contain content
+        has_content = any([
+            fd.confirmed_items.strip(),
+            fd.confirmed_character_states.strip(),
+            fd.confirmed_events.strip(),
+            fd.confirmed_numbers.strip(),
+            fd.explicitly_absent.strip(),
+            fd.pending_suspense.strip(),
+        ])
+        if not has_content:
+            print(f"  [STATE WARNING] 第{chapter_index}章 Fact Digest 六个子节全为空，"
+                  f"可能解析失败（raw_analysis 格式与预期不一致）")
+            return fd  # still return, don't crash
+
+        # 4. Save via FileStore
+        self.fs.save("states", f"fact_digest_ch{chapter_index:04d}",
+                     fd.to_markdown())
+        return fd
 
     def update_tracking_docs(self, chapter_index: int, chapter_text: str,
                              analysis_text: str) -> dict:

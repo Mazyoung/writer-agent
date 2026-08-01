@@ -824,6 +824,21 @@ Book Plan 是整本书的长期战略，只写长期有效的内容：
 
     # ═══ 写作 ═══════════════════════════════════════════════════
 
+    def _save_and_check_styled(self, chapter_index: int, styled: str) -> str:
+        """E05: 保存 styled chapter 一次 + StyleChecker 一次。
+
+        消除 ClaudeStylist 内部重复副作用 + write/style-edit 行为漂移。
+        两条路径共享此 helper，保证 single ownership of side effects。
+        """
+        self.file_store.save("chapters",
+                             f"chapter_{chapter_index:04d}_styled", styled)
+
+        report = StyleChecker(styled).check_all(file_path=f"第{chapter_index}章")
+        print(report.summary())
+        if report.errors > 0:
+            print(f"\n  [!] {report.errors} 个错误 + {report.warnings} 个警告，请人工复核。")
+        return styled
+
     def write_chapter(self, chapter_index: int) -> str:
         """写一章：DeepSeekWriter → ClaudeStylist → StyleChecker。"""
         print(f"\n{'='*60}")
@@ -854,15 +869,9 @@ Book Plan 是整本书的长期战略，只写长期有效的内容：
                                             emotion_palette=emotion,
                                             scene_plan_text=plan_text[:3000])
 
-        # 保存
-        self.file_store.save("chapters", f"chapter_{chapter_index:04d}_styled", styled)
-
-        # 3. 风格检测
+        # 3. 保存 + 风格检测（E05: single ownership — save once, check once）
         print(f"  [StyleChecker] 扫描AI句式...")
-        report = StyleChecker(styled).check_all(file_path=f"第{chapter_index}章")
-        print(report.summary())
-        if report.errors > 0:
-            print(f"\n  [!] {report.errors} 个错误 + {report.warnings} 个警告，请人工复核。")
+        self._save_and_check_styled(chapter_index, styled)
 
         print(f"\n  第 {chapter_index} 章完成（{len(styled)} 字符）")
         return styled
@@ -899,9 +908,10 @@ Book Plan 是整本书的长期战略，只写长期有效的内容：
         changes = self.state_manager.update_tracking_docs(
             chapter_index, chapter_text, analysis["raw_analysis"])
 
-        # 生成事实摘要
-        print("  [StateManager] 生成事实摘要...")
-        self.state_manager.extract_fact_digest(chapter_text, chapter_index)
+        # E05: Fact Digest via deterministic extraction from raw_analysis (no 2nd LLM)
+        print("  [StateManager] 提取事实摘要...")
+        self.state_manager.extract_fact_digest_from_analysis(
+            analysis["raw_analysis"], chapter_index)
 
         # ── E04: Index chapter into RAG (derived state; failure does NOT rollback) ──
         try:
@@ -917,7 +927,7 @@ Book Plan 是整本书的长期战略，只写长期有效的内容：
         return changes
 
     def style_edit(self, chapter_index: int, feedback: str = "") -> str:
-        """定向风格修改——用人工反馈重新编辑。"""
+        """定向风格修改——用人工反馈重新编辑。 E05: save + StyleChecker via shared helper。"""
         print(f"\n  [ClaudeStylist] 定向风格修改...")
         chapter_text = self.file_store.load_latest("chapters",
                                                     f"chapter_{chapter_index:04d}_styled")
@@ -941,7 +951,8 @@ Book Plan 是整本书的长期战略，只写长期有效的内容：
             scene_plan_text=plan_text[:3000],
             style_feedback=feedback)
 
-        self.file_store.save("chapters", f"chapter_{chapter_index:04d}_styled", styled)
+        # E05: save once, StyleChecker once — shared with write_chapter
+        self._save_and_check_styled(chapter_index, styled)
         print(f"  风格修改完成（{len(styled)} 字符）")
         return styled
 

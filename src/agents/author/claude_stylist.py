@@ -11,7 +11,6 @@ from openai import OpenAI
 
 from src.config.settings import get_settings
 from src.storage.file_store import FileStore
-from src.agents.author.style_checker import StyleChecker
 
 
 class ClaudeStylist:
@@ -51,21 +50,20 @@ class ClaudeStylist:
                      emotion_palette: str = "",
                      scene_plan_text: str = "",
                      style_feedback: str = "") -> str:
+        """风格编辑 — 只负责 LLM 转换，返回 styled text。
+
+        E05: 不再保存文件、不执行 StyleChecker。
+        Orchestrator 负责所有 workflow side effects。
+        """
         user_msg = self._build_message(draft_text, chapter_index,
                                         emotion_palette, scene_plan_text,
                                         style_feedback)
-        save_prefix = f"chapter_{chapter_index:04d}_styled"
 
         if self.use_claude:
             result = self._call_claude(user_msg)
         else:
             result = self._call_deepseek(user_msg)
 
-        self.file_store.save("chapters", save_prefix, result)
-
-        report = StyleChecker(result).check_all(file_path=f"第{chapter_index}章")
-        if report.violations:
-            print(f"  [StyleChecker] {report.violations} 处违规需人工复核")
         return result
 
     def edit_scene(self, scene_text: str, scene_index: int,

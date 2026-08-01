@@ -835,11 +835,15 @@ class FactDigest:
     @classmethod
     def from_markdown(cls, text: str) -> "FactDigest":
         fd = cls()
+        fd.chapter_index = _extract_chapter_index(text)
         fd.confirmed_items = _extract_section(text, "### 确定的物品")
         fd.confirmed_character_states = _extract_section(text, "### 确定的角色状态")
         fd.confirmed_events = _extract_section(text, "### 确定的事件")
         fd.confirmed_numbers = _extract_section(text, "### 确定的数字/数据")
-        fd.explicitly_absent = _extract_section(text, "### 明确未出现的内容")
+        fd.explicitly_absent = (
+            _extract_section(text, "### 明确未出现的内容（后续章节不得引用）") or
+            _extract_section(text, "### 明确未出现的内容")
+        )
         fd.pending_suspense = _extract_section(text, "### 待解悬念")
         return fd
 
