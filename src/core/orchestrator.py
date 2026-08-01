@@ -879,7 +879,17 @@ Book Plan 是整本书的长期战略，只写长期有效的内容：
     # ═══ 审阅 ═══════════════════════════════════════════════════
 
     def review_chapter(self, chapter_index: int) -> dict:
-        """章节后复盘：StateManager 分析 + 更新追踪文档。"""
+        """E06: 章节复盘 + Decision 路由。
+
+        生命周期：
+        1. LLM Review（1 次调用，含 world_setting）
+        2. Parse ReviewDecision（确定性，0 LLM）
+        3. 根据 Decision 路由：
+           PASS → memory commit → fact digest → RAG index
+           NEEDS_REVISION → [SUPERVISOR] warning → no memory commit → no RAG
+           HALT → [SUPERVISOR HALT] → no memory commit → no RAG
+           UNKNOWN → [SUPERVISOR WARNING] → fail-closed (HALT behavior)
+        """
         print(f"\n{'='*60}")
         print(f"第 {chapter_index} 章复盘")
         print(f"{'='*60}\n")
@@ -895,36 +905,95 @@ Book Plan 是整本书的长期战略，只写长期有效的内容：
         plan_text = self.file_store.load_canonical("outlines",
                                                     f"chapter_plan_ch{chapter_index:04d}") or ""
 
+        # E06: World Setting 进入 Review （T1 一致性检查必需）
+        world_setting = self.file_store.load_canonical("settings", "world_setting") or ""
+
         # 加载当前追踪文档
         rels = self.file_store.load_tracking_doc("character_relationships") or ""
         items = self.file_store.load_tracking_doc("items_equipment") or ""
         cult = self.file_store.load_tracking_doc("cultivation_system") or ""
 
+        # ── Step 1: LLM Review (exactly 1 call — E05 single-pass) ──
         print("  [StateManager] 分析章节...")
         analysis = self.state_manager.review_chapter(
-            chapter_text, chapter_index, plan_text, rels, items, cult)
+            chapter_text, chapter_index, plan_text, rels, items, cult,
+            world_setting=world_setting)
 
-        print("  [StateManager] 更新追踪文档...")
-        changes = self.state_manager.update_tracking_docs(
-            chapter_index, chapter_text, analysis["raw_analysis"])
+        # ── Step 2: Parse ReviewDecision (deterministic, 0 LLM) ──
+        decision = self.state_manager.parse_review_decision(
+            analysis["raw_analysis"])
+        print(f"  [Supervisor] 审阅决策: {decision.verdict}"
+              + (f" (严重性: {decision.severity})"
+                 if decision.severity != "PASS" else "")
+              + (f" — {'; '.join(decision.reasons[:3])}"
+                 if decision.reasons else ""))
 
-        # E05: Fact Digest via deterministic extraction from raw_analysis (no 2nd LLM)
-        print("  [StateManager] 提取事实摘要...")
-        self.state_manager.extract_fact_digest_from_analysis(
-            analysis["raw_analysis"], chapter_index)
+        # ── Step 3: Route based on Decision ──
+        if decision.verdict == "PASS":
+            # Normal path: commit memory + fact digest + RAG
+            print("  [StateManager] 更新追踪文档...")
+            changes = self.state_manager.update_tracking_docs(
+                chapter_index, chapter_text, analysis["raw_analysis"])
 
-        # ── E04: Index chapter into RAG (derived state; failure does NOT rollback) ──
-        try:
+            print("  [StateManager] 提取事实摘要...")
+            self.state_manager.extract_fact_digest_from_analysis(
+                analysis["raw_analysis"], chapter_index)
+
             print("  [RAG] 索引本章到向量库...")
-            self._index_chapter_to_rag(chapter_index)
-        except Exception as e:
-            print(f"  [RAG WARNING] 索引失败（章节状态不受影响，可稍后通过 rag-index 修复）: {e}")
+            try:
+                self._index_chapter_to_rag(chapter_index)
+            except Exception as e:
+                print(f"  [RAG WARNING] 索引失败（章节状态不受影响）: {e}")
 
-        print(f"\n  复盘完成。变更日志: states/post_chapter_update_ch{chapter_index:04d}.md")
-        for key, val in changes.items():
-            if key != "change_log" and val:
-                print(f"    {key}: 已更新")
-        return changes
+            print(f"\n  复盘完成。变更日志: states/post_chapter_update_ch{chapter_index:04d}.md")
+            for key, val in changes.items():
+                if key != "change_log" and val:
+                    print(f"    {key}: 已更新")
+            return changes
+
+        elif decision.verdict == "NEEDS_REVISION":
+            print(f"\n  [Supervisor] NEEDS_REVISION — 第{chapter_index}章需要修改。"
+                  f"问题数: T1={len(decision.t1_issues)} "
+                  f"T2={len(decision.t2_issues)} "
+                  f"质量={decision.severity}")
+            for issue in decision.t1_issues[:5]:
+                print(f"    T1: {issue}")
+            # No memory commit, no RAG index
+            # Fact digest still saved (informational, not destructive)
+            self.state_manager.extract_fact_digest_from_analysis(
+                analysis["raw_analysis"], chapter_index)
+            print(f"  [Supervisor] 未提交 Structured Memory / RAG（需人工修复后重新 review）")
+            return {"decision": "NEEDS_REVISION",
+                    "t1_issues": decision.t1_issues,
+                    "t2_issues": decision.t2_issues}
+
+        else:  # HALT or UNKNOWN
+            label = ("HALT" if decision.verdict == "HALT"
+                     else "UNKNOWN（fail-closed）")
+            severity_label = (f" (严重性: {decision.severity})"
+                              if decision.severity != "PASS" else "")
+            print(f"\n  [Supervisor] {label} 第{chapter_index}章不能单章处理{severity_label}")
+            if decision.reasons:
+                for r in decision.reasons:
+                    print(f"    - {r}")
+            if decision.t1_issues:
+                print(f"  T1 硬错误:")
+                for issue in decision.t1_issues[:5]:
+                    print(f"    - {issue}")
+            # Same as NEEDS_REVISION: no memory commit, no RAG
+            # Fact digest still saved (informational)
+            try:
+                self.state_manager.extract_fact_digest_from_analysis(
+                    analysis["raw_analysis"], chapter_index)
+            except Exception:
+                pass
+            print(f"  [Supervisor] 未提交 Structured Memory / RAG。"
+                  f"需要人工介入决定后续策略。")
+            return {"decision": decision.verdict,
+                    "reasons": decision.reasons,
+                    "t1_issues": decision.t1_issues,
+                    "planning_level": decision.planning_level}
+
 
     def style_edit(self, chapter_index: int, feedback: str = "") -> str:
         """定向风格修改——用人工反馈重新编辑。 E05: save + StyleChecker via shared helper。"""

@@ -108,6 +108,41 @@ class SQLiteStore:
         )
         self.conn.commit()
 
+    def upsert_foreshadow(self, novel_id: str, description: str,
+                          status: str, resolved_chapter: str = ""):
+        """E06: 插入或更新伏笔状态。
+
+        如果已存在相同描述的 pending 伏笔，更新状态；
+        如果 status=RESOLVED，标记为已回收；
+        如果不存在，插入新记录。
+        """
+        cursor = self.conn.execute(
+            "SELECT id FROM foreshadowing WHERE novel_id=? AND description LIKE ?",
+            (novel_id, f"%{description}%"))
+        rows = cursor.fetchall()
+        if rows:
+            if status.upper() in ("RESOLVED", "resolved"):
+                self.conn.execute(
+                    "UPDATE foreshadowing SET status='resolved', resolved_chapter=? WHERE id=?",
+                    (resolved_chapter, rows[0][0]))
+            elif status.upper() in ("ABANDONED", "abandoned"):
+                self.conn.execute(
+                    "UPDATE foreshadowing SET status='abandoned' WHERE id=?",
+                    (rows[0][0],))
+            else:
+                self.conn.execute(
+                    "UPDATE foreshadowing SET status='pending' WHERE id=?",
+                    (rows[0][0],))
+        else:
+            self.conn.execute(
+                "INSERT INTO foreshadowing (novel_id, description, planted_chapter, "
+                "expected_resolve_chapter, status) VALUES (?,?,?,?,?)",
+                (novel_id, description, "",
+                 resolved_chapter if status.upper() == "RESOLVED" else "",
+                 "pending" if status.upper() not in ("RESOLVED", "ABANDONED")
+                 else status.lower()))
+        self.conn.commit()
+
     def get_pending_foreshadows(self, novel_id: str) -> list[dict]:
         rows = self.conn.execute(
             "SELECT * FROM foreshadowing WHERE novel_id=? AND status='pending' ORDER BY id",

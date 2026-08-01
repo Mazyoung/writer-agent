@@ -682,15 +682,29 @@ class ItemsEquipment:
     def from_markdown(cls, text: str) -> "ItemsEquipment":
         ie = cls()
         for row in _parse_table(_extract_section(text, "## 主角持有")):
+            # E06: 从备注字段解析拥有者（向后兼容的编码方式）
+            notes = row.get("备注", "")
+            owner = "主角"
+            if notes.startswith("拥有者="):
+                if ";" in notes:
+                    owner_part, notes = notes.split(";", 1)
+                    owner = owner_part.split("=", 1)[1].strip()
+                    notes = notes.strip()
+                else:
+                    owner = notes.split("=", 1)[1].strip()
+                    notes = ""
             ie.protagonist_items.append(ItemEntry(
-                name=row.get("物品", ""), owner="主角",
-                source=row.get("来源", ""), acquired_chapter=row.get("获得章", ""),
-                attributes=row.get("属性", ""), status=row.get("状态", ""),
-                notes=row.get("备注", ""),
+                name=row.get("物品", ""),
+                owner=owner,
+                source=row.get("来源", ""),
+                acquired_chapter=row.get("获得章", ""),
+                attributes=row.get("属性", ""),
+                status=row.get("状态", ""),
+                notes=notes,
             ))
         for row in _parse_table(_extract_section(text, "## 已引入的世界物品")):
             ie.world_items.append(ItemEntry(
-                name=row.get("物品", ""), owner=row.get("拥有者", ""),
+                name=row.get("物品", ""), owner="",
                 source=row.get("首次出现", ""), attributes=row.get("已知属性", ""),
             ))
         log_text = _extract_section(text, "## 物品流转日志")
@@ -707,17 +721,21 @@ class ItemsEquipment:
         lines = ["# 物品与装备系统", ""]
         lines.append("## 主角持有")
         if self.protagonist_items:
+            # E06: 保持旧列格式不变，拥有者编码在备注字段中（向后兼容）
             lines.append("| 物品 | 来源 | 获得章 | 属性 | 状态 | 备注 |")
             lines.append("|------|------|--------|------|------|------|")
             for it in self.protagonist_items:
-                lines.append(f"| {it.name} | {it.source} | {it.acquired_chapter} | {it.attributes} | {it.status} | {it.notes} |")
+                notes = it.notes or ""
+                if it.owner and it.owner != "主角":
+                    notes = f"拥有者={it.owner}; {notes}" if notes else f"拥有者={it.owner}"
+                lines.append(f"| {it.name} | {it.source} | {it.acquired_chapter} | {it.attributes} | {it.status} | {notes} |")
         lines.append("")
         lines.append("## 已引入的世界物品")
         if self.world_items:
-            lines.append("| 物品 | 拥有者 | 首次出现 | 已知属性 |")
-            lines.append("|------|--------|---------|---------|")
+            lines.append("| 物品 | 首次出现 | 已知属性 |")
+            lines.append("|------|---------|---------|")
             for it in self.world_items:
-                lines.append(f"| {it.name} | {it.owner} | {it.source} | {it.attributes} |")
+                lines.append(f"| {it.name} | {it.source} | {it.attributes} |")
         lines.append("")
         lines.append("## 物品流转日志")
         for il in self.item_logs:
@@ -861,6 +879,147 @@ class FactDigest:
             lines.append(content or "暂无")
             lines.append("")
         return "\n".join(lines)
+
+
+# ── ReviewDecision (E06) ────────────────────────────────────
+
+from enum import Enum
+
+
+class DecisionVerdict(str, Enum):
+    PASS = "PASS"
+    NEEDS_REVISION = "NEEDS_REVISION"
+    HALT = "HALT"
+    UNKNOWN = "UNKNOWN"
+
+
+class DecisionSeverity(str, Enum):
+    PASS = "PASS"
+    MINOR = "MINOR"
+    MAJOR = "MAJOR"
+
+
+@dataclass
+class ReviewDecision:
+    """E06: StateManager review → structured decision for workflow routing.
+
+    Parsed deterministically from raw_analysis (no extra LLM).
+    Fail-closed: UNKNOWN on parse failure.
+    """
+    verdict: str = "UNKNOWN"        # PASS / NEEDS_REVISION / HALT / UNKNOWN
+    severity: str = "PASS"          # PASS / MINOR / MAJOR
+    reasons: list[str] = field(default_factory=list)
+    t1_issues: list[str] = field(default_factory=list)    # hard errors
+    t2_issues: list[str] = field(default_factory=list)    # soft warnings
+    t3_issues: list[str] = field(default_factory=list)    # observations
+    quality_issues: list[str] = field(default_factory=list)  # quality review findings
+    planning_level: str = "L1"      # L1 / L2 / L3
+
+    @classmethod
+    def from_analysis(cls, text: str) -> "ReviewDecision":
+        """Deterministic parser — no LLM. Extracts decision from raw_analysis.
+
+        Parses:
+        - '## 审阅决策' section (new E06 format)
+        - Falls back to '## 一致性检查' + '## 质量审阅' for verdict inference
+
+        Fail-closed: truly empty or unparseable text → UNKNOWN.
+        """
+        rd = cls()
+
+        # Truly empty → UNKNOWN (fail-closed)
+        if not text or not text.strip():
+            return rd
+
+        # Try E06 explicit decision section first
+        decision_section = _extract_section(text, "## 审阅决策")
+        if decision_section:
+            kv = _parse_key_value(decision_section)
+            raw = kv.get("决策", kv.get("审阅决策", "")).strip().upper()
+            if raw in ("PASS", "通过"):
+                rd.verdict = "PASS"
+            elif raw in ("NEEDS_REVISION", "需修改", "需重写"):
+                rd.verdict = "NEEDS_REVISION"
+            elif raw in ("HALT", "暂停", "需要人工"):
+                rd.verdict = "HALT"
+            rd.severity = kv.get("严重性", kv.get("严重程度", "PASS")).strip().upper()
+            if rd.severity in ("MAJOR", "重大"):
+                rd.severity = "MAJOR"
+            elif rd.severity in ("MINOR", "轻微"):
+                rd.severity = "MINOR"
+            else:
+                rd.severity = "PASS"
+            reasons_str = kv.get("主要问题", kv.get("原因", ""))
+            if reasons_str:
+                rd.reasons = [r.strip() for r in reasons_str.split(";") if r.strip()]
+            planning_str = kv.get("规划级别", "L1").strip()
+            rd.planning_level = planning_str if planning_str in ("L1", "L2", "L3") else "L1"
+
+        # Parse T1/T2/T3 from consistency section
+        cons = _extract_section(text, "## 一致性检查")
+        if cons:
+            t1 = (_extract_section(cons, "### T1（硬错误）")
+                  or _extract_section(cons, "### T1")
+                  or _extract_section(cons, "**T1"))
+            if t1:
+                for line in t1.strip().split("\n"):
+                    stripped = line.strip()
+                    if stripped.startswith("- "):
+                        issue = stripped[2:].strip()
+                        if issue and issue != "无":
+                            rd.t1_issues.append(issue)
+            t2 = (_extract_section(cons, "### T2（软问题）")
+                  or _extract_section(cons, "### T2")
+                  or _extract_section(cons, "**T2"))
+            if t2:
+                for line in t2.strip().split("\n"):
+                    stripped = line.strip()
+                    if stripped.startswith("- "):
+                        issue = stripped[2:].strip()
+                        if issue and issue != "无":
+                            rd.t2_issues.append(issue)
+            t3 = (_extract_section(cons, "### T3（观察项）")
+                  or _extract_section(cons, "### T3")
+                  or _extract_section(cons, "**T3"))
+            if t3:
+                for line in t3.strip().split("\n"):
+                    stripped = line.strip()
+                    if stripped.startswith("- "):
+                        issue = stripped[2:].strip()
+                        if issue and issue != "无":
+                            rd.t3_issues.append(issue)
+
+        # Parse quality review
+        quality = _extract_section(text, "## 质量审阅")
+        if quality:
+            for line in quality.strip().split("\n"):
+                stripped = line.strip()
+                if stripped.startswith("- "):
+                    rd.quality_issues.append(stripped[2:].strip())
+            # Extract severity from quality ratings
+            q_lower = quality.lower()
+            if "major" in q_lower and rd.severity == "PASS":
+                rd.severity = "MAJOR"
+            elif "minor" in q_lower and rd.severity == "PASS":
+                rd.severity = "MINOR"
+
+        # Infer verdict from issues if no explicit decision
+        if rd.verdict == "UNKNOWN" and not decision_section:
+            # Fail-closed: if no recognizable structure at all → UNKNOWN
+            has_structure = (
+                _extract_section(text, "## 一致性检查") or
+                _extract_section(text, "## 质量审阅") or
+                _extract_section(text, "## 事实摘要"))
+            if not has_structure:
+                return rd  # truly unparseable → UNKNOWN
+            if rd.t1_issues:
+                rd.verdict = "NEEDS_REVISION"
+            elif rd.severity == "MAJOR":
+                rd.verdict = "NEEDS_REVISION"
+            else:
+                rd.verdict = "PASS"
+
+        return rd
 
 
 # ── 辅助函数 ──────────────────────────────────────────────
