@@ -908,16 +908,24 @@ Book Plan 是整本书的长期战略，只写长期有效的内容：
         # E06: World Setting 进入 Review （T1 一致性检查必需）
         world_setting = self.file_store.load_canonical("settings", "world_setting") or ""
 
+        # E06.1: Strategic Context — Book Plan + Active Volume Plan (L2/L3 detection)
+        book_plan = self.file_store.load_tracking_doc("book_plan") or ""
+        volume_plan = self.file_store.load_tracking_doc("volume_plan") or ""
+
         # 加载当前追踪文档
         rels = self.file_store.load_tracking_doc("character_relationships") or ""
         items = self.file_store.load_tracking_doc("items_equipment") or ""
         cult = self.file_store.load_tracking_doc("cultivation_system") or ""
+        char_states = self.file_store.load_tracking_doc("character_states") or ""
 
         # ── Step 1: LLM Review (exactly 1 call — E05 single-pass) ──
         print("  [StateManager] 分析章节...")
         analysis = self.state_manager.review_chapter(
             chapter_text, chapter_index, plan_text, rels, items, cult,
-            world_setting=world_setting)
+            world_setting=world_setting,
+            current_character_states=char_states,
+            book_plan_text=book_plan,
+            volume_plan_text=volume_plan)
 
         # ── Step 2: Parse ReviewDecision (deterministic, 0 LLM) ──
         decision = self.state_manager.parse_review_decision(
@@ -958,14 +966,16 @@ Book Plan 是整本书的长期战略，只写长期有效的内容：
                   f"质量={decision.severity}")
             for issue in decision.t1_issues[:5]:
                 print(f"    T1: {issue}")
-            # No memory commit, no RAG index
-            # Fact digest still saved (informational, not destructive)
-            self.state_manager.extract_fact_digest_from_analysis(
-                analysis["raw_analysis"], chapter_index)
-            print(f"  [Supervisor] 未提交 Structured Memory / RAG（需人工修复后重新 review）")
+            # E06.1: No Structured Memory commit, no Fact Digest, no RAG.
+            # raw_analysis 已保存在 states/review_ch* 作为诊断记录。
+            # 不产生 fact_digest_ch* 文件 — Planner 的 _recent_fact_digests
+            # 不得读取 rejected chapter 的事实。
+            print(f"  [Supervisor] 未提交 Structured Memory / Fact Digest / RAG"
+                  f"（需人工修复后重新 review）")
             return {"decision": "NEEDS_REVISION",
                     "t1_issues": decision.t1_issues,
-                    "t2_issues": decision.t2_issues}
+                    "t2_issues": decision.t2_issues,
+                    "reasons": decision.reasons}
 
         else:  # HALT or UNKNOWN
             label = ("HALT" if decision.verdict == "HALT"
@@ -980,14 +990,9 @@ Book Plan 是整本书的长期战略，只写长期有效的内容：
                 print(f"  T1 硬错误:")
                 for issue in decision.t1_issues[:5]:
                     print(f"    - {issue}")
-            # Same as NEEDS_REVISION: no memory commit, no RAG
-            # Fact digest still saved (informational)
-            try:
-                self.state_manager.extract_fact_digest_from_analysis(
-                    analysis["raw_analysis"], chapter_index)
-            except Exception:
-                pass
-            print(f"  [Supervisor] 未提交 Structured Memory / RAG。"
+            # E06.1: No Structured Memory, no Fact Digest, no RAG.
+            # raw_analysis 保存在 states/review_ch* 作为诊断记录。
+            print(f"  [Supervisor] 未提交 Structured Memory / Fact Digest / RAG。"
                   f"需要人工介入决定后续策略。")
             return {"decision": decision.verdict,
                     "reasons": decision.reasons,

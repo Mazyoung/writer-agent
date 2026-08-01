@@ -881,6 +881,66 @@ class FactDigest:
         return "\n".join(lines)
 
 
+# ── CharacterState (E06.1) ───────────────────────────────────
+
+@dataclass
+class CharacterStateEntry:
+    """E06.1: Single character current state record — minimal fields."""
+    name: str = ""
+    alive_status: str = ""       # 存活/死亡/失踪/未知
+    location: str = ""           # 当前位置
+    physical_state: str = ""     # 身体状态（健康/受伤/重伤/...）
+    identity_status: str = ""    # 关键身份/状态变化
+    updated_chapter: str = ""    # 最后更新章节
+
+
+@dataclass
+class CharacterStateList:
+    """E06.1: Authoritative character current state tracking.
+
+    tracking/character_states.md — 只存储 Current State。
+    """
+
+    entries: list[CharacterStateEntry] = field(default_factory=list)
+
+    @classmethod
+    def from_markdown(cls, text: str) -> "CharacterStateList":
+        csl = cls()
+        body = _extract_section(text, "## 角色当前状态")
+        for line in body.strip().split("\n"):
+            stripped = line.strip()
+            if not stripped.startswith("|") or "---" in stripped:
+                continue
+            # Skip header row
+            if "角色" in stripped and "存活" in stripped and "位置" in stripped:
+                continue
+            cols = [c.strip() for c in stripped.split("|")]
+            # Expected: | 角色 | 存活 | 位置 | 身体状态 | 身份 | 更新章 |
+            if len(cols) >= 6:
+                csl.entries.append(CharacterStateEntry(
+                    name=cols[1] if len(cols) > 1 else "",
+                    alive_status=cols[2] if len(cols) > 2 else "",
+                    location=cols[3] if len(cols) > 3 else "",
+                    physical_state=cols[4] if len(cols) > 4 else "",
+                    identity_status=cols[5] if len(cols) > 5 else "",
+                    updated_chapter=cols[6] if len(cols) > 6 else "",
+                ))
+        return csl
+
+    def to_markdown(self) -> str:
+        lines = ["# 角色当前状态", ""]
+        lines.append("## 角色当前状态")
+        lines.append("| 角色 | 存活 | 位置 | 身体状态 | 身份 | 更新章 |")
+        lines.append("|------|------|------|---------|------|--------|")
+        for e in self.entries:
+            lines.append(
+                f"| {e.name} | {e.alive_status} | {e.location} "
+                f"| {e.physical_state} | {e.identity_status} "
+                f"| {e.updated_chapter} |")
+        lines.append("")
+        return "\n".join(lines)
+
+
 # ── ReviewDecision (E06) ────────────────────────────────────
 
 from enum import Enum
@@ -917,13 +977,17 @@ class ReviewDecision:
 
     @classmethod
     def from_analysis(cls, text: str) -> "ReviewDecision":
-        """Deterministic parser — no LLM. Extracts decision from raw_analysis.
+        """E06.1: Deterministic parser — no LLM. True fail-closed.
 
-        Parses:
-        - '## 审阅决策' section (new E06 format)
-        - Falls back to '## 一致性检查' + '## 质量审阅' for verdict inference
+        Rules:
+        1. Missing/invalid 「## 审阅决策」section → UNKNOWN (never infer PASS)
+        2. Safety override: explicit PASS but T1 errors → NEEDS_REVISION
+        3. Safety override: explicit PASS but MAJOR quality → NEEDS_REVISION
+        4. Truly empty/unparseable → UNKNOWN
 
-        Fail-closed: truly empty or unparseable text → UNKNOWN.
+        This is the E06.1 fail-closed contract:
+        - The LLM MUST produce an explicit, valid decision section.
+        - The system never auto-PASSes when the section is missing.
         """
         rd = cls()
 
@@ -931,31 +995,7 @@ class ReviewDecision:
         if not text or not text.strip():
             return rd
 
-        # Try E06 explicit decision section first
-        decision_section = _extract_section(text, "## 审阅决策")
-        if decision_section:
-            kv = _parse_key_value(decision_section)
-            raw = kv.get("决策", kv.get("审阅决策", "")).strip().upper()
-            if raw in ("PASS", "通过"):
-                rd.verdict = "PASS"
-            elif raw in ("NEEDS_REVISION", "需修改", "需重写"):
-                rd.verdict = "NEEDS_REVISION"
-            elif raw in ("HALT", "暂停", "需要人工"):
-                rd.verdict = "HALT"
-            rd.severity = kv.get("严重性", kv.get("严重程度", "PASS")).strip().upper()
-            if rd.severity in ("MAJOR", "重大"):
-                rd.severity = "MAJOR"
-            elif rd.severity in ("MINOR", "轻微"):
-                rd.severity = "MINOR"
-            else:
-                rd.severity = "PASS"
-            reasons_str = kv.get("主要问题", kv.get("原因", ""))
-            if reasons_str:
-                rd.reasons = [r.strip() for r in reasons_str.split(";") if r.strip()]
-            planning_str = kv.get("规划级别", "L1").strip()
-            rd.planning_level = planning_str if planning_str in ("L1", "L2", "L3") else "L1"
-
-        # Parse T1/T2/T3 from consistency section
+        # Parse T1/T2/T3 from consistency section (needed BEFORE decision eval)
         cons = _extract_section(text, "## 一致性检查")
         if cons:
             t1 = (_extract_section(cons, "### T1（硬错误）")
@@ -996,28 +1036,59 @@ class ReviewDecision:
                 stripped = line.strip()
                 if stripped.startswith("- "):
                     rd.quality_issues.append(stripped[2:].strip())
-            # Extract severity from quality ratings
             q_lower = quality.lower()
-            if "major" in q_lower and rd.severity == "PASS":
+            if "major" in q_lower:
                 rd.severity = "MAJOR"
-            elif "minor" in q_lower and rd.severity == "PASS":
+            elif "minor" in q_lower:
                 rd.severity = "MINOR"
 
-        # Infer verdict from issues if no explicit decision
-        if rd.verdict == "UNKNOWN" and not decision_section:
-            # Fail-closed: if no recognizable structure at all → UNKNOWN
-            has_structure = (
-                _extract_section(text, "## 一致性检查") or
-                _extract_section(text, "## 质量审阅") or
-                _extract_section(text, "## 事实摘要"))
-            if not has_structure:
-                return rd  # truly unparseable → UNKNOWN
-            if rd.t1_issues:
-                rd.verdict = "NEEDS_REVISION"
-            elif rd.severity == "MAJOR":
-                rd.verdict = "NEEDS_REVISION"
-            else:
-                rd.verdict = "PASS"
+        # ── E06.1 Fail-Closed Decision Parsing ──
+
+        decision_section = _extract_section(text, "## 审阅决策")
+
+        if not decision_section:
+            # No explicit decision section → UNKNOWN (fail-closed)
+            # Even if consistency check looks clean, we never auto-PASS
+            return rd
+
+        kv = _parse_key_value(decision_section)
+        raw = kv.get("决策", kv.get("审阅决策", "")).strip().upper()
+
+        # Map explicit value
+        if raw in ("PASS", "通过"):
+            rd.verdict = "PASS"
+        elif raw in ("NEEDS_REVISION", "需修改", "需重写"):
+            rd.verdict = "NEEDS_REVISION"
+        elif raw in ("HALT", "暂停", "需要人工"):
+            rd.verdict = "HALT"
+        else:
+            # Decision section exists but value is invalid/empty → UNKNOWN
+            return rd
+
+        # Parse severity from decision section
+        decision_sev = kv.get("严重性", kv.get("严重程度", "")).strip().upper()
+        if decision_sev in ("MAJOR", "重大"):
+            rd.severity = "MAJOR"
+        elif decision_sev in ("MINOR", "轻微"):
+            if rd.severity == "PASS":
+                rd.severity = "MINOR"
+
+        # Parse reasons from decision section
+        reasons_str = kv.get("主要问题", kv.get("原因", ""))
+        if reasons_str:
+            rd.reasons = [r.strip() for r in reasons_str.split(";") if r.strip()]
+
+        # Parse planning level
+        planning_str = kv.get("规划级别", "L1").strip()
+        rd.planning_level = planning_str if planning_str in ("L1", "L2", "L3") else "L1"
+
+        # ── E06.1 Safety Override ──
+        # If LLM claims PASS but T1 hard errors exist → promote
+        if rd.verdict == "PASS" and rd.t1_issues:
+            rd.verdict = "NEEDS_REVISION"
+        # If LLM claims PASS but quality is MAJOR → promote
+        if rd.verdict == "PASS" and rd.severity == "MAJOR":
+            rd.verdict = "NEEDS_REVISION"
 
         return rd
 

@@ -532,6 +532,11 @@ class TestIndexFailureWithoutRollback(_TmpNovelCase):
 通过
 ## 质量审阅
 通过
+## 审阅决策
+- **决策**: PASS
+- **严重性**: PASS
+- **主要问题**: 无
+- **规划级别**: L1
 """
         with mock.patch.object(BaseAgent, "_call_llm",
                                lambda self, messages: MOCK_ANALYSIS):

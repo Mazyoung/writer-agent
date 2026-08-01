@@ -75,6 +75,7 @@ class ChapterPlanner(BaseAgent):
         rels = self.fs.load_tracking_doc("character_relationships") or ""
         items = self.fs.load_tracking_doc("items_equipment") or ""
         cult = self.fs.load_tracking_doc("cultivation_system") or ""
+        char_states = self.fs.load_tracking_doc("character_states") or ""
 
         # 构建 prompt —— 按优先级从高到低排列
         parts = []
@@ -107,6 +108,8 @@ class ChapterPlanner(BaseAgent):
             parts.append(f"### items_equipment.md\n{items[:2000]}")
         if cult:
             parts.append(f"### cultivation_system.md\n{cult[:1500]}")
+        if char_states:
+            parts.append(f"### character_states.md (Authoritative Current State)\n{char_states[:1500]}")
         if fact_context:
             parts.append(f"### 前章事实摘要（已发生的实际事实，优先于未来计划）\n{fact_context[:2500]}")
 
