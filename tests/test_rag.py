@@ -614,5 +614,226 @@ class TestLazyOrchestratorChroma(_TmpNovelCase):
                              "访问 .chroma property 时必须创建 ChromaStore")
 
 
+# ═══════════════════════════════════════════════════════════════
+# E04.1 Closure / Audit Fix Tests
+# ═══════════════════════════════════════════════════════════════
+
+# Volume Plan data with **bold markers** (canonical format from VolumePlan.to_markdown)
+VOLUME_PLAN_CANONICAL = """# 第1卷规划：《废墟求生》
+- **版本**: v1
+- **状态**: ACTIVE
+- **章节范围**: 第1章-第5章
+## 卷概述
+- **核心冲突**: 生存
+## 事件链
+### 事件1：配电间求生
+- **触发条件**: 部落遇袭
+- **核心内容**: 柯林独自生存
+- **涉及角色**: 柯林
+- **情感基调**: 压抑
+- **结果与影响**: 获得初始装备
+- **衔接**: 往东
+- **对应章节**: 第1章
+### 事件2：交易站
+- **触发条件**: 需要补给
+- **核心内容**: 柯林遇到瘸子莫
+- **涉及角色**: 柯林、瘸子莫
+- **情感基调**: 试探
+- **结果与影响**: 获得情报
+- **衔接**: 获得地图
+- **对应章节**: 第2章
+### 事件3：RAG_VOLUME_EVENT_TEST_7319 出发前往地下入口
+- **触发条件**: 获得地图
+- **核心内容**: 柯林按地图标记出发
+- **涉及角色**: 柯林
+- **情感基调**: 期待中带着不安
+- **结果与影响**: 抵达地下入口
+- **衔接**: 进入地下
+- **对应章节**: 第3章
+## 节奏约束
+"""
+
+
+class TestIndexChapterToRagRawFallbackRejected(_TmpNovelCase):
+    """E04.1 Fix 1: _index_chapter_to_rag MUST NOT index raw/draft chapters."""
+
+    def test_only_raw_chapter_no_styled_returns_zero(self):
+        from src.core.orchestrator import Orchestrator
+
+        root = self.tmp / "novels" / "raw_reject_novel"
+        (root / "chapters").mkdir(parents=True)
+
+        # Only a raw/draft chapter — no _styled file
+        (root / "chapters" / "chapter_0001_draft_20260801_120000.md").write_text(
+            "草稿内容。" * 200, encoding="utf-8")
+
+        orch = Orchestrator("raw_reject_novel")
+        count = orch._index_chapter_to_rag(1)
+        self.assertEqual(count, 0,
+                         "仅有 raw/draft 章节时 chunk count 必须为 0，不得 fallback")
+
+    def test_styled_chapter_present_is_indexed(self):
+        from src.core.orchestrator import Orchestrator
+
+        root = self.tmp / "novels" / "styled_ok_novel"
+        (root / "chapters").mkdir(parents=True)
+
+        (root / "chapters" / "chapter_0002_styled_20260801_120000.md").write_text(
+            "正式章节内容。" * 200, encoding="utf-8")
+
+        orch = Orchestrator("styled_ok_novel")
+        count = orch._index_chapter_to_rag(2)
+        self.assertGreater(count, 0,
+                           "有 styled 文件时必须成功索引")
+
+    def test_source_path_matches_actual_styled_file(self):
+        """source_path must reflect the actual _styled file name, not a synthetic prefix."""
+        from src.core.orchestrator import Orchestrator
+
+        root = self.tmp / "novels" / "srcpath_novel"
+        (root / "chapters").mkdir(parents=True)
+
+        (root / "chapters" / "chapter_0003_styled_20260801_120000.md").write_text(
+            "正式章节。" * 200, encoding="utf-8")
+
+        # Patch chroma.index_chapter to capture source_path
+        captured_source_path = {}
+
+        from src.storage.chroma_store import ChromaStore
+        orig_index = ChromaStore.index_chapter
+
+        def capture_index(self, novel_id, branch_id, chapter_index,
+                          content, source_path="", **kwargs):
+            captured_source_path["path"] = source_path
+            return orig_index(self, novel_id, branch_id, chapter_index,
+                            content, source_path=source_path, **kwargs)
+
+        with mock.patch.object(ChromaStore, "index_chapter", capture_index):
+            orch = Orchestrator("srcpath_novel")
+            orch._index_chapter_to_rag(3)
+
+        self.assertIn("_styled_", captured_source_path.get("path", ""),
+                      "source_path 必须包含 _styled_ 文件名")
+        self.assertIn("chapter_0003", captured_source_path.get("path", ""),
+                      "source_path 必须包含正确的章节号")
+
+
+class TestVolumeEventInRetrievalQuery(_TmpNovelCase):
+    """E04.1 Fix 2: Canonical Volume Event text enters the retrieval query."""
+
+    def test_volume_event_unique_string_in_query(self):
+        """写入 canonical volume_plan.md 含唯一标识字符串，
+        验证 _build_retrieval_query 产出必须包含该字符串。"""
+        from src.core.orchestrator import Orchestrator
+
+        root = self.tmp / "novels" / "volevt_novel"
+        (root / "tracking").mkdir(parents=True)
+        (root / "tracking" / "volume_plan.md").write_text(
+            VOLUME_PLAN_CANONICAL, encoding="utf-8")
+
+        orch = Orchestrator("volevt_novel")
+        query = orch._build_retrieval_query(chapter_index=3)
+        self.assertIn("RAG_VOLUME_EVENT_TEST_7319", query,
+                      "Canonical Volume Event 文本必须进入 retrieval query")
+
+
+class TestQueryBuilderExceptionGeneratesFailedTrace(_TmpNovelCase):
+    """E04.1 Fix 3: _build_retrieval_query exception must produce a failed
+    RetrievalTrace (not silent degradation without trace)."""
+
+    def test_query_builder_exception_produces_failed_trace(self):
+        from src.core.orchestrator import Orchestrator
+
+        root = self.tmp / "novels" / "qbfail_novel"
+        root.mkdir(parents=True)
+
+        orch = Orchestrator("qbfail_novel")
+        # Make _build_retrieval_query throw
+        with mock.patch.object(
+            orch, "_build_retrieval_query",
+            side_effect=RuntimeError("volume plan parsing error")
+        ):
+            evidence, trace = orch._retrieve_evidence(chapter_index=5)
+
+        self.assertEqual(evidence, "",
+                         "异常时 evidence 必须为空字符串")
+        self.assertIsNotNone(trace, "即使 query build 异常也必须生成 trace")
+        self.assertFalse(trace.success,
+                         "trace.success 必须为 False")
+        self.assertIn("RuntimeError", trace.error_message,
+                      "trace 必须包含异常类型")
+        self.assertEqual(trace.chapter_index, 5)
+        self.assertEqual(trace.branch_id, "main")
+        self.assertEqual(trace.top_k, self.settings.rag_top_k)
+        # Filters must still be populated even on failure
+        self.assertIn("novel_id", trace.filters)
+        self.assertIn("chapter_index <", trace.filters)
+
+
+class TestRagSettingsControl(_TmpNovelCase):
+    """E04.1 Fix 4: Settings.rag_chunk_size/rag_chunk_overlap/rag_top_k
+    actually control index/search behavior (not just module-level defaults)."""
+
+    def test_settings_override_chunk_size(self):
+        from src.core.orchestrator import Orchestrator
+        from src.storage.chroma_store import ChromaStore
+        from src.config.settings import Settings
+
+        root = self.tmp / "novels" / "settings_novel"
+        (root / "chapters").mkdir(parents=True)
+        (root / "chapters" / "chapter_0001_styled_20260801_120000.md").write_text(
+            "章节内容。" * 500, encoding="utf-8")
+
+        # Create a fresh Settings with non-default values
+        orch = Orchestrator("settings_novel")
+        orch.settings.rag_chunk_size = 400
+        orch.settings.rag_chunk_overlap = 60
+
+        captured_kwargs = {}
+
+        orig_index = ChromaStore.index_chapter
+        def capture_kwargs(self, *args, **kwargs):
+            captured_kwargs.update(kwargs)
+            return orig_index(self, *args, **kwargs)
+
+        with mock.patch.object(ChromaStore, "index_chapter", capture_kwargs):
+            orch._index_chapter_to_rag(1)
+
+        # Index call should use the overridden settings values
+        self.assertEqual(captured_kwargs.get("chunk_size"), 400,
+                         "index_chapter 必须使用 settings.rag_chunk_size")
+        self.assertEqual(captured_kwargs.get("chunk_overlap"), 60,
+                         "index_chapter 必须使用 settings.rag_chunk_overlap")
+
+    def test_settings_override_top_k(self):
+        from src.core.orchestrator import Orchestrator
+        from src.storage.chroma_store import ChromaStore
+
+        root = self.tmp / "novels" / "topk_novel"
+        (root / "chapters").mkdir(parents=True)
+        (root / "chapters" / "chapter_0001_styled_20260801_120000.md").write_text(
+            "章节内容。" * 200, encoding="utf-8")
+        (root / "tracking").mkdir(parents=True)
+        (root / "tracking" / "volume_plan.md").write_text(
+            VOLUME_PLAN_CANONICAL, encoding="utf-8")
+
+        orch = Orchestrator("topk_novel")
+        orch.settings.rag_top_k = 3
+
+        captured_top_k = {}
+
+        orig_search = ChromaStore.search
+        def capture_top_k(self, *args, **kwargs):
+            captured_top_k["top_k"] = kwargs.get("top_k")
+            return orig_search(self, *args, **kwargs)
+
+        with mock.patch.object(ChromaStore, "search", capture_top_k):
+            orch._index_chapter_to_rag(1)
+            orch._retrieve_evidence(chapter_index=3)
+
+        self.assertEqual(captured_top_k.get("top_k"), 3,
+                         "search 必须使用 settings.rag_top_k")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -305,8 +305,8 @@ class ChapterPlanner(BaseAgent):
         """从卷规划中提取本章对应的事件概要。"""
         if not volume_plan:
             return ""
-        # 查找"对应章节: 第N章"的事件
-        pattern = rf'(### 事件\d+[：:].*?\n.*?对应章节[：:]\s*第{chapter_index}章.*?)(?=### 事件|\Z)'
+        # 查找"对应章节: 第N章"的事件（容忍 ** 加粗标记）
+        pattern = rf'(### 事件\d+[：:].*?\n.*?对应章节\**\s*[：:]\s*第{chapter_index}章.*?)(?=### 事件|\Z)'
         m = re.search(pattern, volume_plan, re.DOTALL)
         if m:
             return m.group(1)[:1500]

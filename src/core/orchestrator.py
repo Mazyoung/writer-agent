@@ -66,25 +66,32 @@ class Orchestrator:
     def _index_chapter_to_rag(self, chapter_index: int) -> int:
         """Index a finalized/styled chapter into the RAG vector store.
 
+        ONLY styled chapters are indexed (E04 P0 #2 corpus constraint).
+        No fallback to raw/draft chapters — missing styled → [RAG WARNING] + skip.
+
         Chapter text is the Source of Truth; Chroma is Derived State.
         Indexing failure MUST NOT rollback chapter state (E04 P0 #12).
         Caller (review_chapter) has already committed all canonical state.
         """
-        from src.storage.chroma_store import (
-            DEFAULT_CHUNK_SIZE, DEFAULT_CHUNK_OVERLAP, DEFAULT_BRANCH_ID,
-        )
+        from src.storage.chroma_store import DEFAULT_BRANCH_ID
 
-        # Load finalized chapter text
-        chapter_text = self.file_store.load_latest(
-            "chapters", f"chapter_{chapter_index:04d}_styled")
+        styled_prefix = f"chapter_{chapter_index:04d}_styled"
+        chapter_text = self.file_store.load_latest("chapters", styled_prefix)
+
         if not chapter_text:
-            chapter_text = self.file_store.load_latest(
-                "chapters", f"chapter_{chapter_index:04d}")
-        if not chapter_text:
-            print(f"  [RAG WARNING] 第{chapter_index}章正文不存在，跳过索引")
+            print(f"  [RAG WARNING] 第{chapter_index}章 styled 文件不存在，"
+                  f"跳过索引（不 fallback 到 raw/draft）")
             return 0
 
-        source_path = f"chapters/chapter_{chapter_index:04d}_styled"
+        # source_path must match the actual file that was loaded
+        styled_files = sorted(
+            (self.file_store.root / "chapters").glob(f"{styled_prefix}_*.md"),
+            reverse=True)
+        if styled_files:
+            source_path = f"chapters/{styled_files[0].name}"
+        else:
+            source_path = f"chapters/{styled_prefix}"
+
         branch_id = DEFAULT_BRANCH_ID
 
         try:
@@ -94,8 +101,8 @@ class Orchestrator:
                 chapter_index=chapter_index,
                 content=chapter_text,
                 source_path=source_path,
-                chunk_size=DEFAULT_CHUNK_SIZE,
-                chunk_overlap=DEFAULT_CHUNK_OVERLAP,
+                chunk_size=self.settings.rag_chunk_size,
+                chunk_overlap=self.settings.rag_chunk_overlap,
             )
             print(f"  [RAG] 第{chapter_index}章已索引: {count} chunks")
             return count
@@ -112,19 +119,20 @@ class Orchestrator:
 
         No LLM call — uses chapter outline, volume events, character/item names,
         and author instructions (E04 spec: deterministic query, no Query Rewrite).
+
+        Volume event extraction reuses ChapterPlanner._extract_chapter_from_volume
+        (E04.1: single canonical parser — no second regex copy in Orchestrator).
         """
         import re
         parts: list[str] = []
 
-        # Volume events for this chapter
+        # Volume events for this chapter — reuse ChapterPlanner parser
         vp_text = self.file_store.load_tracking_doc("volume_plan") or ""
         if vp_text:
-            # Extract events matching this chapter
-            pattern = (rf'### 事件\d+[：:].*?\n.*?对应章节[：:]\s*第{chapter_index}章'
-                       r'.*?(?=### 事件|\Z)')
-            m = re.search(pattern, vp_text, re.DOTALL)
-            if m:
-                parts.append(m.group(1)[:1000])
+            vol_context = self.chapter_planner._extract_chapter_from_volume(
+                vp_text, chapter_index)
+            if vol_context:
+                parts.append(vol_context[:1000])
 
         # Chapter outline
         if chapter_outline:
@@ -169,19 +177,19 @@ class Orchestrator:
                            extra_instructions: str = "") -> tuple[str, "RetrievalTrace"]:
         """Run RAG retrieval and return (formatted evidence text, trace).
 
-        Graceful degradation (E04 P0 #11): on any error, returns ("", failed trace)
-        and prints [RAG WARNING] — never crashes ChapterPlanner.
+        Graceful degradation (E04 P0 #11): any error (query build or Chroma search)
+        produces a failed trace + [RAG WARNING] — never crashes ChapterPlanner.
+
+        E04.1: trace is created before query build so that query-builder
+        exceptions also produce a failed trace (not silent degradation).
         """
         from src.storage.chroma_store import (
-            RetrievalTrace, DEFAULT_TOP_K, DEFAULT_BRANCH_ID,
+            RetrievalTrace, DEFAULT_BRANCH_ID,
         )
-        import json
         from datetime import datetime
 
         branch_id = DEFAULT_BRANCH_ID
-        query = self._build_retrieval_query(chapter_index, chapter_outline,
-                                            extra_instructions)
-        top_k = DEFAULT_TOP_K
+        top_k = self.settings.rag_top_k
         filters = {
             "novel_id": self.novel_id,
             "branch_id": branch_id,
@@ -189,16 +197,22 @@ class Orchestrator:
             "source_type": "chapter",
         }
 
+        # Create trace BEFORE query build — failures in either step
+        # must produce a failed RetrievalTrace (E04.1 Fix 3)
         trace = RetrievalTrace(
             chapter_index=chapter_index,
             branch_id=branch_id,
-            query=query,
+            query="",       # populated below; empty on query-builder failure
             top_k=top_k,
             filters=filters,
             timestamp=datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
         )
 
         try:
+            query = self._build_retrieval_query(chapter_index, chapter_outline,
+                                                extra_instructions)
+            trace.query = query
+
             results = self.chroma.search(
                 novel_id=self.novel_id,
                 branch_id=branch_id,
@@ -208,8 +222,8 @@ class Orchestrator:
             )
         except Exception as e:
             trace.success = False
-            trace.error_message = str(e)
-            print(f"  [RAG WARNING] 检索失败: {e}")
+            trace.error_message = f"{type(e).__name__}: {e}"
+            print(f"  [RAG WARNING] 检索/查询构建失败: {e}")
             return "", trace
 
         trace.results = results
@@ -259,9 +273,7 @@ class Orchestrator:
             dict with keys: indexed_chapters, total_chunks, errors.
         """
         import re
-        from src.storage.chroma_store import (
-            DEFAULT_BRANCH_ID, DEFAULT_CHUNK_SIZE, DEFAULT_CHUNK_OVERLAP,
-        )
+        from src.storage.chroma_store import DEFAULT_BRANCH_ID
 
         branch_id = DEFAULT_BRANCH_ID
         print(f"\n{'='*60}")
@@ -304,8 +316,8 @@ class Orchestrator:
                     chapter_index=ci,
                     content=content,
                     source_path=source_path,
-                    chunk_size=DEFAULT_CHUNK_SIZE,
-                    chunk_overlap=DEFAULT_CHUNK_OVERLAP,
+                    chunk_size=self.settings.rag_chunk_size,
+                    chunk_overlap=self.settings.rag_chunk_overlap,
                 )
                 stats["indexed_chapters"] += 1
                 stats["total_chunks"] += count

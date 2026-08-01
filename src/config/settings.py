@@ -46,6 +46,11 @@ class Settings:
         self.data_dir = self.project_root / "data"
         self.prompts_dir = Path(__file__).parent / "prompts"
 
+        # ── E04 RAG 配置 ──────────────────────────────────
+        self.rag_chunk_size: int = 800
+        self.rag_chunk_overlap: int = 100
+        self.rag_top_k: int = 5
+
         # 模型名称映射
         self.model_names = {
             "pro": "deepseek-v4-pro",
