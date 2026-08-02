@@ -236,6 +236,16 @@ class StateManager(BaseAgent):
             return changes
 
         # ── Phase 5: SQLite cache (separate from canonical, errors logged) ──
+        # E06.2.1 final: SQLite ONLY after canonical Markdown success.
+        # Foreshadowing moved here from _commit_all_tracking_docs Phase 4d.
+        foreshadows = state_result.get("foreshadows", [])
+        for desc, new_status, resolve_ch in foreshadows:
+            try:
+                self.sqlite.upsert_foreshadow(
+                    self.novel_id, desc, new_status, resolve_ch)
+            except Exception as e:
+                print(f"  [STATE WARNING] SQLite 伏笔缓存失败 "
+                      f"'{desc}': {type(e).__name__}: {e}")
         try:
             self._sync_sqlite(chapter_index, chapter_text, analysis_text)
         except Exception as e:
@@ -631,16 +641,6 @@ class StateManager(BaseAgent):
                         result.warnings.append(
                             f"rollback {rolled} 失败（状态可能不一致）: {re}")
                 break  # stop trying to write more
-
-        # ── Phase 4d: Foreshadowing SQLite (separate cache, errors logged) ──
-        foreshadows = state_result.get("foreshadows", [])
-        for desc, new_status, resolve_ch in foreshadows:
-            try:
-                self.sqlite.upsert_foreshadow(
-                    self.novel_id, desc, new_status, resolve_ch)
-            except Exception as e:
-                result.warnings.append(
-                    f"foreshadow SQLite '{desc}': {type(e).__name__}: {e}")
 
         if commit_errors:
             result.error_message = "; ".join(commit_errors)

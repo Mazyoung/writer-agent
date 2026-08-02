@@ -2307,5 +2307,56 @@ class TestVolumePlanCommitFailure(_TmpNovelCase):
                       "提交失败后不得切换到新卷")
 
 
+# ═══════════════════════════════════════════════════════════════
+# E06.2.1 Final — Missing _commit_result fail-closed
+# ═══════════════════════════════════════════════════════════════
+
+class TestMissingCommitResultFailClosed(_TmpNovelCase):
+    """E06.2.1 final: _commit_result missing → workflow ERROR → no downstream."""
+
+    def test_missing_commit_result_blocks_downstream(self):
+        """update_tracking_docs 返回的 changes 无 _commit_result → ERROR。"""
+        root = self._setup_review_dirs("mcr_novel")
+        (root / "chapters" / "chapter_0001_styled_20260801_120000.md").write_text(
+            "第1章正文内容。" * 200, encoding="utf-8")
+        (root / "outlines" / "chapter_plan_ch0001.md").write_text(
+            SAMPLE_PLAN_MD, encoding="utf-8")
+
+        from src.core.orchestrator import Orchestrator
+        from src.storage.chroma_store import ChromaStore
+        from src.agents.state_manager.state_manager import StateManager
+
+        orch = Orchestrator("mcr_novel")
+        rag_calls = []
+
+        # Patch update_tracking_docs to return a dict WITHOUT _commit_result
+        def no_commit_result(chapter_index, chapter_text, analysis_text):
+            return {"updated_rels": True, "change_log": "fake"}
+
+        orch.state_manager.update_tracking_docs = no_commit_result
+
+        def fake_llm(self, messages):
+            return MOCK_RAW_ANALYSIS_PASS
+
+        with mock.patch.object(BaseAgent, "_call_llm", fake_llm), \
+             mock.patch.object(ChromaStore, "index_chapter",
+                               side_effect=lambda *a, **kw: rag_calls.append(1)):
+            result = orch.review_chapter(1)
+
+        # ── Assert: missing _commit_result → ERROR ──
+        self.assertEqual(result.get("workflow_status"), "ERROR",
+                         "missing _commit_result → workflow_status 必须为 ERROR")
+        self.assertEqual(result.get("commit_status"), "FAILED",
+                         "missing _commit_result → commit_status 必须为 FAILED")
+
+        # ── Assert: no downstream ──
+        self.assertEqual(len(rag_calls), 0,
+                         "missing _commit_result → 不得执行 RAG index")
+
+        fact_files = list((root / "states").glob("fact_digest_ch0001_*.md"))
+        self.assertEqual(len(fact_files), 0,
+                         "missing _commit_result → 不得生成 fact_digest")
+
+
 if __name__ == "__main__":
     unittest.main()

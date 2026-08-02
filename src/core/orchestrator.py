@@ -965,10 +965,20 @@ Book Plan 是整本书的长期战略，只写长期有效的内容：
                 chapter_index, chapter_text, analysis["raw_analysis"])
 
             # ── E06.2: Check commit result before proceeding ──
+            # E06.2.1 final: missing _commit_result → fail-closed.
+            # Only _commit_result present AND success==True allows downstream.
             commit_result = changes.get("_commit_result")
-            if commit_result and not commit_result.success:
+            if not commit_result or not commit_result.success:
                 # Review semantic PASS but canonical state commit FAILED
                 # → ERROR / HALT — stop downstream canonical commit
+                if commit_result is None:
+                    print(f"\n  [ERROR] Review semantic PASS but "
+                          f"_commit_result missing from update_tracking_docs")
+                    print(f"  [ERROR] 未提交 Fact Digest / RAG。workflow halted。")
+                    return {"decision": "PASS",
+                            "commit_status": "FAILED",
+                            "workflow_status": "ERROR",
+                            "error": "_commit_result missing from changes dict"}
                 print(f"\n  [ERROR] Review semantic PASS but canonical state commit FAILED")
                 print(f"  [ERROR] 原因: {commit_result.error_message}")
                 for w in commit_result.warnings:
