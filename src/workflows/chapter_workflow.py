@@ -6,7 +6,7 @@ Side-by-side with existing production runtime.
 
 from __future__ import annotations
 
-from typing import TypedDict
+from typing import TypedDict, Any
 
 from langgraph.graph import StateGraph, START, END
 
@@ -27,78 +27,40 @@ class ChapterWorkflowState(TypedDict, total=False):
 
     # ── Workflow status ──
     workflow_status: str       # "running" | "completed" | "error"
-
-    # ── Error ──
-    error: str
-
-    # ── Planning output ──
-    rag_evidence: str
-    chapter_plan: str          # serialised Markdown
-
-    # ── Writing output ──
-    draft_text: str
-    styled_text: str
-
-    # ── Review output ──
-    raw_analysis: str
-    review_decision: str       # "PASS" | "NEEDS_REVISION" | "HALT" | "UNKNOWN"
-    state_commit_result: dict  # StateCommitResult as dict (success, error_message, ...)
+    error: str | None
 
 
-# ── No-op Nodes (E07.1: skeleton only) ─────────────────────
+# ── E07.1 Node: initialize_workflow ───────────────────────
 
-def _noop_node(state: ChapterWorkflowState, *, node_name: str = "") -> ChapterWorkflowState:
-    """No-op pass-through. Each node just updates workflow_status."""
-    state["workflow_status"] = f"{node_name}:ok"
-    return state
+def initialize_workflow(state: ChapterWorkflowState) -> dict[str, Any]:
+    """E07.1 skeleton entry point.
 
-
-def _retrieve_history_node(state: ChapterWorkflowState) -> ChapterWorkflowState:
-    return _noop_node(state, node_name="retrieve_history")
-
-
-def _plan_chapter_node(state: ChapterWorkflowState) -> ChapterWorkflowState:
-    return _noop_node(state, node_name="plan_chapter")
-
-
-def _write_draft_node(state: ChapterWorkflowState) -> ChapterWorkflowState:
-    return _noop_node(state, node_name="write_draft")
-
-
-def _style_edit_node(state: ChapterWorkflowState) -> ChapterWorkflowState:
-    return _noop_node(state, node_name="style_edit")
-
-
-def _review_chapter_node(state: ChapterWorkflowState) -> ChapterWorkflowState:
-    return _noop_node(state, node_name="review_chapter")
+    Returns a partial state update — does NOT mutate the input state.
+    Existing fields (novel_id, branch_id, chapter_index) are preserved
+    by LangGraph's state merge.
+    """
+    return {
+        "workflow_status": "SKELETON_READY",
+        "error": None,
+    }
 
 
 # ── Builder ────────────────────────────────────────────────
 
-def build_chapter_workflow() -> StateGraph:
+def build_chapter_workflow() -> Any:
     """Build and compile the Chapter Workflow StateGraph skeleton.
 
-    E07.1: Linear happy-path topology only.
+    E07.1: Single-node skeleton. No business logic wired yet.
     No conditional routing. No checkpoint. No side effects.
 
     Returns:
-        Compiled StateGraph ready for invoke().
+        Compiled graph (CompiledStateGraph) ready for invoke().
     """
     graph = StateGraph(ChapterWorkflowState)
 
-    # ── Register nodes ──
-    graph.add_node("retrieve_history", _retrieve_history_node)
-    graph.add_node("plan_chapter", _plan_chapter_node)
-    graph.add_node("write_draft", _write_draft_node)
-    graph.add_node("style_edit", _style_edit_node)
-    graph.add_node("review_chapter", _review_chapter_node)
+    graph.add_node("initialize_workflow", initialize_workflow)
 
-    # ── Linear topology ──
-    graph.add_edge(START, "retrieve_history")
-    graph.add_edge("retrieve_history", "plan_chapter")
-    graph.add_edge("plan_chapter", "write_draft")
-    graph.add_edge("write_draft", "style_edit")
-    graph.add_edge("style_edit", "review_chapter")
-    graph.add_edge("review_chapter", END)
+    graph.add_edge(START, "initialize_workflow")
+    graph.add_edge("initialize_workflow", END)
 
     return graph.compile()

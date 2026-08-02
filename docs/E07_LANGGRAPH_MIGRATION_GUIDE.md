@@ -133,7 +133,7 @@ L3: HALT PIPELINE，Human-Agent 协同修复
 | `plan_chapter` | ChapterPlanner.plan_chapter() [1 LLM] | 1 plan .md | Plan | timestamp→`load_latest()` 取最新 |
 | `write_draft` | DeepSeekWriter.write_chapter() [1 LLM] | 1 draft .md | Working | timestamp→`load_latest()` 取最新 |
 | `style_edit` | ClaudeStylist.edit_chapter() [1 LLM] | —（仅返回 str） | — | 纯函数化 |
-| `save_styled` | StyleChecker.check_all() [0 LLM] | 1 styled .md | Story | ❌ timestamp write — E07.4 前处理 |
+| `save_styled` | StyleChecker.check_all() [0 LLM] | 1 styled .md | Story | ❌ timestamp write，非严格幂等。在 E07.4 checkpoint/replay 前必须重新审计和处理其 replay/idempotency 语义 |
 | `review_chapter` | StateManager.review_chapter() [1 LLM] | 1 analysis .md | Workflow | 拆分 LLM 与 save |
 | `parse_decision` | ReviewDecision.from_analysis() [0 LLM] | — | — | ✅ 天然幂等 |
 | `parse_state_delta` | _parse_state_deltas() [0 LLM] | — | — | ✅ 天然幂等 |
@@ -218,12 +218,13 @@ L3: HALT PIPELINE，Human-Agent 协同修复
 ## 6. Implementation Rules（每轮必须遵守）
 
 1. 执行前读取 `docs/E07_0_MIGRATION_PREFLIGHT_REPORT.md` 和本文件
-2. 修改 runtime 前运行完整 test suite，记录 baseline
-3. 每轮结束后运行完整 test suite，确认 regression = 0
+2. 修改 runtime 前运行完整 test suite，记录当前真实 regression baseline
+3. 每轮结束后运行完整 test suite，确认 existing regression failures = 0
 4. 不实现后续 phase 的功能
 5. 保持 Orchestrator 可用（作为 adapter / fallback）
 6. 每个新增 Node 必须有对应测试
 7. E07.1/E07.2 使用 Adapter Node 调用现有 Agent，不做业务逻辑重构
+8. Migration Guide 不保存动态 test count；具体数量记录在阶段实施报告或执行结果中
 
 ---
 
@@ -245,7 +246,7 @@ L3: HALT PIPELINE，Human-Agent 协同修复
 | **Canonical Planning State** | `book_plan.md`, `volume_plan.md`, `chapter_plan_chNNNN.md` | 否（LLM 产出） | 否 |
 | **Canonical Story State** | 4 tracking docs + `styled` chapters | 否 | 否 |
 | **Derived State** | Fact Digest, ChromaDB, SQLite | ✅ 可从 canonical 重建 | 否 |
-| **Workflow Execution State** | `review_ch*.md`, `post_chapter_update*.md`, `retrieval_trace*.json`, `revisions/*.json` | — | ✅ LangGraph checkpoint |
+| **Workflow Execution State** | `review_ch*.md`, `post_chapter_update*.md`, `retrieval_trace*.json`, `revisions/*.json` | — | LangGraph checkpoint 管理；diagnostic artifacts 继续独立存储 |
 | **Working / Draft State** | `chapter_NNNN_draft_*.md` | 否（中间产物） | 否 |
 
 ---
@@ -255,4 +256,3 @@ L3: HALT PIPELINE，Human-Agent 协同修复
 - LangGraph 官方文档：https://langchain-ai.github.io/langgraph/
 - Preflight Report：`docs/E07_0_MIGRATION_PREFLIGHT_REPORT.md`
 - 所有 E06–E06.2.1 Reports：`docs/E06*.md`
-- 当前 test baseline：153 tests, 0 failures
