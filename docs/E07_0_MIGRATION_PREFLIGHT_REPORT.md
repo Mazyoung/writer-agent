@@ -203,7 +203,7 @@ tracking/revisions/*.json            — PlanRevision records
 ```
 
 - 辅助诊断和审计，不驱动规划决策
-- LangGraph checkpoint 应覆盖此层
+- LangGraph checkpoint 属于 Workflow Execution State；diagnostic artifacts 继续独立存储，不要求文件本身进入 checkpoint
 - 不属于 canonical state
 
 ---

@@ -133,7 +133,7 @@ L3: HALT PIPELINE，Human-Agent 协同修复
 | `plan_chapter` | ChapterPlanner.plan_chapter() [1 LLM] | 1 plan .md | Plan | timestamp→`load_latest()` 取最新 |
 | `write_draft` | DeepSeekWriter.write_chapter() [1 LLM] | 1 draft .md | Working | timestamp→`load_latest()` 取最新 |
 | `style_edit` | ClaudeStylist.edit_chapter() [1 LLM] | —（仅返回 str） | — | 纯函数化 |
-| `save_styled` | StyleChecker.check_all() [0 LLM] | 1 styled .md | Story | 同内容幂等写入 |
+| `save_styled` | StyleChecker.check_all() [0 LLM] | 1 styled .md | Story | ❌ timestamp write — E07.4 前处理 |
 | `review_chapter` | StateManager.review_chapter() [1 LLM] | 1 analysis .md | Workflow | 拆分 LLM 与 save |
 | `parse_decision` | ReviewDecision.from_analysis() [0 LLM] | — | — | ✅ 天然幂等 |
 | `parse_state_delta` | _parse_state_deltas() [0 LLM] | — | — | ✅ 天然幂等 |
