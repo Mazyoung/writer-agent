@@ -2358,5 +2358,143 @@ class TestMissingCommitResultFailClosed(_TmpNovelCase):
                          "missing _commit_result → 不得生成 fact_digest")
 
 
+# ═══════════════════════════════════════════════════════════════
+# E06.2.1 Final — Markdown/SQLite ordering invariants
+# ═══════════════════════════════════════════════════════════════
+
+class TestMarkdownFailureSqliteNotCalled(_TmpNovelCase):
+    """Markdown commit 失败 → SQLite 0 calls。"""
+
+    def test_second_save_failure_sqlite_zero_calls(self):
+        """第二个 tracking doc 保存失败 → 所有 Markdown OLD + SQLite 未调用。"""
+        root = self._setup_review_dirs("mfs_novel")
+        sqlite = SQLiteStore(root / "state.db")
+        sm = StateManager("mfs_novel", sqlite)
+        sm.fs = __import__('src.storage.file_store', fromlist=['FileStore']).FileStore(
+            "mfs_novel", self.settings.data_dir)
+
+        # Write INITIAL canonical tracking docs with known OLD content
+        old_rels = "# OLD MFS RELATIONSHIPS\n## 关系详情\n#### A ↔ B\n- **关系类型**: 旧\n## 关系变更日志\n"
+        (root / "tracking" / "character_relationships.md").write_text(
+            old_rels, encoding="utf-8")
+        (root / "tracking" / "items_equipment.md").write_text(
+            "# OLD MFS ITEMS\n", encoding="utf-8")
+        (root / "tracking" / "cultivation_system.md").write_text(
+            "# OLD MFS CULT\n", encoding="utf-8")
+
+        # State delta with foreshadowing (to check SQLite is NOT called)
+        analysis = """## 状态变更（State Delta）
+### 角色关系当前状态
+- 柯林 ↔ 瘸子莫: 关系类型=交易伙伴, 当前状态=信任已建立, 态度=友好 [依据: 第5段]
+### 角色物品状态
+#### 获得
+- 发光徽章: 持有者=柯林, 来源=背包发现, 状态=可用 [依据: 第3段]
+### 角色修炼状态
+### 角色当前状态
+### 伏笔状态
+- 蓝光之谜: 状态=OPEN, 回收章节= [依据: 第15段]
+"""
+
+        # Patch save_tracking_doc: first call succeeds, second raises
+        call_order = []
+        orig_save = sm.fs.save_tracking_doc
+
+        def failing_save(name, content):
+            call_order.append(name)
+            if len(call_order) >= 2:
+                raise OSError("E06.2.1 MFS 模拟 I/O 失败")
+            return orig_save(name, content)
+
+        sm.fs.save_tracking_doc = failing_save
+
+        # Track sqlite.upsert_foreshadow calls
+        sqlite_calls = []
+        orig_upsert = sqlite.upsert_foreshadow
+        sqlite.upsert_foreshadow = lambda *a, **kw: sqlite_calls.append(1) or orig_upsert(*a, **kw)
+
+        result = sm.update_tracking_docs(1, "正文", analysis)
+
+        # ── Assert: commit failed ──
+        cr = result.get("_commit_result")
+        self.assertIsNotNone(cr)
+        self.assertFalse(cr.success)
+
+        # ── Assert: SQLite 0 calls (commit failed before Phase 5) ──
+        self.assertEqual(len(sqlite_calls), 0,
+                         "Markdown commit 失败 → sqlite.upsert_foreshadow call_count == 0")
+
+        # ── Assert: all Markdown OLD ──
+        rels = (root / "tracking" / "character_relationships.md").read_text(encoding="utf-8")
+        self.assertIn("OLD MFS RELATIONSHIPS", rels,
+                      "关系文件必须回滚到 OLD")
+        self.assertNotIn("交易伙伴", rels,
+                         "关系文件不得包含新数据")
+
+
+class TestMarkdownSuccessSqliteFailure(_TmpNovelCase):
+    """Markdown commit success + SQLite failure → canonical NEW + warning only。"""
+
+    def test_sqlite_failure_does_not_rollback_markdown(self):
+        """SQLite upsert 失败 → Markdown 保持 NEW, StateCommitResult.success == True。"""
+        root = self._setup_review_dirs("msf_novel")
+        sqlite = SQLiteStore(root / "state.db")
+        sm = StateManager("msf_novel", sqlite)
+        sm.fs = __import__('src.storage.file_store', fromlist=['FileStore']).FileStore(
+            "msf_novel", self.settings.data_dir)
+
+        # Write initial tracking docs
+        (root / "tracking" / "character_relationships.md").write_text(
+            "# OLD MSF RELS\n## 关系详情\n## 关系变更日志\n", encoding="utf-8")
+        (root / "tracking" / "items_equipment.md").write_text(
+            "# OLD MSF ITEMS\n", encoding="utf-8")
+        (root / "tracking" / "cultivation_system.md").write_text(
+            "# OLD MSF CULT\n", encoding="utf-8")
+
+        # State delta with foreshadowing
+        analysis = """## 状态变更（State Delta）
+### 角色关系当前状态
+- 柯林 ↔ 瘸子莫: 关系类型=交易伙伴, 当前状态=信任已建立, 态度=友好 [依据: 第5段]
+### 角色物品状态
+### 角色修炼状态
+### 角色当前状态
+### 伏笔状态
+- 蓝光之谜: 状态=OPEN, 回收章节= [依据: 第15段]
+"""
+
+        # Patch sqlite.upsert_foreshadow to raise
+        import io, sys
+        captured = io.StringIO()
+        old_stdout = sys.stdout
+        sys.stdout = captured
+
+        def failing_upsert(novel_id, desc, new_status, resolve_ch):
+            raise RuntimeError("E06.2.1 MSF 模拟 SQLite 写入失败")
+
+        sqlite.upsert_foreshadow = failing_upsert
+
+        try:
+            result = sm.update_tracking_docs(1, "正文", analysis)
+        finally:
+            sys.stdout = old_stdout
+
+        # ── Assert: commit SUCCESS ──
+        cr = result.get("_commit_result")
+        self.assertIsNotNone(cr)
+        self.assertTrue(cr.success,
+                        "SQLite 失败 → StateCommitResult.success 必须为 True")
+
+        # ── Assert: canonical Markdown remains NEW ──
+        rels = (root / "tracking" / "character_relationships.md").read_text(encoding="utf-8")
+        self.assertIn("交易伙伴", rels,
+                      "SQLite 失败 → Markdown 仍保持 NEW（不得回滚）")
+        self.assertNotIn("OLD MSF RELS", rels,
+                         "SQLite 失败 → Markdown 不得退回 OLD")
+
+        # ── Assert: [STATE WARNING] in output ──
+        output = captured.getvalue()
+        self.assertIn("STATE WARNING", output,
+                      "SQLite 失败必须输出 [STATE WARNING]")
+
+
 if __name__ == "__main__":
     unittest.main()
