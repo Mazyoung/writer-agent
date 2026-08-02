@@ -773,14 +773,25 @@ Book Plan 是整本书的长期战略，只写长期有效的内容：
             )
             PlanningStore(self.file_store.root).save_revision(rev)
         except Exception as e:
-            # 回滚：恢复 canonical（save_canonical 留有 .bak），删除归档
+            # E06.2.1: 回滚时保护原始异常——rollback 失败不得掩盖根因。
+            rollback_errors: list[str] = []
             if canonical_attempted:
-                self.file_store.rollback_canonical("tracking", "volume_plan")
+                try:
+                    self.file_store.rollback_canonical("tracking", "volume_plan")
+                except Exception as re:
+                    rollback_errors.append(
+                        f"rollback_canonical 也失败: {type(re).__name__}: {re}")
             if archive_written and archive_path.exists():
-                archive_path.unlink()
-            raise RuntimeError(
-                f"新卷提交失败，已回滚: 第{old_vp.volume_number}卷仍为 ACTIVE。"
-                f"\n原因: {type(e).__name__}: {e}") from e
+                try:
+                    archive_path.unlink()
+                except Exception as ue:
+                    rollback_errors.append(
+                        f"删除归档也失败: {type(ue).__name__}: {ue}")
+            detail = (f"新卷提交失败，已回滚: 第{old_vp.volume_number}卷仍为 ACTIVE。"
+                      f"\n根因: {type(e).__name__}: {e}")
+            if rollback_errors:
+                detail += "\n回滚错误: " + "; ".join(rollback_errors)
+            raise RuntimeError(detail) from e
 
         print(f"  [Commit] 第{old_vp.volume_number}卷 COMPLETED → "
               f"tracking/volumes/volume_{old_vp.volume_number:02d}.md")

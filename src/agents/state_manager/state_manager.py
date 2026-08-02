@@ -216,6 +216,12 @@ class StateManager(BaseAgent):
                   f"跳过第{chapter_index}章 canonical state 提交:")
             for err in parse_errors:
                 print(f"    - {err}")
+            # E06.2.1: parse failure must produce explicit StateCommitResult
+            # so orchestrator can detect failure and block Fact Digest / RAG.
+            changes["_commit_result"] = StateCommitResult(
+                success=False,
+                error_message=f"State Delta 解析错误 ({len(parse_errors)} 项)",
+                warnings=parse_errors)
             return changes
 
         # ── Phase 4: COMMIT ALL canonical tracking docs ──

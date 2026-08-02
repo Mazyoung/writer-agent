@@ -2127,5 +2127,185 @@ class TestCmdReviewOutput(_TmpNovelCase):
                          "commit failure 不得提示继续下一章")
 
 
+# ═══════════════════════════════════════════════════════════════
+# E06.2.1 Final Patch — Parse Failure + Volume Plan Rollback
+# ═══════════════════════════════════════════════════════════════
+
+class TestParseFailureSetsCommitResult(_TmpNovelCase):
+    """E06.2.1: State Delta 解析失败 → changes 必须包含 _commit_result。"""
+
+    def test_parse_failure_sets_commit_result_false(self):
+        """parse_errors → _commit_result.success = False。"""
+        root = self._setup_review_dirs("pf_novel")
+        sqlite = SQLiteStore(root / "state.db")
+        sm = StateManager("pf_novel", sqlite)
+        sm.fs = __import__('src.storage.file_store', fromlist=['FileStore']).FileStore(
+            "pf_novel", self.settings.data_dir)
+
+        # Write initial tracking docs
+        (root / "tracking" / "character_relationships.md").write_text(
+            "# 角色关系图\n## 关系详情\n## 关系变更日志", encoding="utf-8")
+        (root / "tracking" / "items_equipment.md").write_text(
+            "# 物品装备\n## 主角持有\n", encoding="utf-8")
+        (root / "tracking" / "cultivation_system.md").write_text(
+            "# 修炼体系\n## 角色修炼状态\n", encoding="utf-8")
+
+        # Patch _parse_state_deltas to simulate a parse error
+        orig_parse = sm._parse_state_deltas
+
+        def failing_parse(analysis_text, ch_label, rels, items, cult,
+                         char_states, errors):
+            errors.append("E06.2.1 模拟解析异常: 物品装备字段格式损坏")
+            return orig_parse(analysis_text, ch_label, rels, items, cult,
+                            char_states, errors)
+
+        sm._parse_state_deltas = failing_parse
+
+        analysis = """## 状态变更（State Delta）
+### 角色关系当前状态
+- 柯林 ↔ 瘸子莫: 关系类型=交易伙伴, 当前状态=信任已建立, 态度=友好 [依据: 第5段]
+### 角色物品状态
+### 角色修炼状态
+### 角色当前状态
+### 伏笔状态
+"""
+        result = sm.update_tracking_docs(1, "正文", analysis)
+
+        commit_result = result.get("_commit_result")
+        self.assertIsNotNone(commit_result,
+                             "parse error 也必须设置 _commit_result")
+        self.assertFalse(commit_result.success,
+                         "parse error → _commit_result.success 必须为 False")
+        self.assertIn("解析错误", commit_result.error_message,
+                      "error_message 必须包含 '解析错误'")
+
+
+class TestParseFailureBlocksDownstream(_TmpNovelCase):
+    """E06.2.1: Orchestrator 检测 parse failure → block Fact Digest / RAG。"""
+
+    def test_parse_failure_orchestrator_no_fact_digest_no_rag(self):
+        """Parse failure in PASS path → orchestrator blocks downstream。"""
+        root = self._setup_review_dirs("pfb_novel")
+        (root / "chapters" / "chapter_0001_styled_20260801_120000.md").write_text(
+            "第1章正文内容。" * 200, encoding="utf-8")
+        (root / "outlines" / "chapter_plan_ch0001.md").write_text(
+            SAMPLE_PLAN_MD, encoding="utf-8")
+
+        from src.core.orchestrator import Orchestrator
+        from src.storage.chroma_store import ChromaStore
+        from src.agents.state_manager.state_manager import StateManager
+
+        orch = Orchestrator("pfb_novel")
+        rag_calls = []
+
+        # Patch _parse_state_deltas on the StateManager instance to inject parse error
+        orig_parse = orch.state_manager._parse_state_deltas
+
+        def failing_parse(analysis_text, ch_label, rels, items, cult,
+                         char_states, errors):
+            errors.append("E06.2.1 模拟解析异常: 物品装备字段格式损坏")
+            return orig_parse(analysis_text, ch_label, rels, items, cult,
+                            char_states, errors)
+
+        orch.state_manager._parse_state_deltas = failing_parse
+
+        def fake_llm(self, messages):
+            return MOCK_RAW_ANALYSIS_PASS
+
+        with mock.patch.object(BaseAgent, "_call_llm", fake_llm), \
+             mock.patch.object(ChromaStore, "index_chapter",
+                               side_effect=lambda *a, **kw: rag_calls.append(1)):
+            result = orch.review_chapter(1)
+
+        # Parse error → no canonical commit → orchestrator must NOT call RAG
+        self.assertEqual(len(rag_calls), 0,
+                         "parse failure → 不得执行 RAG index")
+
+        # No fact_digest file
+        fact_files = list((root / "states").glob("fact_digest_ch0001_*.md"))
+        self.assertEqual(len(fact_files), 0,
+                         "parse failure → 不得生成 fact_digest")
+
+
+class TestVolumePlanCommitFailure(_TmpNovelCase):
+    """E06.2.1: Volume Plan 提交失败 → 保留旧 ACTIVE 状态，不掩盖根因。"""
+
+    def test_volume_plan_commit_failure_preserves_old_state(self):
+        """提交失败 → 旧卷保持 ACTIVE，异常包含根因信息。"""
+        root = self._setup_review_dirs("vp_novel")
+        # Write real book_plan and volume_plan with a real-looking VolumePlan
+        (root / "tracking" / "book_plan.md").write_text(
+            "# 全书规划：《测试》\n## 核心目标\n测试\n## 卷框架\n### 第1卷：觉醒\n- **核心冲突**: 生存\n- **主角弧光**: 成长\n- **关键角色**: 柯林\n- **章数预估**: 5\n",
+            encoding="utf-8")
+        (root / "tracking" / "volume_plan.md").write_text(
+            "# 第1卷规划：《觉醒》\n- **版本**: v1\n- **状态**: ACTIVE\n- **章节范围**: 第1章-第5章\n## 卷概述\n- **核心冲突**: 配电间争夺\n- **角色目标**: 生存\n- **障碍**: 资源匮乏\n## 事件链\n### 事件1：配电间\n- **触发条件**: 到达\n- **核心内容**: 探索\n- **涉及角色**: 柯林\n- **情感基调**: 紧张\n- **结果与影响**: 发现\n- **衔接**: 下一章\n- **对应章节**: 第1章\n## 节奏约束\n无\n",
+            encoding="utf-8")
+
+        from src.core.orchestrator import Orchestrator
+        from src.core.agent_base import BaseAgent
+
+        orch = Orchestrator("vp_novel")
+
+        # Read old state before the attempt
+        old_vp = (root / "tracking" / "volume_plan.md").read_text(encoding="utf-8")
+        self.assertIn("ACTIVE", old_vp)
+
+        # Mock the LLM call to return a valid Volume 2 candidate
+        candidate_vp = """# 第2卷规划：《远征》
+- **版本**: v1
+- **状态**: ACTIVE
+- **章节范围**: 第6章-第10章
+## 卷概述
+- **核心冲突**: 远征废土
+- **角色目标**: 找到净水
+- **障碍**: 未知
+## 事件链
+### 事件1：出发
+- **触发条件**: 准备完毕
+- **核心内容**: 出发
+- **涉及角色**: 柯林
+- **情感基调**: 期待
+- **结果与影响**: 离开
+- **衔接**: 下一章
+- **对应章节**: 第6章
+## 节奏约束
+无
+"""
+
+        def fake_llm(self, messages):
+            return candidate_vp
+
+        # Patch save_canonical to fail AFTER generate succeeds
+        orig_save = orch.file_store.save_canonical
+
+        def failing_save(category, filename, content):
+            raise OSError("E06.2.1 模拟磁盘满 — save_canonical 失败")
+
+        orch.file_store.save_canonical = failing_save
+
+        # Attempt new-volume — should raise RuntimeError
+        with mock.patch.object(BaseAgent, "_call_llm", fake_llm):
+            with self.assertRaises(RuntimeError) as ctx:
+                orch.start_new_volume(volume_number=2)
+
+        # ── Assert: original exception preserved ──
+        error_msg = str(ctx.exception)
+        self.assertIn("根因", error_msg,
+                      "异常消息必须包含 '根因'")
+        self.assertIn("OSError", error_msg,
+                      "异常消息必须包含原始异常类型")
+        self.assertIn("磁盘满", error_msg,
+                      "异常消息必须包含原始异常描述")
+        self.assertIn("ACTIVE", error_msg,
+                      "异常消息必须确认旧卷仍为 ACTIVE")
+
+        # ── Assert: old state preserved (rollback via .bak → .md rename)
+        restored_vp = (root / "tracking" / "volume_plan.md").read_text(encoding="utf-8")
+        self.assertIn("ACTIVE", restored_vp,
+                      "提交失败后旧卷必须保持 ACTIVE")
+        self.assertIn("第1卷", restored_vp,
+                      "提交失败后不得切换到新卷")
+
+
 if __name__ == "__main__":
     unittest.main()
