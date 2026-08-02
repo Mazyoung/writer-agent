@@ -171,28 +171,40 @@ chapters/chapter_NNNN_styled_*.md    — Accepted styled chapters
 - 原子化提交（4 个 tracking docs 在单一事务中）
 - commit failure → rollback ALL to OLD
 
+### Working / Draft State
+
+```
+chapters/chapter_NNNN_draft_*.md      — DeepSeekWriter 原始草稿（中间产物）
+```
+
+- 写入者：DeepSeekWriter (via BaseAgent.run() → FileStore.save())
+- 非 canonical，review 前必须经过 style_edit → save_styled
+- 时间戳文件，`load_latest()` 总是取最新
+
 ### Derived State
 
 ```
 states/fact_digest_chNNNN_*.md       — Fact Digest (deterministic extraction)
-tracking/rag_traces/*.json           — Retrieval traces
 ChromaDB collection "chapter_chunks" — RAG vector index
-SQLite state.db                      — foreshadowing + character cache
+SQLite state.db                      — foreshadowing + character cache (secondary/cache)
 ```
 
-- 重建性：Chroma 可从 styled chapters 重建；Fact Digest 可从 raw_analysis 重建
+- 重建性：Chroma 可从 styled chapters 完整重建；Fact Digest 可从 raw_analysis 重建
 - SQLite 是缓存，canonical 状态不依赖它
 - Fact Digest 只从 committed chapter 生成
 
-### Workflow Execution State
+### Workflow Execution / Diagnostic State
 
 ```
 states/review_chNNNN_*.md            — raw_analysis (诊断记录)
 states/post_chapter_update_chNNNN.md — change log
+tracking/rag_traces/*.json           — Retrieval traces
 tracking/revisions/*.json            — PlanRevision records
 ```
 
 - 辅助诊断和审计，不驱动规划决策
+- LangGraph checkpoint 应覆盖此层
+- 不属于 canonical state
 
 ---
 
@@ -222,9 +234,12 @@ tracking/revisions/*.json            — PlanRevision records
 
 `BaseAgent.run()` 自动调用 `FileStore.save()` 写入时间戳文件。在 LangGraph 中，如果 checkpoint 后重试，会产生重复的时间戳文件。需要将 LLM 调用与 save 解耦。
 
-### Risk 3: `Orchestrator` 持有所有子 Agent + 惰性 Chroma + 多个 workflow 方法
+### Risk 3: `Orchestrator` 集中持有所有 Agent/Service 依赖
 
-`Orchestrator.__init__` 构造了 WorldBuilder, PlotDesigner, ChapterPlanner, DeepSeekWriter, ClaudeStylist, StateManager。LangGraph 中这些应为独立 Node，由 Graph 管理生命周期，而非由 Orchestrator 集中持有。
+`Orchestrator.__init__` 构造了 WorldBuilder, PlotDesigner, ChapterPlanner, DeepSeekWriter, ClaudeStylist, StateManager, ChromaStore。
+
+LangGraph 迁移中，**Graph Node 可以调用已有 Agent**（Adapter Node 模式）。
+Agent 作为依赖被注入 Graph Node，但不要求 Graph 管理 Agent 生命周期。
 
 ### Risk 4 (低): 时间戳文件在 retry 时重复
 
@@ -258,10 +273,13 @@ tracking/revisions/*.json            — PlanRevision records
 | 指标 | 值 |
 |---|---|
 | Candidate Nodes | 13 |
-| LLM calls per chapter (正常路径) | 4 |
-| Canonical file writes per chapter (正常) | 6 (plan + draft + styled + 4 tracking) |
-| Derived state writes | 2 (fact_digest + RAG) |
-| SQLite tables | 2 (foreshadowing + character_states) |
-| 需要拆分的最大方法 | `review_chapter()` (7 职责) |
-| 需要解耦的关键耦合 | `BaseAgent.run()` = LLM + save |
+| LLM calls per chapter (正常路径) | 4 (plan + draft + style + review) |
+| Canonical Planning writes | 1 (chapter_plan .md) |
+| Canonical Story writes | 5 (4 tracking docs atomic + 1 styled .md) |
+| Working/Draft writes | 1 (draft .md) |
+| Derived state writes | 2 (fact_digest .md + ChromaDB index) |
+| Workflow/Diagnostic writes | 3 (review analysis + change log + retrieval trace) |
+| SQLite tables | 2 (foreshadowing + character_states — cache) |
+| 需要拆分的最大方法 | `review_chapter()` (7 职责，E07.3 解决) |
+| 需要解耦的关键耦合 | `BaseAgent.run()` = LLM + save (E07.4 checkpoint 前解决) |
 | 非幂等 side effects | 3 (timestamp saves via BaseAgent.run) |
