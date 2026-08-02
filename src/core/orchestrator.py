@@ -270,7 +270,8 @@ class Orchestrator:
                      re-index all finalized chapters from scratch.
 
         Returns:
-            dict with keys: indexed_chapters, total_chunks, errors.
+            dict with keys: indexed_chapters, total_chunks, errors,
+            rebuild_aborted (only when rebuild=True and clear failed).
         """
         import re
         from src.storage.chroma_store import DEFAULT_BRANCH_ID
@@ -282,10 +283,16 @@ class Orchestrator:
 
         if rebuild:
             print("  [RAG] 清理当前分支索引...")
-            try:
-                self.chroma.rebuild_branch(self.novel_id, branch_id)
-            except Exception as e:
-                print(f"  [RAG WARNING] 清理索引失败: {e}")
+            cleared = self.chroma.rebuild_branch(self.novel_id, branch_id)
+            if not cleared:
+                # E06.2.1: clear failure → abort rebuild
+                # Old stale chunks may still exist → continuing would
+                # create duplicates and falsely report success.
+                print(f"\n  [RAG ERROR] 分支清理失败，重建中止。")
+                print(f"  旧 chunks 可能仍然存在，继续重建会造成重复。")
+                print(f"  请检查 ChromaDB 状态后重试。")
+                return {"indexed_chapters": 0, "total_chunks": 0,
+                        "errors": 1, "rebuild_aborted": True}
 
         # Scan for finalized/styled chapters
         chapters_dir = self.file_store.root / "chapters"

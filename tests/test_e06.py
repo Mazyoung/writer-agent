@@ -1894,8 +1894,8 @@ class TestChromaWarningNotSilent(unittest.TestCase):
         self.assertIn("CHROMA WARNING", output,
                       "index_chapter 清理失败必须输出 [CHROMA WARNING]")
 
-    def test_rebuild_branch_logs_warning(self):
-        """rebuild_branch 失败 → 输出 [CHROMA WARNING]，不静默。"""
+    def test_rebuild_branch_failure_returns_false(self):
+        """E06.2.1: rebuild_branch 失败 → 返回 False + 输出 [CHROMA ERROR]。"""
         from src.storage.chroma_store import ChromaStore
         from unittest.mock import MagicMock
         import io
@@ -1909,19 +1909,222 @@ class TestChromaWarningNotSilent(unittest.TestCase):
             store = ChromaStore(Path(tempfile.mkdtemp()))
             mock_coll = MagicMock()
             mock_coll.get.side_effect = RuntimeError(
-                "E06.2 模拟 ChromaDB get 失败")
+                "E06.2.1 模拟 ChromaDB get 失败")
             store._client = MagicMock()
             store._collection = mock_coll
 
-            # rebuild_branch should catch and print warning, not raise
-            store.rebuild_branch("test_novel", "main")
+            # rebuild_branch should return False on failure
+            result = store.rebuild_branch("test_novel", "main")
+            self.assertFalse(result,
+                             "rebuild_branch 失败必须返回 False")
 
             output = captured.getvalue()
         finally:
             sys.stdout = old_stdout
 
-        self.assertIn("CHROMA WARNING", output,
-                      "rebuild_branch 失败必须输出 [CHROMA WARNING]")
+        self.assertIn("CHROMA ERROR", output,
+                      "rebuild_branch 失败必须输出 [CHROMA ERROR]")
+
+    def test_rebuild_branch_success_returns_true(self):
+        """rebuild_branch 成功 → 返回 True。"""
+        from src.storage.chroma_store import ChromaStore
+        from unittest.mock import MagicMock
+
+        store = ChromaStore(Path(tempfile.mkdtemp()))
+        mock_coll = MagicMock()
+        # Empty branch: get returns no ids
+        mock_coll.get.return_value = {"ids": []}
+        store._client = MagicMock()
+        store._collection = mock_coll
+
+        result = store.rebuild_branch("test_novel", "main")
+        self.assertTrue(result,
+                        "rebuild_branch 成功（含空分支）必须返回 True")
+
+
+# ═══════════════════════════════════════════════════════════════
+# E06.2.1-A. P0 — Snapshot Failure Fail-Closed
+# ═══════════════════════════════════════════════════════════════
+
+class TestSnapshotFailureFailClosed(_TmpNovelCase):
+    """E06.2.1-A: Snapshot 读取失败 → 中止提交，不开始任何写入。"""
+
+    def test_snapshot_read_failure_aborts_before_writes(self):
+        """现有文件读取失败 → fail-closed，零文件修改。"""
+        root = self._setup_review_dirs("snap_novel")
+        sqlite = SQLiteStore(root / "state.db")
+        sm = StateManager("snap_novel", sqlite)
+        sm.fs = __import__('src.storage.file_store', fromlist=['FileStore']).FileStore(
+            "snap_novel", self.settings.data_dir)
+
+        # Write initial tracking docs (create real files on disk)
+        old_rels = "# SNAPSHOT_OLD_RELATIONSHIPS\n## 关系详情\n## 关系变更日志\n"
+        (root / "tracking" / "character_relationships.md").write_text(
+            old_rels, encoding="utf-8")
+        (root / "tracking" / "items_equipment.md").write_text(
+            "# OLD ITEMS\n", encoding="utf-8")
+        (root / "tracking" / "cultivation_system.md").write_text(
+            "# OLD CULT\n", encoding="utf-8")
+
+        # Build minimal in-memory objects for commit
+        from src.storage.document_formats import (
+            CharacterRelationships, ItemsEquipment, CultivationSystem,
+            CharacterStateList, RelationshipEntry,
+        )
+        rels = CharacterRelationships()
+        rels.entries.append(RelationshipEntry(
+            characters="柯林 ↔ 瘸子莫", relation_type="交易伙伴",
+            current_state="信任已建立", attitude="友好"))
+        items = ItemsEquipment()
+        cult = CultivationSystem()
+        char_states = CharacterStateList()
+        state_result = {"relationships": [], "items": [], "cultivation": [],
+                        "characters": [], "foreshadows": []}
+        log_result = {}
+
+        # ── Call _commit_all_tracking_docs with a patched read_text ──
+        # that fails for ONE file during snapshot
+        orig_read_text = Path.read_text
+
+        def patched_read_text(self, encoding="utf-8"):
+            p_str = str(self)
+            if "items_equipment.md" in p_str and "tracking" in p_str:
+                raise OSError("E06.2.1 模拟磁盘读取错误")
+            return orig_read_text(self, encoding=encoding)
+
+        Path.read_text = patched_read_text
+        try:
+            commit_result = sm._commit_all_tracking_docs(
+                1, "第1章", rels, items, cult, char_states,
+                state_result, log_result)
+        finally:
+            Path.read_text = orig_read_text
+
+        # ── Assert: commit aborted before any writes ──
+        self.assertFalse(commit_result.success,
+                         "snapshot 失败 → commit 必须报告 FAILED")
+        self.assertIn("snapshot", commit_result.error_message,
+                      "错误信息必须包含 snapshot 阶段")
+        self.assertIn("中止", commit_result.error_message,
+                      "错误信息必须包含 '中止'")
+
+        # ── Assert: no changed_files (no writes happened) ──
+        self.assertEqual(len(commit_result.changed_files), 0,
+                         "snapshot 失败 → changed_files 必须为空")
+
+        # ── Assert: all files remain OLD ──
+        current_rels = (root / "tracking" / "character_relationships.md").read_text(
+            encoding="utf-8")
+        self.assertIn("SNAPSHOT_OLD_RELATIONSHIPS", current_rels,
+                      "关系文件必须保持 OLD 内容（零修改）")
+
+
+# ═══════════════════════════════════════════════════════════════
+# E06.2.1-B. CLI cmd_review 输出测试
+# ═══════════════════════════════════════════════════════════════
+
+class TestCmdReviewOutput(_TmpNovelCase):
+    """E06.2.1-B: cmd_review 根据 runtime result 输出正确的 Supervisor 状态。"""
+
+    def _run_cmd_review(self, novel_name: str, ch_num: int,
+                        mock_review_return: dict) -> str:
+        """Patch Orchestrator.review_chapter → run cmd_review → capture stdout."""
+        from unittest.mock import patch
+        import io
+        import sys
+
+        # Ensure novel dir exists
+        self._setup_review_dirs(novel_name)
+
+        captured = io.StringIO()
+        old_stdout = sys.stdout
+        sys.stdout = captured
+
+        try:
+            with patch('src.core.orchestrator.Orchestrator.review_chapter',
+                       return_value=mock_review_return):
+                from main import cmd_review
+
+                class Args:
+                    name = novel_name
+                    chapter = ch_num
+                cmd_review(Args())
+        finally:
+            sys.stdout = old_stdout
+
+        return captured.getvalue()
+
+    def test_pass_commit_success_shows_next_chapter(self):
+        """PASS + commit success → 提示继续下一章。"""
+        output = self._run_cmd_review("cli_pass", 1, {
+            "decision": "PASS",
+            "updated_rels": True,
+            "updated_items": True,
+            "change_log": "...",
+        })
+        self.assertIn("PASS", output)
+        self.assertIn("下一步", output,
+                      "PASS + commit success 必须提示继续下一章")
+
+    def test_needs_revision_no_next_chapter(self):
+        """NEEDS_REVISION → 不提示继续下一章。"""
+        output = self._run_cmd_review("cli_rev", 2, {
+            "decision": "NEEDS_REVISION",
+            "t1_issues": ["徽章数量矛盾"],
+            "t2_issues": [],
+            "reasons": ["需要修正"],
+        })
+        self.assertIn("需要修订", output)
+        self.assertNotIn("下一步", output,
+                         "NEEDS_REVISION 不得提示继续下一章")
+
+    def test_halt_l2_no_next_chapter(self):
+        """HALT + L2 → 不提示继续下一章。"""
+        output = self._run_cmd_review("cli_halt2", 3, {
+            "decision": "HALT",
+            "planning_level": "L2",
+            "reasons": ["事件链需要调整"],
+        })
+        self.assertIn("Planning issue", output)
+        self.assertIn("L2", output)
+        self.assertNotIn("下一步", output,
+                         "HALT L2 不得提示继续下一章")
+
+    def test_halt_l3_no_next_chapter(self):
+        """HALT + L3 → 不提示继续下一章。"""
+        output = self._run_cmd_review("cli_halt3", 5, {
+            "decision": "HALT",
+            "planning_level": "L3",
+            "reasons": ["关键角色提前死亡违反战略约束"],
+        })
+        self.assertIn("Strategic issue", output)
+        self.assertIn("L3", output)
+        self.assertNotIn("下一步", output,
+                         "HALT L3 不得提示继续下一章")
+
+    def test_unknown_no_next_chapter(self):
+        """UNKNOWN → 不提示继续下一章。"""
+        output = self._run_cmd_review("cli_unk", 4, {
+            "decision": "UNKNOWN",
+            "reasons": [],
+        })
+        self.assertIn("unresolved", output)
+        self.assertNotIn("下一步", output,
+                         "UNKNOWN 不得提示继续下一章")
+
+    def test_commit_failure_no_next_chapter(self):
+        """PASS + commit failure → 不提示继续下一章。"""
+        output = self._run_cmd_review("cli_cf", 1, {
+            "decision": "PASS",
+            "commit_status": "FAILED",
+            "workflow_status": "ERROR",
+            "error": "items_equipment: OSError: 磁盘满",
+            "warnings": ["已回滚 1 个文件"],
+        })
+        self.assertIn("commit failed", output)
+        self.assertIn("halted", output)
+        self.assertNotIn("下一步", output,
+                         "commit failure 不得提示继续下一章")
 
 
 if __name__ == "__main__":

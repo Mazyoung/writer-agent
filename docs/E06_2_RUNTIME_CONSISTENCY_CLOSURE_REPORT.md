@@ -396,4 +396,150 @@ review_chapter(input: styled_chapter, plan, tracking_docs, world_setting,
 
 ---
 
-**E06.2 Runtime Consistency Closure 完成。不进入 E07 LangGraph。**
+## 16. E06.2.1 — Final Runtime Closure (2026-08-02)
+
+### 16.1 修改文件（4 改）
+
+| 文件 | 变更类型 | 说明 |
+|---|---|---|
+| `src/agents/state_manager/state_manager.py` | 修改 | Snapshot 阶段 fail-closed：现有文件读取失败 → 中止提交；`_sync_sqlite` 不再静默吞异常 |
+| `src/core/orchestrator.py` | 修改 | `rag_index_backfill`：rebuild clear 失败 → abort，不继续 index |
+| `src/storage/chroma_store.py` | 修改 | `rebuild_branch` 返回 `bool`，失败输出 `[CHROMA ERROR]` |
+| `main.py` | 修改 | `cmd_review` 检查 runtime result 呈现正确状态；`cmd_rag_index` 报告 rebuild abort |
+| `tests/test_e06.py` | 修改 | 新增 8 个 E06.2.1 测试；更新 1 个 ChromaWarning 测试适配新 API |
+
+### 16.2 P0 — Snapshot Failure 必须 Fail-Closed
+
+**问题**：snapshot 读取失败时 `originals[name] = None`，混淆了「文件不存在」和「文件存在但读取失败」两种情况。回滚时 `None` 触发 `unlink()`，可能删除真实存在的 canonical state。
+
+**修复**：
+- 区分 `fpath.exists() → False`（正常不存在）和 `fpath.exists() → True + read_text() 失败`（错误）
+- Snapshot 错误 → 立即中止，`return StateCommitResult(success=False)`
+- 不执行任何 canonical write
+- None 现在仅表示「文件确实不存在」
+
+### 16.3 P1 — SQLite `_sync_sqlite` 不再静默吞异常
+
+```python
+# 旧：except Exception: pass
+# 新：
+except Exception as e:
+    print(f"  [STATE WARNING] SQLite 角色状态缓存失败 "
+          f"'{name}': {type(e).__name__}: {e}")
+```
+
+### 16.4 P0 — CLI `cmd_review` 正确呈现 Supervisor 状态
+
+`cmd_review` 现在检查 `review_chapter()` 返回值，输出正确的 workflow 状态：
+
+| Review 结果 | CLI 输出 | 是否提示继续下一章 |
+|---|---|---|
+| PASS + commit success | `Review PASS — Canonical state committed` + 下一步提示 | ✅ |
+| PASS + commit FAILED | `Canonical state commit failed — workflow halted` | ❌ |
+| NEEDS_REVISION | `当前章节需要修订 — 不要继续规划下一章` | ❌ |
+| HALT + L2 | `Planning issue detected — planning_level = L2` | ❌ |
+| HALT + L3 | `Strategic issue detected — planning_level = L3` | ❌ |
+| UNKNOWN | `Supervisor decision unresolved — workflow halted` | ❌ |
+
+### 16.5 P1 — RAG Rebuild Clear Failure 必须 Abort
+
+**问题**：`rebuild_branch()` 失败后 caller 继续 index，导致旧 stale chunks 未清除 + 新 chunks 插入 = 重复。
+
+**修复**：
+- `rebuild_branch()` → 返回 `bool`（成功=True，失败=False）
+- 失败 → `[CHROMA ERROR]`（不是 WARNING）
+- `rag_index_backfill()`: clear 失败 → 立即返回 `{"rebuild_aborted": True}`，不继续 index
+
+### 16.6 E06.2.1 测试清单
+
+| 类别 | 测试数 | 说明 |
+|---|---|---|
+| P0 — Snapshot Fail-Closed | 1 | `test_snapshot_read_failure_aborts_before_writes` |
+| CLI cmd_review | 6 | `test_pass_commit_success_shows_next_chapter`, `test_needs_revision_no_next_chapter`, `test_halt_l2_no_next_chapter`, `test_halt_l3_no_next_chapter`, `test_unknown_no_next_chapter`, `test_commit_failure_no_next_chapter` |
+| Chroma 适配 | 2 | `test_rebuild_branch_failure_returns_false`, `test_rebuild_branch_success_returns_true` (替换旧 `test_rebuild_branch_logs_warning`) |
+
+### 16.7 最终测试清单
+
+| 套件 | 测试数 | 状态 |
+|---|---|---|
+| `test_e06.py` (E06 + E06.1 + E06.2 + E06.2.1) | 63 | ✅ |
+| `test_e05.py` (E05) | 11 | ✅ |
+| `test_chapter_plan.py` (E01/E02) | 9 | ✅ |
+| `test_planning_foundation.py` (E03) | 11 | ✅ |
+| `test_planning_hierarchy.py` (E03.1) | 15 | ✅ |
+| `test_rag.py` (E04/E04.1) | 38 | ✅ |
+| **Total** | **147** | **✅ 0 failures** |
+
+---
+
+## 17. E06.2.1 更新后的 E07 Migration Inputs
+
+### Candidate Nodes（不变）
+
+```text
+load_context          — Orchestrator 构造 + FileStore/PlanningStore 加载
+retrieve_history      — Orchestrator._retrieve_evidence() + ChromaStore.search()
+plan_chapter          — Orchestrator.plan_chapter() → ChapterPlanner.plan_chapter()
+write_chapter         — Orchestrator.write_chapter() → DeepSeekWriter + ClaudeStylist
+style_chapter         — Orchestrator.style_edit() → ClaudeStylist.edit_chapter()
+review_chapter        — Orchestrator.review_chapter() → StateManager.review_chapter()
+parse_decision        — StateManager.parse_review_decision() → ReviewDecision.from_analysis()
+parse_state_delta     — StateManager._parse_state_deltas()
+commit_state          — StateManager._commit_all_tracking_docs() (PREPARE→COMMIT→ROLLBACK, snapshot fail-closed)
+save_fact_digest      — StateManager.extract_fact_digest_from_analysis()
+rag_index             — Orchestrator._index_chapter_to_rag() → ChromaStore.index_chapter()
+rag_rebuild           — Orchestrator.rag_index_backfill() → ChromaStore.rebuild_branch() (clear failure→abort)
+```
+
+### 当前真实 State Flow（更新）
+
+```text
+review_chapter(input: styled_chapter, plan, tracking_docs, world_setting,
+               book_plan, volume_plan)
+  → StateManager.review_chapter()        [1 LLM call]
+  → ReviewDecision.from_analysis()       [0 LLM, deterministic]
+  → if PASS:
+      → StateManager.update_tracking_docs()
+        → LOAD originals (Phase 1)
+        → PARSE state deltas (Phase 2, 0 LLM)
+        → BUILD candidates (Phase 3)
+        → _commit_all_tracking_docs()    [PREPARE snapshot → COMMIT → ROLLBACK]
+          → snapshot fail → abort (no writes)
+          → write fail → rollback all
+        → if FAILED: return ERROR
+        → _sync_sqlite()                 [after canonical Markdown success]
+      → check StateCommitResult.success
+      → if success:
+          → extract_fact_digest_from_analysis()  [0 LLM, deterministic]
+          → _index_chapter_to_rag()              [ChromaDB]
+      → if failed:
+          → return ERROR (no Fact Digest, no RAG)
+  → if NEEDS_REVISION / HALT / UNKNOWN:
+      → no commit, no Fact Digest, no RAG
+```
+
+### 当前关键约束（更新）
+
+1. `snapshot read failure → abort before any writes` (E06.2.1)
+2. `write failure → ALL OLD restored` (E06.2)
+3. `commit failure → no Fact Digest → no RAG` (E06.2)
+4. `review requires styled candidate` (E06.2)
+5. `PASS / NEEDS_REVISION / HALT+L2 / HALT+L3 / UNKNOWN / runtime failure` — 6 种 Workflow 终态
+6. `CLI only prints "next chapter" after PASS + successful commit` (E06.2.1)
+7. `StateCommitResult.success` 是唯一 programmatic commit 信号
+8. Chroma 是 rebuildable derived state；`rebuild_branch()` 失败 → abort 整个 rebuild
+9. Fact Digest 是 derived state，但只从 committed chapter 生成
+10. SQLite 更新在 canonical Markdown 成功后执行
+11. Snapshot/rollback CLI 已移除 — 完整 rollback 属于 LangGraph checkpoint 之后
+12. `_sync_sqlite` 不再静默吞异常
+
+### E07 注意事项（更新）
+
+- `_commit_all_tracking_docs` 的 PREPARE→COMMIT→ROLLBACK 三阶段语义可能与 LangGraph checkpoint 机制重叠
+- Snapshot fail-closed 语义（Phase 4a 错误 → 立即 return）可映射为 LangGraph 的 conditional edge
+- RAG rebuild 的 clear→abort 语义是另一个 conditional edge pattern
+- CLI 的 6 种 workflow state 呈现已统一在 `cmd_review` 中
+
+---
+
+**E06.2.1 Final Runtime Closure 完成。不进入 E07 LangGraph。**

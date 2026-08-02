@@ -336,13 +336,20 @@ class ChromaStore:
 
     # ── Rebuild ────────────────────────────────────────
 
-    def rebuild_branch(self, novel_id: str, branch_id: str):
-        """Delete all chunks for a (novel, branch) pair (used by --rebuild)."""
+    def rebuild_branch(self, novel_id: str, branch_id: str) -> bool:
+        """Delete all chunks for a (novel, branch) pair (used by --rebuild).
+
+        Returns:
+            True if clear succeeded (including empty branch — nothing to delete).
+            False if clear failed — caller should abort rebuild.
+        """
         coll = self._ensure_collection()
         try:
             existing = coll.get(where=self._branch_where(novel_id, branch_id))
             if existing and existing.get("ids"):
                 coll.delete(ids=existing["ids"])
+            return True
         except Exception as e:
-            print(f"  [CHROMA WARNING] rebuild_branch 清理失败: "
-                  f"{type(e).__name__}: {e}")
+            print(f"  [CHROMA ERROR] rebuild_branch 清理失败，"
+                  f"中止重建: {type(e).__name__}: {e}")
+            return False

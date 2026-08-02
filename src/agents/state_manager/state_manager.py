@@ -549,16 +549,17 @@ class StateManager(BaseAgent):
                                    char_states: "CharacterStateList",
                                    state_result: dict,
                                    log_result: dict) -> StateCommitResult:
-        """E06.2: 原子化提交所有 canonical tracking docs（含回滚）。
+        """E06.2.1: 原子化提交所有 canonical tracking docs（含回滚）。
 
-        SNAPSHOT originals → WRITE all → ROLLBACK on failure.
+        PREPARE (validate snapshot) → COMMIT → ROLLBACK on failure.
 
         保证 ALL OLD or ALL NEW，绝不出现 PARTIAL NEW。
+        Snapshot 读取失败 → fail-closed: 不开始任何写入。
         """
         result = StateCommitResult(success=False)
         tracking_dir = self.fs.root / "tracking"
 
-        # ── Phase 4a: SNAPSHOT originals ──
+        # ── Phase 4a: PREPARE — SNAPSHOT originals ──
         doc_names = [
             "character_relationships",
             "items_equipment",
@@ -566,13 +567,28 @@ class StateManager(BaseAgent):
             "character_states",
         ]
         originals: dict[str, str | None] = {}
+        snapshot_errors: list[str] = []
+
         for name in doc_names:
             fpath = tracking_dir / f"{name}.md"
             try:
-                originals[name] = fpath.read_text(encoding="utf-8") if fpath.exists() else None
+                if fpath.exists():
+                    originals[name] = fpath.read_text(encoding="utf-8")
+                else:
+                    originals[name] = None  # 原文件确实不存在——正常
             except Exception as e:
-                result.warnings.append(f"snapshot {name} 失败: {e}")
-                originals[name] = None  # treat as missing
+                # E06.2.1: 文件存在但读取失败 → 无法安全回滚 → fail-closed
+                snapshot_errors.append(
+                    f"snapshot {name}: 文件存在但读取失败 ({type(e).__name__}: {e})")
+
+        if snapshot_errors:
+            result.error_message = (
+                f"第{chapter_index}章 canonical commit 中止: "
+                f"snapshot 阶段失败，无法安全回滚。"
+                f"未修改任何 canonical state。"
+                f"\n错误: {'; '.join(snapshot_errors)}")
+            result.warnings.extend(snapshot_errors)
+            return result
 
         # ── Phase 4b: Build candidate contents ──
         candidates: dict[str, str] = {}
@@ -714,5 +730,6 @@ class StateManager(BaseAgent):
                     novel_id, str(chapter_index), name,
                     {"last_seen": f"第{chapter_index}章"}
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"  [STATE WARNING] SQLite 角色状态缓存失败 "
+                      f"'{name}': {type(e).__name__}: {e}")

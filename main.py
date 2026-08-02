@@ -190,11 +190,49 @@ def cmd_style(args):
 
 
 def cmd_review(args):
+    """E06.2.1: 检查 review 结果并呈现正确的 workflow 状态。"""
     if not _get_novel_dir(args.name):
         return
     orch = Orchestrator(args.name)
-    orch.review_chapter(args.chapter)
-    print(f"\n下一步: python main.py plan {args.name} --chapter {args.chapter + 1}")
+    result = orch.review_chapter(args.chapter)
+
+    decision = result.get("decision", "UNKNOWN")
+    workflow_status = result.get("workflow_status", "")
+    commit_status = result.get("commit_status", "")
+    planning_level = result.get("planning_level", "L1")
+
+    if decision == "PASS" and workflow_status != "ERROR":
+        # Canonical commit 成功
+        print(f"\n  Review PASS — Canonical state committed")
+        print(f"  下一步: python main.py plan {args.name} --chapter {args.chapter + 1}")
+    elif decision == "PASS" and workflow_status == "ERROR":
+        # Runtime Commit Failure
+        print(f"\n  Canonical state commit failed — workflow halted")
+        print(f"  原因: {result.get('error', '未知')}")
+        print(f"  请检查文件系统权限后重新 review。")
+    elif decision == "NEEDS_REVISION":
+        print(f"\n  当前章节需要修订 — 不要继续规划下一章")
+        t1_count = len(result.get("t1_issues", []))
+        t2_count = len(result.get("t2_issues", []))
+        print(f"  T1: {t1_count}  T2: {t2_count}")
+        print(f"  修复后重新运行: python main.py write {args.name} --chapter {args.chapter}")
+        print(f"  然后: python main.py review {args.name} --chapter {args.chapter}")
+    elif decision == "HALT":
+        if planning_level == "L3":
+            print(f"\n  Strategic issue detected — planning_level = L3")
+            print(f"  需要战略层修复（Book Plan / 角色命运 / 世界观铁律违反）")
+        else:
+            print(f"\n  Planning issue detected — planning_level = {planning_level}")
+            print(f"  需要人工 / 规划层处理")
+        reasons = result.get("reasons", [])
+        if reasons:
+            for r in reasons[:5]:
+                print(f"    - {r}")
+    elif decision == "UNKNOWN":
+        print(f"\n  Supervisor decision unresolved — workflow halted")
+        print(f"  raw_analysis 已保存在 states/review_ch*，请人工判断。")
+    else:
+        print(f"\n  Unexpected decision: {decision}")
 
 
 def cmd_new_volume(args):
@@ -210,11 +248,13 @@ def cmd_new_volume(args):
 
 
 def cmd_rag_index(args):
-    """补齐/重建 RAG 索引 (E04)。"""
+    """补齐/重建 RAG 索引 (E04 / E06.2.1)。"""
     if not _get_novel_dir(args.name):
         return
     orch = Orchestrator(args.name)
-    orch.rag_index_backfill(rebuild=args.rebuild)
+    result = orch.rag_index_backfill(rebuild=args.rebuild)
+    if result.get("rebuild_aborted"):
+        print(f"\n  RAG 重建已中止。未修改索引。")
 
 
 
