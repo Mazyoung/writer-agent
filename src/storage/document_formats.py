@@ -1093,6 +1093,21 @@ class ReviewDecision:
         return rd
 
 
+# ── StateCommitResult (E06.2) ────────────────────────────────
+
+@dataclass
+class StateCommitResult:
+    """E06.2: Explicit result of canonical state commit.
+
+    Workflow must programmatically check success before proceeding
+    to Fact Digest and RAG. Print-based warnings are not sufficient.
+    """
+    success: bool = False
+    warnings: list[str] = field(default_factory=list)
+    changed_files: list[str] = field(default_factory=list)
+    error_message: str = ""
+
+
 # ── 辅助函数 ──────────────────────────────────────────────
 
 def _extract_title(text: str) -> str:

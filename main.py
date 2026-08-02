@@ -27,9 +27,6 @@
     # 状态
     python main.py status <小说名>                  # 查看进度
 
-    # 回退
-    python main.py snapshot <小说名>                # 创建快照
-    python main.py rollback <小说名>                # 回退到快照
 """
 
 import argparse
@@ -220,25 +217,6 @@ def cmd_rag_index(args):
     orch.rag_index_backfill(rebuild=args.rebuild)
 
 
-def cmd_snapshot(args):
-    if not _get_novel_dir(args.name):
-        return
-    orch = Orchestrator(args.name)
-    orch.snapshot_all()
-    print("快照完成。")
-
-
-def cmd_rollback(args):
-    if not _get_novel_dir(args.name):
-        return
-    orch = Orchestrator(args.name)
-    restored = orch.rollback_all()
-    if restored:
-        print(f"已回退 {len(restored)} 个文件:")
-        for r in restored:
-            print(f"  {r}")
-    else:
-        print("没有找到 .bak 备份文件。")
 
 
 # ═══ CLI ═══════════════════════════════════════════════════════
@@ -287,12 +265,6 @@ def main():
     p.add_argument("name")
     p.add_argument("--rebuild", action="store_true", help="清空当前分支索引后重建")
 
-    # snapshot / rollback
-    p = subparsers.add_parser("snapshot", help="创建快照")
-    p.add_argument("name")
-    p = subparsers.add_parser("rollback", help="回退到快照")
-    p.add_argument("name")
-
     args = parser.parse_args()
 
     if not args.command:
@@ -307,7 +279,6 @@ def main():
         "init": cmd_init, "status": cmd_status,
         "plan": cmd_plan, "write": cmd_write,
         "style": cmd_style, "review": cmd_review,
-        "snapshot": cmd_snapshot, "rollback": cmd_rollback,
         "new-volume": cmd_new_volume,
         "rag-index": cmd_rag_index,
     }

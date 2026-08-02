@@ -245,8 +245,9 @@ class ChromaStore:
                 where=self._chapter_where(novel_id, branch_id, chapter_index))
             if existing and existing.get("ids"):
                 coll.delete(ids=existing["ids"])
-        except Exception:
-            pass  # collection may be empty or where clause unsupported yet
+        except Exception as e:
+            print(f"  [CHROMA WARNING] 清理第{chapter_index}章旧chunks失败: "
+                  f"{type(e).__name__}: {e}")
 
         # 2. Chunk deterministically
         chunks = chunk_text(content, chunk_size, chunk_overlap)
@@ -342,5 +343,6 @@ class ChromaStore:
             existing = coll.get(where=self._branch_where(novel_id, branch_id))
             if existing and existing.get("ids"):
                 coll.delete(ids=existing["ids"])
-        except Exception:
-            pass  # collection may be empty
+        except Exception as e:
+            print(f"  [CHROMA WARNING] rebuild_branch 清理失败: "
+                  f"{type(e).__name__}: {e}")

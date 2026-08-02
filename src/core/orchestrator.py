@@ -897,10 +897,13 @@ Book Plan 是整本书的长期战略，只写长期有效的内容：
         chapter_text = self.file_store.load_latest("chapters",
                                                     f"chapter_{chapter_index:04d}_styled")
         if not chapter_text:
-            chapter_text = self.file_store.load_latest("chapters",
-                                                        f"chapter_{chapter_index:04d}")
-        if not chapter_text:
-            raise ValueError(f"第 {chapter_index} 章正文不存在")
+            # E06.2: Review requires styled chapter — no fallback to raw/draft.
+            # Unstyled chapters must go through write (DeepSeekWriter → ClaudeStylist)
+            # before review can evaluate them.
+            raise ValueError(
+                f"第 {chapter_index} 章 styled 文件不存在。"
+                f"请先运行: python main.py write {self.novel_id} --chapter {chapter_index}"
+                f"\nReview 只接受 styled 章节（经过 ClaudeStylist 编辑）。")
 
         plan_text = self.file_store.load_canonical("outlines",
                                                     f"chapter_plan_ch{chapter_index:04d}") or ""
@@ -943,6 +946,24 @@ Book Plan 是整本书的长期战略，只写长期有效的内容：
             changes = self.state_manager.update_tracking_docs(
                 chapter_index, chapter_text, analysis["raw_analysis"])
 
+            # ── E06.2: Check commit result before proceeding ──
+            commit_result = changes.get("_commit_result")
+            if commit_result and not commit_result.success:
+                # Review semantic PASS but canonical state commit FAILED
+                # → ERROR / HALT — stop downstream canonical commit
+                print(f"\n  [ERROR] Review semantic PASS but canonical state commit FAILED")
+                print(f"  [ERROR] 原因: {commit_result.error_message}")
+                for w in commit_result.warnings:
+                    print(f"    - {w}")
+                print(f"  [ERROR] 未提交 Fact Digest / RAG。workflow halted。")
+                print(f"  [ERROR] 本章尚未完成 canonical commit，"
+                      f"请检查文件系统权限后重新 review。")
+                return {"decision": "PASS",
+                        "commit_status": "FAILED",
+                        "workflow_status": "ERROR",
+                        "error": commit_result.error_message,
+                        "warnings": commit_result.warnings}
+
             print("  [StateManager] 提取事实摘要...")
             self.state_manager.extract_fact_digest_from_analysis(
                 analysis["raw_analysis"], chapter_index)
@@ -955,7 +976,7 @@ Book Plan 是整本书的长期战略，只写长期有效的内容：
 
             print(f"\n  复盘完成。变更日志: states/post_chapter_update_ch{chapter_index:04d}.md")
             for key, val in changes.items():
-                if key != "change_log" and val:
+                if key != "change_log" and key != "_commit_result" and val:
                     print(f"    {key}: 已更新")
             return changes
 
@@ -1078,23 +1099,6 @@ Book Plan 是整本书的长期战略，只写长期有效的内容：
         print(f"未回收伏笔: {s['pending_foreshadows']}")
 
     # ═══ 回退 ═══════════════════════════════════════════════════
-
-    def snapshot_all(self):
-        for cat in ["settings", "outlines", "tracking"]:
-            for f in (self.file_store.root / cat).glob("*.md"):
-                if f.suffix == ".md" and not f.name.endswith(".bak.md"):
-                    bak = f.with_suffix(".bak.md")
-                    bak.write_text(f.read_text(encoding="utf-8"), encoding="utf-8")
-        print("快照已保存 (*.bak.md)")
-
-    def rollback_all(self) -> list[str]:
-        restored = []
-        for cat in ["settings", "outlines", "tracking"]:
-            for bak in sorted((self.file_store.root / cat).glob("*.bak.md")):
-                main = bak.with_suffix(".md")
-                main.write_text(bak.read_text(encoding="utf-8"), encoding="utf-8")
-                restored.append(str(main.relative_to(self.file_store.root)))
-        return restored
 
     def rollback_chapter(self, chapter_index: int):
         """删除指定章的所有文件。"""

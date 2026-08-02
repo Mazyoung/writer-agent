@@ -1160,16 +1160,17 @@ INVALID_ITEM_LINE_WITHOUT_COLON
         self.assertIn("顾明川", updated_rels)
 
     def test_double_save_failure_reported(self):
-        """第二个 tracking doc 保存失败不静默。"""
+        """E06.2: 第二个 tracking doc 保存失败 → 回滚所有已写文件，不静默。"""
         root = self._setup_review_dirs("atom2_novel")
         sqlite = SQLiteStore(root / "state.db")
         sm = StateManager("atom2_novel", sqlite)
         sm.fs = __import__('src.storage.file_store', fromlist=['FileStore']).FileStore(
             "atom2_novel", self.settings.data_dir)
 
-        # Write initial tracking doc
+        # Write initial tracking doc with known OLD content
+        old_rels = "# OLD角色关系图\n## 关系详情\n#### 旧角色A ↔ 旧角色B\n- **关系类型**: 旧关系\n## 关系变更日志\n"
         (root / "tracking" / "character_relationships.md").write_text(
-            "# 角色关系图\n## 关系详情\n## 关系变更日志", encoding="utf-8")
+            old_rels, encoding="utf-8")
 
         good_analysis = """## 状态变更（State Delta）
 ### 角色关系当前状态
@@ -1191,18 +1192,27 @@ INVALID_ITEM_LINE_WITHOUT_COLON
 
         sm.fs.save_tracking_doc = failing_save
 
-        # Should not raise
+        # Should not raise — commit failure is reported, not raised
         result = sm.update_tracking_docs(1, "正文", good_analysis)
 
-        # First doc (relationships) should have been saved
+        # ── E06.2: ALL OLD — first doc must be rolled back ──
+        commit_result = result.get("_commit_result")
+        self.assertIsNotNone(commit_result)
+        self.assertFalse(commit_result.success,
+                         "第二个保存失败 → commit 必须报告 FAILED")
+
         updated_rels = (root / "tracking" / "character_relationships.md").read_text(
             encoding="utf-8")
-        self.assertIn("陆沉", updated_rels,
-                      "第一个 canonical doc 应成功保存")
+        self.assertIn("OLD角色关系图", updated_rels,
+                      "E06.2: 第一个已保存的文件必须回滚到 OLD 内容")
+        self.assertNotIn("陆沉", updated_rels,
+                         "E06.2: 关系文件不得包含新数据（已回滚）")
 
-        # Result should indicate that not all changes were committed
-        # (change_log may still be generated since it's derived)
+        # Result should still include change_log for diagnostics
         self.assertIn("change_log", result)
+        # Commit failure info should be present
+        self.assertIn("OSError", commit_result.error_message,
+                      "错误信息必须包含异常类型")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1409,6 +1419,509 @@ class TestStrategicContextInReviewPrompt(_TmpNovelCase):
 
         self.assertIn("E06_VOLUME_RULE_4281", captured["user"],
                       "Volume Plan 必须出现在 StateManager review prompt 中")
+
+
+# ═══════════════════════════════════════════════════════════════
+# E06.2 TEST ADDITIONS — Runtime Consistency Closure
+# ═══════════════════════════════════════════════════════════════
+
+# ── MOCK DATA FOR E06.2 ──────────────────────────────────
+
+MOCK_RAW_ANALYSIS_PASS_E06_2 = """# 第1章复盘分析
+
+## 事实摘要
+### 确定的物品
+扳手
+### 确定的角色状态
+柯林：健康
+### 确定的事件
+柯林醒来
+### 确定的数字/数据
+背包中2件物品
+### 明确未出现的内容
+无
+### 待解悬念
+徽章来源不明
+
+## 状态变更（State Delta）
+### 角色关系当前状态
+- 柯林 ↔ 瘸子莫: 关系类型=交易伙伴, 当前状态=信任已建立, 态度=友好 [依据: 第5段]
+
+### 角色物品状态
+#### 获得
+- 发光徽章: 持有者=柯林, 来源=背包发现, 状态=可用 [依据: 第3段]
+
+### 角色修炼状态
+### 角色当前状态
+### 伏笔状态
+
+## 追踪文档变更建议
+### 角色关系
+### 物品装备
+### 修炼体系
+
+## 一致性检查
+### T1（硬错误）
+无
+### T2（软问题）
+无
+### T3（观察项）
+无
+
+## 质量审阅
+- **情节逻辑**: PASS
+- **节奏评估**: PASS
+- **大纲符合度**: PASS
+- **角色塑造**: PASS
+
+## 审阅决策
+- **决策**: PASS
+- **严重性**: PASS
+- **主要问题**: 无
+- **规划级别**: L1
+"""
+
+# ═══════════════════════════════════════════════════════════════
+# E06.2-A. P0 — True Atomic Rollback
+# ═══════════════════════════════════════════════════════════════
+
+class TestAtomicRollback(_TmpNovelCase):
+    """E06.2-A: 原子化提交失败 → 回滚所有已写文件，保持 ALL OLD。"""
+
+    def test_second_save_failure_rolls_back_first(self):
+        """第二个 tracking doc 保存失败 → 第一个已保存的必须回滚到 OLD。"""
+        root = self._setup_review_dirs("atom3_novel")
+        sqlite = SQLiteStore(root / "state.db")
+        sm = StateManager("atom3_novel", sqlite)
+        sm.fs = __import__('src.storage.file_store', fromlist=['FileStore']).FileStore(
+            "atom3_novel", self.settings.data_dir)
+
+        # Write INITIAL canonical tracking docs with known OLD content
+        old_rels = "# OLD RELATIONSHIPS v1\n## 关系详情\n#### 旧角色 ↔ 旧角色\n- **关系类型**: 旧关系\n- **当前状态**: 旧状态\n## 关系变更日志\n"
+        old_items = "# OLD ITEMS v1\n## 主角持有\n| 物品 | 来源 | 获得章 | 属性 | 状态 | 备注 |\n|------|------|--------|------|------|------|\n| 旧物品 | 旧来源 | 第0章 | 旧属性 | 旧状态 | |\n"
+        old_cult = "# OLD CULTIVATION v1\n## 角色修炼状态\n| 角色 | 境界 | 距下一阶 | 特殊能力 | 限制 | 更新章 |\n|------|------|---------|---------|------|--------|\n| 旧角色 | 旧境界 | 旧距下一阶 | 旧能力 | 旧限制 | 第0章 |\n"
+
+        (root / "tracking" / "character_relationships.md").write_text(
+            old_rels, encoding="utf-8")
+        (root / "tracking" / "items_equipment.md").write_text(
+            old_items, encoding="utf-8")
+        (root / "tracking" / "cultivation_system.md").write_text(
+            old_cult, encoding="utf-8")
+        # character_states.md may not exist yet — that's fine
+
+        # State delta that modifies relationships AND items
+        analysis = """## 状态变更（State Delta）
+### 角色关系当前状态
+- 柯林 ↔ 瘸子莫: 关系类型=交易伙伴, 当前状态=信任已建立, 态度=友好 [依据: 第5段]
+### 角色物品状态
+#### 获得
+- 发光徽章: 持有者=柯林, 来源=背包发现, 状态=可用 [依据: 第3段]
+### 角色修炼状态
+### 角色当前状态
+### 伏笔状态
+"""
+        # Patch save_tracking_doc: first call (relationships) succeeds,
+        # second call (items) raises IOError
+        call_order = []
+        orig_save = sm.fs.save_tracking_doc
+
+        def failing_save(name, content):
+            call_order.append(name)
+            if len(call_order) >= 2:
+                raise OSError("E06.2 模拟 I/O 失败 — 第二个文件写入失败")
+            return orig_save(name, content)
+
+        sm.fs.save_tracking_doc = failing_save
+
+        result = sm.update_tracking_docs(1, "正文", analysis)
+
+        # ── Assert: commit failed ──
+        commit_result = result.get("_commit_result")
+        self.assertIsNotNone(commit_result, "必须返回 StateCommitResult")
+        self.assertFalse(commit_result.success,
+                         "第二个文件保存失败 → commit 必须报告 FAILED")
+        self.assertIn("items_equipment", commit_result.error_message,
+                      "错误信息必须包含失败组件名")
+
+        # ── Assert: ALL OLD — relationships rolled back ──
+        current_rels = (root / "tracking" / "character_relationships.md").read_text(
+            encoding="utf-8")
+        self.assertIn("OLD RELATIONSHIPS v1", current_rels,
+                      "关系文件必须回滚到 OLD 内容")
+        self.assertNotIn("交易伙伴", current_rels,
+                         "关系文件不得包含新数据（已回滚）")
+        self.assertNotIn("柯林", current_rels,
+                         "关系文件不得包含新角色名（已回滚）")
+
+        # items must also be OLD
+        current_items = (root / "tracking" / "items_equipment.md").read_text(
+            encoding="utf-8")
+        self.assertIn("OLD ITEMS v1", current_items,
+                      "物品文件必须保持 OLD 内容")
+        self.assertIn("旧物品", current_items,
+                      "物品文件必须保持旧条目")
+
+        # cultivation must also be OLD
+        current_cult = (root / "tracking" / "cultivation_system.md").read_text(
+            encoding="utf-8")
+        self.assertIn("OLD CULTIVATION v1", current_cult,
+                      "修炼文件必须保持 OLD 内容")
+
+    def test_all_files_committed_when_no_failure(self):
+        """所有文件保存成功 → ALL NEW，changed_files 正确。"""
+        root = self._setup_review_dirs("atom4_novel")
+        sqlite = SQLiteStore(root / "state.db")
+        sm = StateManager("atom4_novel", sqlite)
+        sm.fs = __import__('src.storage.file_store', fromlist=['FileStore']).FileStore(
+            "atom4_novel", self.settings.data_dir)
+
+        # Write initial tracking docs
+        (root / "tracking" / "character_relationships.md").write_text(
+            "# 角色关系图\n## 关系详情\n## 关系变更日志", encoding="utf-8")
+        (root / "tracking" / "items_equipment.md").write_text(
+            "# 物品装备\n## 主角持有\n## 物品流转日志", encoding="utf-8")
+        (root / "tracking" / "cultivation_system.md").write_text(
+            "# 修炼体系\n## 角色修炼状态\n", encoding="utf-8")
+
+        analysis = """## 状态变更（State Delta）
+### 角色关系当前状态
+- 柯林 ↔ 瘸子莫: 关系类型=交易伙伴, 当前状态=信任已建立, 态度=友好 [依据: 第5段]
+### 角色物品状态
+#### 获得
+- 发光徽章: 持有者=柯林, 来源=背包发现, 状态=可用 [依据: 第3段]
+### 角色修炼状态
+### 角色当前状态
+### 伏笔状态
+"""
+        result = sm.update_tracking_docs(1, "正文", analysis)
+
+        commit_result = result.get("_commit_result")
+        self.assertIsNotNone(commit_result)
+        self.assertTrue(commit_result.success,
+                        "所有文件保存成功 → commit 必须报告 SUCCESS")
+        self.assertGreater(len(commit_result.changed_files), 0,
+                           "changed_files 必须包含已提交的文件名")
+
+        # Verify content is NEW
+        current_rels = (root / "tracking" / "character_relationships.md").read_text(
+            encoding="utf-8")
+        self.assertIn("交易伙伴", current_rels,
+                      "成功提交后关系文件必须包含新数据")
+
+
+# ═══════════════════════════════════════════════════════════════
+# E06.2-B. P0 — Commit Failure Blocks Fact Digest & RAG
+# ═══════════════════════════════════════════════════════════════
+
+class TestCommitFailureBlocksDownstream(_TmpNovelCase):
+    """E06.2-B: State commit FAILED → no Fact Digest, no RAG index."""
+
+    def test_commit_failure_no_fact_digest_no_rag(self):
+        """Review PASS but commit fails → return ERROR, no fact_digest, no RAG."""
+        root = self._setup_review_dirs("cf_novel")
+        (root / "chapters" / "chapter_0001_styled_20260801_120000.md").write_text(
+            "第1章正文内容。" * 200, encoding="utf-8")
+        (root / "outlines" / "chapter_plan_ch0001.md").write_text(
+            SAMPLE_PLAN_MD, encoding="utf-8")
+
+        from src.core.orchestrator import Orchestrator
+        from src.storage.chroma_store import ChromaStore
+        from src.agents.state_manager.state_manager import StateManager
+
+        orch = Orchestrator("cf_novel")
+        rag_calls = []
+
+        # Make the commit fail by patching _commit_all_tracking_docs
+        orig_commit = StateManager._commit_all_tracking_docs
+
+        def failing_commit(self, chapter_index, ch_label, rels, items, cult,
+                          char_states, state_result, log_result):
+            from src.storage.document_formats import StateCommitResult
+            return StateCommitResult(
+                success=False,
+                error_message="E06.2 模拟提交失败: 磁盘写入错误",
+                warnings=["模拟 I/O 失败"],
+            )
+
+        def fake_llm(self, messages):
+            return MOCK_RAW_ANALYSIS_PASS_E06_2
+
+        with mock.patch.object(BaseAgent, "_call_llm", fake_llm), \
+             mock.patch.object(ChromaStore, "index_chapter",
+                               side_effect=lambda *a, **kw: rag_calls.append(1)), \
+             mock.patch.object(StateManager, "_commit_all_tracking_docs",
+                               failing_commit):
+            result = orch.review_chapter(1)
+
+        # ── Assert: workflow reports ERROR ──
+        self.assertEqual(result.get("decision"), "PASS",
+                         "Review semantic 仍为 PASS")
+        self.assertEqual(result.get("commit_status"), "FAILED",
+                         "commit_status 必须为 FAILED")
+        self.assertEqual(result.get("workflow_status"), "ERROR",
+                         "workflow_status 必须为 ERROR")
+
+        # ── Assert: no RAG call ──
+        self.assertEqual(len(rag_calls), 0,
+                         "Commit 失败 → 不得执行 RAG index")
+
+        # ── Assert: no fact_digest file ──
+        fact_files = list((root / "states").glob("fact_digest_ch0001_*.md"))
+        self.assertEqual(len(fact_files), 0,
+                         "Commit 失败 → 不得生成 fact_digest 文件")
+
+    def test_commit_success_proceeds_normally(self):
+        """Review PASS + commit success → fact_digest + RAG proceed normally."""
+        root = self._setup_review_dirs("cs2_novel")
+        (root / "chapters" / "chapter_0001_styled_20260801_120000.md").write_text(
+            "第1章正文内容。" * 200, encoding="utf-8")
+        (root / "outlines" / "chapter_plan_ch0001.md").write_text(
+            SAMPLE_PLAN_MD, encoding="utf-8")
+
+        from src.core.orchestrator import Orchestrator
+        from src.storage.chroma_store import ChromaStore
+
+        orch = Orchestrator("cs2_novel")
+        rag_calls = []
+
+        def fake_llm(self, messages):
+            return MOCK_RAW_ANALYSIS_PASS_E06_2
+
+        with mock.patch.object(BaseAgent, "_call_llm", fake_llm), \
+             mock.patch.object(ChromaStore, "index_chapter",
+                               side_effect=lambda *a, **kw: rag_calls.append(1)):
+            result = orch.review_chapter(1)
+
+        # ── Assert: normal PASS path ──
+        self.assertNotEqual(result.get("commit_status"), "FAILED",
+                            "正常 PASS 不得包含 commit_status=FAILED")
+        self.assertNotIn("_commit_result", {k for k in result.keys()
+                                            if k != "_commit_result"},
+                         "正常路径不应暴露内部 _commit_result")
+        self.assertGreater(len(rag_calls), 0,
+                           "Commit 成功 → 必须执行 RAG index")
+
+        # ── Assert: fact_digest exists ──
+        fact_files = list((root / "states").glob("fact_digest_ch0001_*.md"))
+        self.assertGreater(len(fact_files), 0,
+                           "Commit 成功 → 必须生成 fact_digest 文件")
+
+
+# ═══════════════════════════════════════════════════════════════
+# E06.2-C. P0 — Styled Chapter Enforcement
+# ═══════════════════════════════════════════════════════════════
+
+class TestStyledChapterRequired(_TmpNovelCase):
+    """E06.2-C: Review 只接受 styled 章节，不 fallback 到 raw。"""
+
+    def test_review_without_styled_raises(self):
+        """没有 styled 文件 → ValueError（不再 fallback 到 raw）。"""
+        root = self._setup_review_dirs("sty_novel")
+        # Only create a raw chapter, no styled
+        (root / "chapters" / "chapter_0001_20260801_120000.md").write_text(
+            "第1章 raw 正文。" * 200, encoding="utf-8")
+        # Remove the default styled file that _setup_review_dirs creates
+        for f in root.glob("chapters/chapter_0001_styled_*.md"):
+            f.unlink()
+
+        from src.core.orchestrator import Orchestrator
+
+        orch = Orchestrator("sty_novel")
+        with self.assertRaises(ValueError) as ctx:
+            orch.review_chapter(1)
+        self.assertIn("styled", str(ctx.exception),
+                      "错误信息必须明确指出缺少 styled 文件")
+
+    def test_review_with_styled_proceeds(self):
+        """有 styled 文件 → 正常执行（不抛异常）。"""
+        root = self._setup_review_dirs("sty2_novel")
+        (root / "chapters" / "chapter_0001_styled_20260801_120000.md").write_text(
+            "第1章 styled 正文。" * 200, encoding="utf-8")
+        (root / "outlines" / "chapter_plan_ch0001.md").write_text(
+            SAMPLE_PLAN_MD, encoding="utf-8")
+
+        from src.core.orchestrator import Orchestrator
+        from src.storage.chroma_store import ChromaStore
+
+        orch = Orchestrator("sty2_novel")
+
+        def fake_llm(self, messages):
+            return MOCK_RAW_ANALYSIS_PASS_E06_2
+
+        with mock.patch.object(BaseAgent, "_call_llm", fake_llm), \
+             mock.patch.object(ChromaStore, "index_chapter", return_value=2):
+            # Should not raise
+            result = orch.review_chapter(1)
+
+        self.assertIsNotNone(result)
+
+
+# ═══════════════════════════════════════════════════════════════
+# E06.2-D. P0 — StateCommitResult Propagation
+# ═══════════════════════════════════════════════════════════════
+
+class TestStateCommitResultPropagation(unittest.TestCase):
+    """E06.2-D: StateCommitResult 正确构造和传播。"""
+
+    def test_success_result(self):
+        from src.storage.document_formats import StateCommitResult
+        r = StateCommitResult(success=True, changed_files=["a.md", "b.md"])
+        self.assertTrue(r.success)
+        self.assertEqual(len(r.changed_files), 2)
+        self.assertEqual(r.error_message, "")
+
+    def test_failure_result(self):
+        from src.storage.document_formats import StateCommitResult
+        r = StateCommitResult(
+            success=False,
+            error_message="磁盘满",
+            warnings=["回滚成功", "SQLite 缓存失败: timeout"])
+        self.assertFalse(r.success)
+        self.assertIn("磁盘满", r.error_message)
+        self.assertEqual(len(r.warnings), 2)
+
+    def test_default_is_failure(self):
+        from src.storage.document_formats import StateCommitResult
+        r = StateCommitResult()
+        self.assertFalse(r.success,
+                         "StateCommitResult 默认 success=False（fail-closed）")
+
+
+# ═══════════════════════════════════════════════════════════════
+# E06.2-E. P1 — CLI Snapshot/Rollback Cleanup
+# ═══════════════════════════════════════════════════════════════
+
+class TestCLINoBrokenSnapshotRollback(unittest.TestCase):
+    """E06.2-E: --help 不宣传已移除的 snapshot/rollback 命令。"""
+
+    def test_help_does_not_contain_snapshot_subcommand(self):
+        """python main.py --help 不应包含 snapshot/rollback。"""
+        import subprocess
+        import sys
+        from pathlib import Path
+
+        main_py = Path(__file__).parent.parent / "main.py"
+        result = subprocess.run(
+            [sys.executable, str(main_py), "--help"],
+            capture_output=True, text=True, timeout=30,
+            encoding="utf-8", errors="replace",
+            env={**__import__('os').environ, "PYTHONIOENCODING": "utf-8"})
+        output = (result.stdout or "") + (result.stderr or "")
+        self.assertNotIn("snapshot", output.lower().split(),
+                         "--help 不得包含 snapshot 子命令")
+        self.assertNotIn("rollback", output.lower().split(),
+                         "--help 不得包含 rollback 子命令")
+
+    def test_snapshot_command_does_not_exist(self):
+        """调用不存在的 snapshot 子命令 → argparse error（不是 AttributeError）。"""
+        import subprocess
+        import sys
+        from pathlib import Path
+
+        main_py = Path(__file__).parent.parent / "main.py"
+        result = subprocess.run(
+            [sys.executable, str(main_py), "snapshot", "test_novel"],
+            capture_output=True, text=True, timeout=30,
+            encoding="utf-8", errors="replace",
+            env={**__import__('os').environ, "PYTHONIOENCODING": "utf-8"})
+        # argparse should reject unknown command — not AttributeError
+        self.assertNotEqual(result.returncode, 0,
+                            "snapshot 命令应返回非零退出码")
+        output = (result.stdout or "") + (result.stderr or "")
+        self.assertNotIn("AttributeError", output,
+                         "snapshot 命令不得导致 AttributeError")
+
+    def test_rollback_command_does_not_exist(self):
+        """调用不存在的 rollback 子命令 → argparse error（不是 AttributeError）。"""
+        import subprocess
+        import sys
+        from pathlib import Path
+
+        main_py = Path(__file__).parent.parent / "main.py"
+        result = subprocess.run(
+            [sys.executable, str(main_py), "rollback", "test_novel"],
+            capture_output=True, text=True, timeout=30,
+            encoding="utf-8", errors="replace",
+            env={**__import__('os').environ, "PYTHONIOENCODING": "utf-8"})
+        self.assertNotEqual(result.returncode, 0,
+                            "rollback 命令应返回非零退出码")
+        output = (result.stdout or "") + (result.stderr or "")
+        self.assertNotIn("AttributeError", output,
+                         "rollback 命令不得导致 AttributeError")
+
+
+# ═══════════════════════════════════════════════════════════════
+# E06.2-F. P1 — Chroma Warning Verification
+# ═══════════════════════════════════════════════════════════════
+
+class TestChromaWarningNotSilent(unittest.TestCase):
+    """E06.2-F: ChromaStore index_chapter/rebuild_branch 不再静默吞异常。"""
+
+    def test_index_chapter_stale_cleanup_logs_warning(self):
+        """index_chapter 清理旧 chunks 失败 → 输出 [CHROMA WARNING]，不静默。"""
+        from src.storage.chroma_store import ChromaStore
+        from unittest.mock import MagicMock
+        import io
+        import sys
+
+        captured = io.StringIO()
+        old_stdout = sys.stdout
+        sys.stdout = captured
+
+        try:
+            store = ChromaStore(Path(tempfile.mkdtemp()))
+            # Mock collection: _ensure_collection succeeds,
+            # but coll.get() raises to test the except block
+            mock_coll = MagicMock()
+            mock_coll.get.side_effect = RuntimeError(
+                "E06.2 模拟 ChromaDB get 失败")
+            store._client = MagicMock()
+            store._collection = mock_coll
+
+            # index_chapter should catch the RuntimeError in stale cleanup
+            # and print [CHROMA WARNING] — then continue with chunking
+            count = store.index_chapter("test_novel", "main", 1,
+                                        "test content " * 50,
+                                        source_path="test.md")
+            # Should still have indexed chunks despite stale cleanup failure
+            self.assertGreater(count, 0,
+                               "stale cleanup 失败不应阻止 chunk 索引")
+
+            output = captured.getvalue()
+        finally:
+            sys.stdout = old_stdout
+
+        self.assertIn("CHROMA WARNING", output,
+                      "index_chapter 清理失败必须输出 [CHROMA WARNING]")
+
+    def test_rebuild_branch_logs_warning(self):
+        """rebuild_branch 失败 → 输出 [CHROMA WARNING]，不静默。"""
+        from src.storage.chroma_store import ChromaStore
+        from unittest.mock import MagicMock
+        import io
+        import sys
+
+        captured = io.StringIO()
+        old_stdout = sys.stdout
+        sys.stdout = captured
+
+        try:
+            store = ChromaStore(Path(tempfile.mkdtemp()))
+            mock_coll = MagicMock()
+            mock_coll.get.side_effect = RuntimeError(
+                "E06.2 模拟 ChromaDB get 失败")
+            store._client = MagicMock()
+            store._collection = mock_coll
+
+            # rebuild_branch should catch and print warning, not raise
+            store.rebuild_branch("test_novel", "main")
+
+            output = captured.getvalue()
+        finally:
+            sys.stdout = old_stdout
+
+        self.assertIn("CHROMA WARNING", output,
+                      "rebuild_branch 失败必须输出 [CHROMA WARNING]")
 
 
 if __name__ == "__main__":

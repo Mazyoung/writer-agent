@@ -18,7 +18,7 @@ from src.storage.document_formats import (
     FactDigest, CharacterRelationships, ItemsEquipment, CultivationSystem,
     RelationshipChange, RelationshipEntry, ItemLog, ItemEntry, CharacterCultivation,
     CharacterStateEntry, CharacterStateList,
-    ReviewDecision, _extract_section,
+    ReviewDecision, StateCommitResult, _extract_section,
 )
 from src.storage.sqlite_store import SQLiteStore
 
@@ -219,12 +219,14 @@ class StateManager(BaseAgent):
             return changes
 
         # ── Phase 4: COMMIT ALL canonical tracking docs ──
-        commit_ok = self._commit_all_tracking_docs(
+        commit_result = self._commit_all_tracking_docs(
             chapter_index, ch_label,
             rels, items, cult, char_states,
             state_result, log_result)
 
-        if not commit_ok:
+        changes["_commit_result"] = commit_result
+
+        if not commit_result.success:
             return changes
 
         # ── Phase 5: SQLite cache (separate from canonical, errors logged) ──
@@ -546,55 +548,88 @@ class StateManager(BaseAgent):
                                    cult: CultivationSystem,
                                    char_states: "CharacterStateList",
                                    state_result: dict,
-                                   log_result: dict) -> bool:
-        """E06.1: 原子化提交所有 canonical tracking docs。
+                                   log_result: dict) -> StateCommitResult:
+        """E06.2: 原子化提交所有 canonical tracking docs（含回滚）。
 
-        所有对象已在内存中构建完毕，这里一次性保存。
-        保存失败时报告具体组件，不静默。
+        SNAPSHOT originals → WRITE all → ROLLBACK on failure.
+
+        保证 ALL OLD or ALL NEW，绝不出现 PARTIAL NEW。
         """
+        result = StateCommitResult(success=False)
+        tracking_dir = self.fs.root / "tracking"
+
+        # ── Phase 4a: SNAPSHOT originals ──
+        doc_names = [
+            "character_relationships",
+            "items_equipment",
+            "cultivation_system",
+            "character_states",
+        ]
+        originals: dict[str, str | None] = {}
+        for name in doc_names:
+            fpath = tracking_dir / f"{name}.md"
+            try:
+                originals[name] = fpath.read_text(encoding="utf-8") if fpath.exists() else None
+            except Exception as e:
+                result.warnings.append(f"snapshot {name} 失败: {e}")
+                originals[name] = None  # treat as missing
+
+        # ── Phase 4b: Build candidate contents ──
+        candidates: dict[str, str] = {}
+        candidates["character_relationships"] = rels.to_markdown()
+        candidates["items_equipment"] = items.to_markdown()
+        candidates["cultivation_system"] = cult.to_markdown()
+        if char_states.entries:
+            candidates["character_states"] = char_states.to_markdown()
+
+        # ── Phase 4c: COMMIT with rollback ──
+        written: list[str] = []
         commit_errors: list[str] = []
 
-        # 1. Character Relationships
-        try:
-            self.fs.save_tracking_doc("character_relationships", rels.to_markdown())
-        except Exception as e:
-            commit_errors.append(f"character_relationships: {e}")
-
-        # 2. Items Equipment
-        try:
-            self.fs.save_tracking_doc("items_equipment", items.to_markdown())
-        except Exception as e:
-            commit_errors.append(f"items_equipment: {e}")
-
-        # 3. Cultivation System
-        try:
-            self.fs.save_tracking_doc("cultivation_system", cult.to_markdown())
-        except Exception as e:
-            commit_errors.append(f"cultivation_system: {e}")
-
-        # 4. Character States (E06.1)
-        if char_states.entries:
+        for name in doc_names:
+            content = candidates.get(name)
+            if content is None:
+                continue  # nothing to write for this doc
             try:
-                self.fs.save_tracking_doc("character_states",
-                                          char_states.to_markdown())
+                self.fs.save_tracking_doc(name, content)
+                written.append(name)
+                result.changed_files.append(f"tracking/{name}.md")
             except Exception as e:
-                commit_errors.append(f"character_states: {e}")
+                commit_errors.append(f"{name}: {type(e).__name__}: {e}")
+                # ── ROLLBACK all already-written files ──
+                for rolled in written:
+                    original = originals.get(rolled)
+                    try:
+                        if original is not None:
+                            (tracking_dir / f"{rolled}.md").write_text(
+                                original, encoding="utf-8")
+                        elif (tracking_dir / f"{rolled}.md").exists():
+                            (tracking_dir / f"{rolled}.md").unlink()
+                    except Exception as re:
+                        result.warnings.append(
+                            f"rollback {rolled} 失败（状态可能不一致）: {re}")
+                break  # stop trying to write more
 
-        # 5. Foreshadowing SQLite (separate cache)
+        # ── Phase 4d: Foreshadowing SQLite (separate cache, errors logged) ──
         foreshadows = state_result.get("foreshadows", [])
         for desc, new_status, resolve_ch in foreshadows:
             try:
                 self.sqlite.upsert_foreshadow(
                     self.novel_id, desc, new_status, resolve_ch)
             except Exception as e:
-                commit_errors.append(f"foreshadow '{desc}': {e}")
+                result.warnings.append(
+                    f"foreshadow SQLite '{desc}': {type(e).__name__}: {e}")
 
         if commit_errors:
-            print(f"  [STATE WARNING] 第{chapter_index}章 tracking doc 提交错误:")
+            result.error_message = "; ".join(commit_errors)
+            result.warnings.insert(0, f"第{chapter_index}章 tracking doc 提交失败，"
+                                   f"已回滚 {len(written)} 个文件")
             for err in commit_errors:
-                print(f"    - {err}")
-            return False
-        return True
+                result.warnings.append(f"  - {err}")
+            return result
+
+        result.success = True
+        return result
 
     # ── Static Parsers ────────────────────────────────────
 
