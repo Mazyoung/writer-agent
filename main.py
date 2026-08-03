@@ -66,13 +66,23 @@ def cmd_init(args):
             print(f"小说 '{args.name}' 尚未创建。先运行: python main.py init {args.name}")
             return
         orch = Orchestrator(args.name)
-        proposal = orch.file_store.load_canonical("", "proposal")
-        if not proposal:
+        novel_dir = orch.file_store.root
+        edited_path = novel_dir / "proposal_edited.md"
+        canonical_path = novel_dir / "proposal.md"
+
+        if edited_path.exists():
+            proposal = edited_path.read_text(encoding="utf-8")
+            print("Using proposal_edited.md [HUMAN OVERRIDE]")
+        elif canonical_path.exists():
+            proposal = canonical_path.read_text(encoding="utf-8")
+            print("Using proposal.md [AI CANONICAL]")
+        else:
             proposal = orch.file_store.load_latest("", "proposal")
-        if not proposal:
-            print("未找到创作提案。先运行: python main.py init <小说名>")
-            return
-        print("使用已确认的提案生成完整大纲...")
+            if proposal:
+                print("Using legacy proposal [COMPAT]")
+            else:
+                print("未找到创作提案。先运行: python main.py init <小说名>")
+                return
         orch.initialize_novel(proposal)
         print(f"\n下一步: python main.py plan {args.name} --chapter 1")
         return
@@ -82,7 +92,7 @@ def cmd_init(args):
         proposal_path = novel_dir / "proposal.md"
         if proposal_path.exists():
             print(f"小说 '{args.name}' 已存在。")
-            print(f"  编辑 proposal.md 后: python main.py init {args.name} --confirm")
+            print(f"  编辑 proposal.md 后保存为 proposal_edited.md，然后: python main.py init {args.name} --confirm")
             print(f"  或 --force 重新生成提案")
             return
     orch = Orchestrator(args.name)
