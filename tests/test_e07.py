@@ -420,6 +420,121 @@ class TestE07_2_PassHappyPath(unittest.TestCase):
         self.assertIn("plan_chapter", nodes)
         self.assertIn("rag_index", nodes)
 
+    @patch("src.workflows.chapter_workflow.FileStore")
+    @patch("src.agents.author.chapter_planner.ChapterPlanner")
+    @patch("src.agents.author.deepseek_writer.DeepSeekWriter")
+    @patch("src.agents.author.claude_stylist.ClaudeStylist")
+    @patch("src.agents.author.style_checker.StyleChecker")
+    @patch("src.agents.state_manager.state_manager.StateManager")
+    @patch("src.storage.chroma_store.ChromaStore")
+    def test_graph_invoke_pass_happy_path(
+        self, mock_chroma_cls, mock_sm_cls, mock_checker_cls,
+        mock_stylist_cls, mock_writer_cls, mock_planner_cls, mock_fs_cls,
+    ):
+        """graph.invoke() 完整 PASS happy path 按顺序完成。
+
+        验证: plan → write → style → save → review → parse →
+        PASS guard → commit → fact_digest → rag_index → END
+        最终 workflow_status == "completed"。
+        """
+        from src.workflows.chapter_workflow import (
+            build_chapter_workflow, ChapterWorkflowState,
+        )
+        from src.storage.document_formats import (
+            ChapterPlan, ReviewDecision, StateCommitResult,
+        )
+
+        # ── Mock FileStore (used by many nodes) ──
+        mock_fs = mock_fs_cls.return_value
+        mock_fs.load_canonical.return_value = "# Chapter Plan\n## 一、章节信息\n章大纲: test\n总场景数: 2"
+        mock_fs.load_latest.return_value = "styled chapter text"
+        mock_fs.load_tracking_doc.return_value = ""
+        mock_fs.root = MagicMock()
+        mock_fs.root.__truediv__ = MagicMock(return_value=MagicMock())
+
+        # ── Mock: plan_chapter (ChromaStore + ChapterPlanner) ──
+        mock_chroma = mock_chroma_cls.return_value
+        mock_chroma.search.return_value = []
+
+        mock_planner = mock_planner_cls.return_value
+        fake_plan = ChapterPlan()
+        fake_plan.chapter_index = 3
+        fake_plan.scenes = [MagicMock(), MagicMock()]
+        mock_planner.plan_chapter.return_value = fake_plan
+        mock_planner._extract_chapter_from_volume.return_value = ""
+
+        # ── Mock: write_draft ──
+        mock_writer = mock_writer_cls.return_value
+        mock_writer.write_chapter.return_value = "Draft chapter text."
+
+        # ── Mock: style_edit ──
+        mock_stylist = mock_stylist_cls.return_value
+        mock_stylist.edit_chapter.return_value = "Styled chapter text."
+
+        # ── Mock: save_styled ──
+        mock_checker = mock_checker_cls.return_value
+        mock_report = MagicMock()
+        mock_report.errors = 0
+        mock_report.warnings = 0
+        mock_report.summary.return_value = "OK"
+        mock_checker.check_all.return_value = mock_report
+
+        # ── Mock: review_chapter + parse_decision + commit_state + save_fact_digest ──
+        mock_sm = mock_sm_cls.return_value
+        mock_sm.review_chapter.return_value = {
+            "raw_analysis": "## 审阅决策\nPASS\n## 事实摘要\nconfirmed_char: Alice",
+            "filepath": MagicMock(),
+        }
+
+        pass_decision = ReviewDecision()
+        pass_decision.verdict = "PASS"
+        pass_decision.reasons = ["All checks passed"]
+        mock_sm.parse_review_decision.return_value = pass_decision
+
+        commit_ok = StateCommitResult(success=True)
+        commit_ok.changed_files = ["tracking/character_relationships.md"]
+        mock_sm.update_tracking_docs.return_value = {
+            "_commit_result": commit_ok,
+            "updated_rels": True,
+        }
+        mock_sm.extract_fact_digest_from_analysis.return_value = MagicMock()
+
+        # ── Mock: rag_index ──
+        mock_chroma.index_chapter.return_value = 3
+
+        # ── Build graph and invoke ──
+        graph = build_chapter_workflow()
+        initial_state: ChapterWorkflowState = {
+            "novel_id": "invoke_test",
+            "chapter_index": 3,
+            "chapter_outline": "Test outline",
+            "extra_instructions": "",
+        }
+
+        result = graph.invoke(initial_state)
+
+        # ── Verify final state ──
+        self.assertEqual(result["workflow_status"], "completed",
+                         f"Expected 'completed', got '{result.get('workflow_status')}'"
+                         f" — error: {result.get('error', 'none')}")
+        self.assertEqual(result["verdict"], "PASS")
+        self.assertEqual(result["commit_success"], True)
+        self.assertEqual(result["rag_chunks"], 3)
+        self.assertEqual(result["novel_id"], "invoke_test",
+                         "Input fields preserved by state merge")
+        self.assertEqual(result["chapter_index"], 3)
+
+        # ── Verify call order: each agent must have been called ──
+        mock_planner.plan_chapter.assert_called_once()
+        mock_writer.write_chapter.assert_called_once()
+        mock_stylist.edit_chapter.assert_called_once()
+        mock_checker.check_all.assert_called_once()
+        mock_sm.review_chapter.assert_called_once()
+        mock_sm.parse_review_decision.assert_called_once()
+        mock_sm.update_tracking_docs.assert_called_once()
+        mock_sm.extract_fact_digest_from_analysis.assert_called_once()
+        mock_chroma.index_chapter.assert_called_once()
+
 
 # ═══════════════════════════════════════════════════════════
 # E07.2-B: Non-PASS guard — no commit / fact_digest / RAG
@@ -520,6 +635,7 @@ class TestE07_2_CommitFailureBlocksDownstream(unittest.TestCase):
         state: ChapterWorkflowState = {
             "novel_id": "test",
             "chapter_index": 1,
+            "verdict": "PASS",
             "raw_analysis": "analysis",
             "styled_text": "styled",
             "workflow_status": "REVIEWED",
@@ -570,6 +686,7 @@ class TestE07_2_CommitFailureBlocksDownstream(unittest.TestCase):
         state: ChapterWorkflowState = {
             "novel_id": "test",
             "chapter_index": 1,
+            "verdict": "PASS",
             "raw_analysis": "analysis",
             "styled_text": "styled",
         }
@@ -596,6 +713,7 @@ class TestE07_2_CommitFailureBlocksDownstream(unittest.TestCase):
         state: ChapterWorkflowState = {
             "novel_id": "test", "chapter_index": 1,
             "raw_analysis": "analysis", "styled_text": "styled",
+            "verdict": "PASS",
         }
         commit_result = commit_state(state)
         state.update(commit_result)
@@ -607,6 +725,38 @@ class TestE07_2_CommitFailureBlocksDownstream(unittest.TestCase):
 
         rag_result = rag_index(state)
         self.assertEqual(rag_result, {})
+
+    def test_commit_state_rejects_non_pass_verdict(self):
+        """commit_state 自验证 verdict：非 PASS → 直接拒绝。"""
+        from src.workflows.chapter_workflow import commit_state, ChapterWorkflowState
+
+        # verdict is NEEDS_REVISION but workflow_status was somehow not STOPPED_NON_PASS
+        state: ChapterWorkflowState = {
+            "novel_id": "test",
+            "chapter_index": 1,
+            "verdict": "NEEDS_REVISION",
+            "raw_analysis": "analysis",
+            "styled_text": "styled",
+            "workflow_status": "REVIEWED",  # NOT STOPPED_NON_PASS
+        }
+        result = commit_state(state)
+        self.assertEqual(result["commit_success"], False)
+        self.assertIn("not PASS", result["commit_error"])
+
+    def test_commit_state_rejects_missing_verdict(self):
+        """commit_state 自验证：verdict 缺失 → 拒绝。"""
+        from src.workflows.chapter_workflow import commit_state, ChapterWorkflowState
+
+        # No verdict field at all
+        state: ChapterWorkflowState = {
+            "novel_id": "test",
+            "chapter_index": 1,
+            "raw_analysis": "analysis",
+            "styled_text": "styled",
+        }
+        result = commit_state(state)
+        self.assertEqual(result["commit_success"], False)
+        self.assertIn("not PASS", result["commit_error"])
 
 
 # ═══════════════════════════════════════════════════════════

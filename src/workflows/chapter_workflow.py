@@ -104,76 +104,118 @@ def _run_rag_retrieval(
     fs: FileStore, novel_id: str, chapter_index: int,
     chapter_outline: str, extra_instructions: str,
 ) -> str:
-    """Run RAG retrieval and return formatted evidence text.
+    """Run RAG retrieval — behavioral parity with Orchestrator._retrieve_evidence().
+
+    Uses the same query builder logic (ChapterPlanner volume extraction,
+    character/item context from tracking docs), same trace creation order
+    (trace before query build), and same evidence formatting.
 
     Graceful degradation: any error returns empty string.
-    Mirrors Orchestrator._retrieve_evidence() behavior.
     """
     import json
+    import re
     from datetime import datetime
     from src.storage.chroma_store import (
         ChromaStore, RetrievalTrace, DEFAULT_BRANCH_ID,
     )
+    from src.agents.author.chapter_planner import ChapterPlanner
 
     settings = get_settings()
     chroma = ChromaStore(settings.data_dir / "chroma_db")
     branch_id = DEFAULT_BRANCH_ID
     top_k = settings.rag_top_k
+    filters = {
+        "novel_id": novel_id,
+        "branch_id": branch_id,
+        "chapter_index <": chapter_index,
+        "source_type": "chapter",
+    }
 
-    # Build deterministic query (compact version of Orchestrator._build_retrieval_query)
-    import re
-    parts: list[str] = []
-    vp_text = fs.load_tracking_doc("volume_plan") or ""
-    if vp_text:
-        events = re.findall(
-            r'(### 事件\d+[：:].*?\n.*?对应章节\**\s*[：:]\s*第' + str(chapter_index) + r'章.*?)(?=### 事件|\Z)',
-            vp_text, re.DOTALL)
-        if events:
-            parts.append(events[0][:1000])
-    if chapter_outline:
-        parts.append(chapter_outline[:500])
-    if extra_instructions:
-        parts.append(extra_instructions[:500])
-    query = " ".join(parts) if parts else f"第{chapter_index}章 剧情"
-
-    # Create trace
+    # Create trace BEFORE query build — failures in either step
+    # must produce a failed RetrievalTrace (E04.1 Fix 3, matching production)
     trace = RetrievalTrace(
-        chapter_index=chapter_index, branch_id=branch_id,
-        query=query, top_k=top_k,
-        filters={
-            "novel_id": novel_id, "branch_id": branch_id,
-            "chapter_index <": chapter_index, "source_type": "chapter",
-        },
+        chapter_index=chapter_index,
+        branch_id=branch_id,
+        query="",       # populated below; empty on query-builder failure
+        top_k=top_k,
+        filters=filters,
         timestamp=datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
     )
 
-    # Search
     try:
+        # Build deterministic query — same logic as Orchestrator._build_retrieval_query():
+        #   Volume events via ChapterPlanner parser (E04.1: single canonical parser)
+        #   + chapter outline
+        #   + character names from relationship tracking
+        #   + item names from items_equipment tracking
+        #   + author instructions
+        planner = ChapterPlanner(novel_id)
+        parts: list[str] = []
+
+        vp_text = fs.load_tracking_doc("volume_plan") or ""
+        if vp_text:
+            vol_context = planner._extract_chapter_from_volume(vp_text, chapter_index)
+            if vol_context:
+                parts.append(vol_context[:1000])
+
+        if chapter_outline:
+            parts.append(chapter_outline[:500])
+
+        rels = fs.load_tracking_doc("character_relationships") or ""
+        char_names: set[str] = set()
+        for m in re.finditer(r'\*\*(.+?)\*\*', rels):
+            name = m.group(1).strip()
+            if 2 <= len(name) <= 6 and not any(
+                kw in name for kw in ["状态", "关系", "类型", "态度", "互动",
+                                       "变更", "物品", "体系", "检查"]
+            ):
+                char_names.add(name)
+        if char_names:
+            parts.append("角色: " + ", ".join(sorted(char_names)[:10]))
+
+        items_text = fs.load_tracking_doc("items_equipment") or ""
+        item_names: set[str] = set()
+        for m in re.finditer(r'\|\s*(.+?)\s*\|', items_text):
+            name = m.group(1).strip()
+            if name and 2 <= len(name) <= 10 and not any(
+                kw in name for kw in ["物品", "来源", "获得", "属性", "状态", "备注",
+                                       "拥有者", "首次出现", "已知属性", "---"]
+            ):
+                item_names.add(name)
+        if item_names:
+            parts.append("物品: " + ", ".join(sorted(item_names)[:10]))
+
+        if extra_instructions:
+            parts.append(extra_instructions[:500])
+
+        query = " ".join(parts) if parts else f"第{chapter_index}章 剧情"
+        trace.query = query
+
         results = chroma.search(
             novel_id=novel_id, branch_id=branch_id,
             query=query, chapter_index=chapter_index, top_k=top_k)
     except Exception as e:
         trace.success = False
         trace.error_message = f"{type(e).__name__}: {e}"
-        print(f"  [RAG WARNING] 检索失败: {e}")
+        print(f"  [RAG WARNING] 检索/查询构建失败: {e}")
         return ""
 
+    trace.results = results
     if not results:
-        return ""
+        return ""  # empty retrieval is not a failure (matching production)
 
-    # Save trace
+    # Save trace (non-blocking)
     try:
         traces_dir = fs.root / "tracking" / "rag_traces"
         traces_dir.mkdir(parents=True, exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        trace.results = results
-        (traces_dir / f"retrieval_trace_ch{trace.chapter_index:04d}_{ts}.json").write_text(
+        (traces_dir / f"retrieval_trace_ch{chapter_index:04d}_{ts}.json").write_text(
             json.dumps(trace.to_dict(), ensure_ascii=False, indent=2),
             encoding="utf-8")
     except Exception:
-        pass  # trace save failure is non-blocking
+        pass
 
-    # Format evidence
+    # Format evidence (matching production)
     lines = [
         f"（从 {len(results)} 个历史章节片段中检索到以下相关内容，"
         f"距离越近越相关）\n"
@@ -181,7 +223,8 @@ def _run_rag_retrieval(
     for i, r in enumerate(results, 1):
         lines.append(
             f"**[证据{i}]** 第{r.chapter_index}章 "
-            f"chunk-{r.chunk_index} (distance={r.distance:.4f}):")
+            f"chunk-{r.chunk_index} "
+            f"(distance={r.distance:.4f}):")
         lines.append(f"> {r.text[:600]}")
         lines.append("")
 
@@ -447,15 +490,35 @@ def commit_state(state: ChapterWorkflowState) -> dict[str, Any]:
     """
     from src.agents.state_manager.state_manager import StateManager
 
-    # Guard: check if require_pass blocked
+    # Guard 1: require_pass must have allowed this
     if state.get("workflow_status") == "STOPPED_NON_PASS":
         print(f"  [commit_state] SKIPPED — workflow stopped (non-PASS verdict)")
         return {}
 
+    # Guard 2: defense-in-depth — re-verify verdict is PASS
+    verdict = state.get("verdict", "")
+    if verdict != "PASS":
+        print(f"  [commit_state] SKIPPED — verdict is '{verdict}', not PASS")
+        return {
+            "commit_success": False,
+            "commit_error": f"verdict is '{verdict}', not PASS — commit blocked",
+            "workflow_status": "error",
+            "error": f"Commit blocked: verdict '{verdict}' != PASS",
+        }
+
+    # Guard 3: raw_analysis must exist
     novel_id = state["novel_id"]
     chapter_index = state["chapter_index"]
     raw_analysis = state.get("raw_analysis", "")
     styled_text = state.get("styled_text", "")
+
+    if not raw_analysis:
+        return {
+            "commit_success": False,
+            "commit_error": "raw_analysis 为空，无法提交 canonical state",
+            "workflow_status": "error",
+            "error": "raw_analysis 为空，无法提交 canonical state",
+        }
 
     # Load styled from FileStore if not in state
     if not styled_text:
@@ -575,7 +638,7 @@ def rag_index(state: ChapterWorkflowState) -> dict[str, Any]:
     source_path = f"chapters/{styled_files[0].name}" if styled_files else f"chapters/{styled_prefix}"
 
     chroma = ChromaStore(settings.data_dir / "chroma_db")
-    branch_id = state.get("branch_id", DEFAULT_BRANCH_ID)
+    branch_id = DEFAULT_BRANCH_ID  # E07.2: always main branch (no branch semantics)
 
     try:
         count = chroma.index_chapter(

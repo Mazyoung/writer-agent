@@ -2,7 +2,43 @@
 
 日期：2026-08-03
 范围：LangGraph 完整 PASS happy path 的 adapter-node 实现
-状态：**完成**
+状态：**完成 (含 Closure Patch)**
+
+---
+
+## Closure Patch (2026-08-03)
+
+4 项修复，最小变更范围：
+
+### Fix 1: RAG behavioral parity
+
+`_run_rag_retrieval()` 现在与 `Orchestrator._retrieve_evidence()` + `_build_retrieval_query()` 行为一致：
+- 使用 `ChapterPlanner._extract_chapter_from_volume()` 提取卷事件（E04.1 单一 canonical parser，不再维护第二套 regex）
+- 包含 character name 提取（`character_relationships.md` 的 `**name**` 格式）
+- 包含 item name 提取（`items_equipment.md` 的表格格式）
+- Trace 创建在 query build 之前（E04.1 Fix 3）
+- Query build 异常也产生 failed trace，不静默
+
+### Fix 2: 移除提前出现的 branch semantics
+
+- `rag_index` 始终使用 `DEFAULT_BRANCH_ID`，不从 state 读取 `branch_id`
+- E07.2 不实现 branch isolation / branch-specific indexing
+
+### Fix 3: 加强 commit fail-closed
+
+`commit_state` 新增三层 defense-in-depth：
+1. `workflow_status == "STOPPED_NON_PASS"` → skip
+2. `verdict != "PASS"` → 拒绝（含缺失 verdict）
+3. `raw_analysis` 为空 → 拒绝
+
+非 PASS / decision 缺失 / commit_result 缺失或失败 → 全部 block
+
+### Fix 4: 真正的 graph.invoke() happy-path test
+
+`test_graph_invoke_pass_happy_path` 使用 mock 执行完整 `graph.invoke()`：
+- 验证 10 个节点按顺序完成
+- 验证 `workflow_status == "completed"`
+- 验证每个 Agent/Service 恰好被调用一次
 
 ---
 
@@ -119,7 +155,7 @@ commit_state(FAIL)      → save_fact_digest SKIP → rag_index SKIP
 
 ## F. Test Results
 
-### E07 Focused Tests (38/38 OK)
+### E07 Focused Tests (41/41 OK) — after Closure Patch
 
 | Class | Tests | Description |
 |---|---|---|
@@ -127,9 +163,9 @@ commit_state(FAIL)      → save_fact_digest SKIP → rag_index SKIP
 | TestGraphTopology | 4 | Graph compile, 10 nodes, linear edges, no conditional |
 | TestNodeContracts | 4 | require_pass guard: PASS/NEEDS_REVISION/HALT/UNKNOWN |
 | TestNoRuntimeSideEffects | 4 | Import safety, no Orchestrator import, main.py unchanged |
-| TestE07_2_PassHappyPath | 6 | Node returns (plan/draft/style/save/parse), graph acceptance |
+| TestE07_2_PassHappyPath | **7** | + `test_graph_invoke_pass_happy_path` (real graph.invoke) |
 | TestE07_2_NonPassGuard | 4 | Non-PASS → commit_state/fact_digest/rag_index all skipped |
-| TestE07_2_CommitFailureBlocksDownstream | 5 | commit failure + missing _commit_result → fail-closed |
+| TestE07_2_CommitFailureBlocksDownstream | **7** | + `test_commit_state_rejects_non_pass_verdict`, + `test_commit_state_rejects_missing_verdict` |
 | TestE07_2_RAGFailureNoRollback | 2 | RAG failure → workflow_status=completed |
 | TestE07_2_StyledChapterOnce | 2 | save once + style_edit no save |
 | TestE07_2_NoFuturePhaseLeakage | 4 | No conditional edges, no checkpointer, no interrupt, no Command |
@@ -150,7 +186,23 @@ commit_state(FAIL)      → save_fact_digest SKIP → rag_index SKIP
 
 ---
 
-## G. Known Limitations
+## G. Behavioral Parity Status
+
+| Aspect | Parity? | Notes |
+|---|---|---|
+| RAG retrieval query build | ✅ | Uses ChapterPlanner volume parser + character/item context extraction (matching production) |
+| RAG trace lifecycle | ✅ | Trace before query build, failed trace on errors (E04.1 Fix 3) |
+| RAG evidence formatting | ✅ | Same evidence header + per-result format |
+| RAG indexing | ✅ | Same ChromaStore.index_chapter() with DEFAULT_BRANCH_ID |
+| Write → Style → Save chain | ✅ | Same Agent calls + StyleChecker in save_styled |
+| Review decision parsing | ✅ | Same StateManager.parse_review_decision() (fail-closed → UNKNOWN) |
+| Commit atomicity | ✅ | Same StateManager.update_tracking_docs() (ALL-OLD/ALL-NEW) |
+| Commit failure → no Fact Digest → no RAG | ✅ | Three-layer guard in commit_state + downstream checks |
+| Branch semantics | ✅ | Identical — always DEFAULT_BRANCH_ID (E07.2 no branch isolation) |
+
+No known behavioral parity gaps remain after Closure Patch.
+
+## H. Known Limitations
 
 1. **require_pass 是临时方案**：E07.3 用 `add_conditional_edges()` 替代为正式 conditional routing
 2. **plan_chapter 内联 RAG**：RAG retrieval 在 `plan_chapter` node 内部，未来可作为独立 `retrieve_history` node
