@@ -82,6 +82,14 @@ class FileStore:
                 bak.unlink()
             filepath.rename(bak)
 
+    def migrate_legacy_canonical_if_needed(self) -> dict:
+        """Create canonical copies for legacy novels when migration is needed."""
+        if self.has_canonical("settings", "world_setting"):
+            return {}
+        if not self.load_latest("settings", "world_setting"):
+            return {}
+        return self.migrate_to_canonical()
+
     def migrate_to_canonical(self) -> dict:
         """一次性迁移：从最新时间戳文件创建 canonical 副本。不删除旧文件。"""
         migrated = {}

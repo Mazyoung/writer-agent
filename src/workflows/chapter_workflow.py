@@ -1,8 +1,9 @@
-"""E07.3 — Chapter Workflow conditional routing state machine.
+"""Chapter Workflow conditional routing state machine.
 
 Each Node is an adapter that calls an existing Agent/Service.
 Conditional edges stop failed and non-PASS paths before downstream work.
-No checkpoint, interrupt, or revision loop (E07.4+).
+The production runner supplies the E07.4 checkpointer; interrupt and revision
+loops remain future E07.5/E07.6 work.
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ from functools import wraps
 from typing import TypedDict, Any
 
 from langgraph.graph import StateGraph, START, END
+from langgraph.types import interrupt
 
 from src.config.settings import get_settings
 from src.storage.file_store import FileStore
@@ -47,6 +49,10 @@ class ChapterWorkflowState(TypedDict, total=False):
     review_reasons: list[str]
     t1_issues: list[str]
     planning_level: str
+
+    # ── Human review ──
+    human_decision: str
+    human_feedback: str
 
     # ── Commit guard ──
     commit_success: bool          # commit_state → mark_completed → fact_digest → rag_index
@@ -143,9 +149,9 @@ def _route_after_decision(state: ChapterWorkflowState) -> str:
     verdict = state.get("verdict", "UNKNOWN")
     if verdict == "PASS":
         return "commit_state"
-    if verdict == "UNKNOWN":
-        return END
-    return "stop_non_pass"
+    if verdict in ("NEEDS_REVISION", "HALT"):
+        return "await_human_review"
+    return END
 
 
 def _route_after_commit(state: ChapterWorkflowState) -> str:
@@ -163,9 +169,8 @@ def _route_after_fact_digest(state: ChapterWorkflowState) -> str:
 
 @_guard_node
 def plan_chapter(state: ChapterWorkflowState) -> dict[str, Any]:
-    """Plan chapter: RAG retrieval + ChapterPlanner.plan_chapter().
+    """Plan chapter with RAG retrieval and ChapterPlanner.
 
-    Adapter for Orchestrator.plan_chapter().
     Side effects: 1 LLM call, 1 chapter plan .md, 1 retrieval trace JSON.
     """
     from src.agents.author.chapter_planner import ChapterPlanner
@@ -204,9 +209,8 @@ def plan_chapter(state: ChapterWorkflowState) -> dict[str, Any]:
 
 @_guard_node
 def write_draft(state: ChapterWorkflowState) -> dict[str, Any]:
-    """Write draft: DeepSeekWriter.write_chapter().
+    """Write a draft with DeepSeekWriter.
 
-    Adapter for Orchestrator.write_chapter() step 1.
     Side effects: 1 LLM call, 1 draft .md.
     """
     from src.agents.author.deepseek_writer import DeepSeekWriter
@@ -253,9 +257,8 @@ def _load_prev_chapter_end(fs: FileStore, chapter_index: int) -> str:
 
 @_guard_node
 def style_edit(state: ChapterWorkflowState) -> dict[str, Any]:
-    """Style-edit draft: ClaudeStylist.edit_chapter().
+    """Style-edit the draft with ClaudeStylist.
 
-    Adapter for Orchestrator.write_chapter() step 2.
     Side effects: 1 LLM call. No file write (returns str only).
     """
     from src.agents.author.claude_stylist import ClaudeStylist
@@ -293,9 +296,8 @@ def style_edit(state: ChapterWorkflowState) -> dict[str, Any]:
 
 @_guard_node
 def save_styled(state: ChapterWorkflowState) -> dict[str, Any]:
-    """Save styled chapter + run StyleChecker.
+    """Save the styled chapter and run StyleChecker.
 
-    Adapter for Orchestrator._save_and_check_styled().
     Side effects: 1 styled .md write. 0 LLM calls.
     """
     from src.agents.author.style_checker import StyleChecker
@@ -327,9 +329,8 @@ def save_styled(state: ChapterWorkflowState) -> dict[str, Any]:
 
 @_guard_node
 def review_chapter(state: ChapterWorkflowState) -> dict[str, Any]:
-    """Review chapter: StateManager.review_chapter().
+    """Review the styled chapter with StateManager.
 
-    Adapter for Orchestrator.review_chapter() Step 1.
     Requires styled chapter — no fallback to draft.
     Side effects: 1 LLM call, 1 review analysis .md.
     """
@@ -349,7 +350,7 @@ def review_chapter(state: ChapterWorkflowState) -> dict[str, Any]:
     settings = get_settings()
     sqlite = SQLiteStore(settings.data_dir / "novels" / novel_id / "state.db")
 
-    # Load context (same as Orchestrator.review_chapter)
+    # Load the canonical planning and story context required by review.
     plan_text = fs.load_canonical("outlines", f"chapter_plan_ch{chapter_index:04d}") or ""
     world_setting = fs.load_canonical("settings", "world_setting") or ""
     book_plan = fs.load_tracking_doc("book_plan") or ""
@@ -424,16 +425,44 @@ def parse_decision(state: ChapterWorkflowState) -> dict[str, Any]:
     }
 
 
-# ── Node: stop_non_pass ──────────────────────────────────
+# ── Node: await_human_review ─────────────────────────────
 
-def stop_non_pass(state: ChapterWorkflowState) -> dict[str, Any]:
-    """Finalize an explicit non-PASS review as a business terminal state."""
+def await_human_review(state: ChapterWorkflowState) -> dict[str, Any]:
+    """Pause NEEDS_REVISION/HALT until a human acknowledges the decision.
+
+    The interrupt is deliberately the first operation: LangGraph restarts this
+    node from the beginning on resume, so no side effect may precede it.
+    E07.5 records feedback and terminates; it never promotes non-PASS to commit.
+    """
+    resume_value = interrupt({
+        "type": "chapter_review",
+        "novel_id": state.get("novel_id", ""),
+        "chapter_index": state.get("chapter_index", 0),
+        "verdict": state.get("verdict", "UNKNOWN"),
+        "planning_level": state.get("planning_level", "L1"),
+        "reasons": state.get("review_reasons", []),
+        "t1_issues": state.get("t1_issues", []),
+        "allowed_actions": ["acknowledge", "stop"],
+    })
+
+    if not isinstance(resume_value, dict):
+        return _error_result("Human resume value must be a decision object")
+
+    action = str(resume_value.get("action", "")).strip().lower()
+    if action not in ("acknowledge", "stop"):
+        return _error_result(
+            "Unsupported human action; E07.5 accepts only 'acknowledge' or 'stop'"
+        )
+
+    feedback = str(resume_value.get("feedback", "")).strip()
     verdict = state.get("verdict", "UNKNOWN")
-    reasons = state.get("review_reasons", [])
-    detail = f"Review verdict: {verdict}"
-    if reasons:
-        detail += f" — {'; '.join(reasons[:3])}"
+    detail = f"Review verdict: {verdict}; human action: {action}"
+    if feedback:
+        detail += f" — {feedback}"
+
     return {
+        "human_decision": action,
+        "human_feedback": feedback,
         "commit_success": False,
         "commit_error": detail,
         "workflow_status": "STOPPED_NON_PASS",
@@ -660,7 +689,7 @@ def build_chapter_workflow(checkpointer: Any = None) -> Any:
     graph.add_node("save_styled", save_styled)
     graph.add_node("review_chapter", review_chapter)
     graph.add_node("parse_decision", parse_decision)
-    graph.add_node("stop_non_pass", stop_non_pass)
+    graph.add_node("await_human_review", await_human_review)
     graph.add_node("commit_state", commit_state)
     graph.add_node("save_fact_digest", save_fact_digest)
     graph.add_node("rag_index", rag_index)
@@ -686,11 +715,11 @@ def build_chapter_workflow(checkpointer: Any = None) -> Any:
         _route_after_decision,
         {
             "commit_state": "commit_state",
-            "stop_non_pass": "stop_non_pass",
+            "await_human_review": "await_human_review",
             END: END,
         },
     )
-    graph.add_edge("stop_non_pass", END)
+    graph.add_edge("await_human_review", END)
     graph.add_conditional_edges(
         "commit_state",
         _route_after_commit,

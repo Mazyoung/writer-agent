@@ -4,45 +4,40 @@
 
 ## 1. Runtime boundary
 
-The current production path is:
+The full chapter production path is:
 
 ```text
-main.py
-  → src.core.orchestrator.Orchestrator
+main.py:cmd_write
+  → src.workflows.chapter_runner.ChapterWorkflowRunner
+  → src.workflows.chapter_workflow.build_chapter_workflow
   → existing Agents / services
   → canonical Markdown + derived stores
 ```
 
-`main.py` owns CLI parsing and user-facing status. `Orchestrator` owns the production workflow and composes the current components:
+The legacy `src.core.orchestrator.Orchestrator` layer has been removed. `main.py` invokes scoped services for non-chapter operations rather than routing through a general orchestration facade:
 
 ```text
-Architecture / planning       Authoring                 Review / state
-────────────────────────      ─────────────────────     ──────────────────
-WorldBuilder                  ChapterPlanner            StateManager
-PlotDesigner                 DeepSeekWriter            ReviewDecision
-                              ClaudeStylist             StyleChecker
-
-Storage
-─────────────────────────────────────────────────────────────────────────
-FileStore (canonical/artifacts)  SQLiteStore (cache)  ChromaStore (RAG)
+Initialization / volumes       Standalone operations        Chapter execution
+────────────────────────       ─────────────────────        ─────────────────
+NovelLifecycleService          ChapterPlanningService       ChapterWorkflowRunner
+WorldBuilder / PlotDesigner    ChapterEditingService          → LangGraph
+                               NovelStatusService
+                               RAGMaintenanceService
 ```
 
-The LangGraph workflow under `src/workflows/chapter_workflow.py` is an E07 migration path. It does not currently drive `main.py`.
-
-## 2. CLI and production flows
-
-`main.py` exposes these production commands:
+## 2. CLI operations
 
 | Command | Production operation |
 |---|---|
 | `init` | Generate a proposal, then on `--confirm` create world setting, Book Plan, and Volume Plan |
 | `status` | Report current volume, completed chapters, and tracking-document availability |
-| `plan` | Retrieve historical evidence and generate one Chapter Plan |
-| `write` | Generate a draft, style it, save one styled chapter, and run `StyleChecker` |
-| `style` | Re-style an existing chapter with optional human feedback, then save/check it |
-| `review` | Review the styled chapter and route through the decision/commit pipeline |
+| `plan` | Standalone historical retrieval and Chapter Plan generation |
+| `write` | Run the complete checkpointed chapter workflow, including review and commit |
+| `style` | Re-style an existing chapter with optional human feedback, then save/check it; no review or commit |
 | `new-volume` | Explicitly archive the completed volume and generate the next ACTIVE Volume Plan |
 | `rag-index` | Backfill or rebuild finalized chapter chunks in Chroma |
+
+There is no independent `review` command. This prevents a second review/commit path outside the LangGraph state machine.
 
 ## 3. Planning architecture
 
@@ -61,193 +56,160 @@ Canonical locations inside `data/novels/<novel_id>/`:
 settings/world_setting.md
 tracking/book_plan.md
 tracking/volume_plan.md
-tracking/volumes/volume_NN.md       # completed-volume archives
+tracking/volumes/volume_NN.md
 outlines/chapter_plan_chNNNN.md
 ```
 
-`PlotDesigner` creates Book and initial Volume plans during confirmed initialization. `ChapterPlanner` requires those plans, loads the current ACTIVE volume, and generates a `ChapterPlan`. `new-volume` is the explicit rolling-horizon transition and records a `PlanRevision`.
+`NovelLifecycleService` creates Book and initial Volume plans, and owns the explicit Generate → Validate → Commit transition for `new-volume`. `ChapterPlanningService` provides optional standalone planning. The full `write` workflow also plans through its `plan_chapter` node.
 
-`plot_structure.md` and `scene_plan_chNNNN.md` are legacy data formats. They are not current production planning truth. The standalone `scripts/migrate_legacy_data.py` utility can convert old data, but production code does not import or invoke it.
+`plot_structure.md` and `scene_plan_chNNNN.md` are legacy data formats. They are not current production planning truth. The standalone `scripts/migrate_legacy_data.py` utility can convert old data.
 
-Planning foundation models under `src/planning/` define `PlanRevision`, `PlanningModificationReport`, `StrategicRepairCase`, `StoryBranch`, and `ChapterCheckpoint`. Most are foundation for future human-approved replanning and rollback; their existence does not mean those workflows are connected to production.
-
-## 4. Authoring flow
-
-```text
-Orchestrator.plan_chapter()
-  → historical RAG retrieval
-  → ChapterPlanner.plan_chapter()
-  → outlines/chapter_plan_chNNNN.md
-
-Orchestrator.write_chapter()
-  → load canonical Chapter Plan
-  → DeepSeekWriter.write_chapter()
-  → timestamped draft
-  → ClaudeStylist.edit_chapter()
-  → save timestamped styled chapter exactly once
-  → StyleChecker.check_all()
-```
-
-`ClaudeStylist` returns transformed text; `Orchestrator` owns the styled save and deterministic check. Review accepts only a styled chapter.
-
-## 5. Review and state-management flow
-
-The production review path is:
-
-```text
-styled chapter + planning/context
-  → StateManager.review_chapter()                 # one LLM analysis
-  → StateManager.parse_review_decision()          # deterministic
-  → ReviewDecision
-```
-
-Decision routing:
-
-```text
-PASS
-  → StateManager.update_tracking_docs()
-      → load all canonical tracking state
-      → parse all state deltas in memory
-      → build candidates
-      → atomic multi-file commit with rollback
-      → sync rebuildable SQLite cache after Markdown success
-  → extract_fact_digest_from_analysis()            # deterministic, no LLM
-  → index finalized chapter in Chroma
-
-NEEDS_REVISION / HALT / UNKNOWN
-  → stop before canonical commit
-  → no Fact Digest
-  → no RAG index
-```
-
-A semantic review PASS is not sufficient on its own. The downstream path proceeds only after an explicit successful `StateCommitResult`.
-
-## 6. Structured Memory and persistence classes
-
-### Canonical story state
-
-The atomic Structured Memory commit covers four Markdown documents:
-
-```text
-tracking/character_relationships.md
-tracking/items_equipment.md
-tracking/cultivation_system.md
-tracking/character_states.md
-```
-
-When snapshot and rollback operations succeed, the commit preserves **ALL OLD or ALL NEW** semantics:
-
-1. snapshot existing files;
-2. parse/build all candidate documents in memory;
-3. write candidates;
-4. roll back every already-written document if any write fails;
-5. expose success/failure through `StateCommitResult`.
-
-If rollback itself fails, the failure is surfaced as an explicit warning and canonical tracking files may be inconsistent. This is an exceptional degraded state that requires manual inspection; the runtime does not claim atomicity after a failed rollback.
-
-Styled chapters and the four tracking documents are canonical story state. Book, Volume, and Chapter plans are canonical planning state.
-
-### Derived and diagnostic state
-
-```text
-states/fact_digest_chNNNN_*.md       derived from review analysis
-state.db                             rebuildable SQLite cache
-ChromaDB chapter chunks              rebuildable RAG index
-tracking/rag_traces/*.json           retrieval diagnostics
-states/review_chNNNN_*.md             workflow artifact
-states/post_chapter_update_*.md       commit change log
-```
-
-Fact Digest or RAG failure does not rewrite previously committed canonical Markdown. Commit failure blocks both Fact Digest and RAG.
-
-## 7. RAG indexing and retrieval
-
-`ChromaStore` is lazy: constructing `Orchestrator` does not initialize Chroma until retrieval or indexing is requested.
-
-### Indexing
-
-```text
-successful review + canonical commit
-  → load latest chapter_NNNN_styled_*.md
-  → deterministic overlapping chunks
-  → stable ID: <novel>_<branch>_chNNNN_chunkNNN
-  → remove stale chunks for that chapter
-  → insert chapter chunks with metadata
-```
-
-Only finalized/styled chapters enter the corpus. Index failures are logged and do not roll back canonical state.
-
-### Retrieval
-
-Before planning chapter N:
-
-```text
-Volume event + optional outline/instructions + tracked characters/items
-  → deterministic query
-  → Chroma search constrained by:
-      novel_id
-      branch_id = main
-      chapter_index < N
-      source_type = chapter
-  → formatted evidence in ChapterPlanner prompt
-  → JSON RetrievalTrace
-```
-
-The chapter bound prevents future leakage. Retrieval failure degrades to empty evidence while preserving a failed trace.
-
-## 8. E07 LangGraph migration status
-
-E07 is an incremental behavioral migration governed by `docs/E07_LANGGRAPH_MIGRATION_GUIDE.md`.
-
-Current implemented stage: **E07.2 PASS Happy Path Behavioral Parity**.
+## 4. Full chapter workflow
 
 ```text
 START
+  → preflight
   → plan_chapter
   → write_draft
   → style_edit
   → save_styled
   → review_chapter
   → parse_decision
-  → require_pass
-  → commit_state
-  → save_fact_digest
-  → rag_index
-  → END
+      PASS                 → commit_state
+      NEEDS_REVISION/HALT  → await_human_review → interrupt()
+                              → Command(resume=...) → STOPPED_NON_PASS → END
+      UNKNOWN/error        → END
+  → commit success → save_fact_digest → rag_index → END
+  → commit/digest error                         → END
 ```
 
-The graph uses adapter nodes over existing Agents and services; it does not own a second business implementation. E07.2 remains deliberately linear and uses a guard node for non-PASS results.
+Node ownership:
 
-Not yet part of the migration runtime:
+| Node | Existing business owner |
+|---|---|
+| `plan_chapter` | `ChapterRetrievalService` + `ChapterPlanner` |
+| `write_draft` | `DeepSeekWriter` |
+| `style_edit` | `ClaudeStylist` |
+| `save_styled` | `FileStore` + `StyleChecker` |
+| `review_chapter` | `StateManager.review_chapter` |
+| `parse_decision` | `ReviewDecision.from_analysis` |
+| `await_human_review` | LangGraph `interrupt()`; E07.5 acknowledgment only |
+| `commit_state` | `StateManager.update_tracking_docs` |
+| `save_fact_digest` | `StateManager.extract_fact_digest_from_analysis` |
+| `rag_index` | `ChromaStore.index_chapter` |
 
-- E07.3 conditional edges and explicit terminal routing
-- E07.4 checkpoint/resume
-- E07.5 human-in-the-loop interrupt/resume
-- E07.6 revision loop
-- replacement of `main.py` / `Orchestrator`
+Graph nodes remain adapters over existing business logic. There is no second implementation of ReviewDecision parsing or canonical commit.
 
-### Production/migration boundary
+## 5. Checkpoint and canonical-state boundary
+
+`ChapterWorkflowRunner` persists LangGraph checkpoints to:
 
 ```text
-Production today                         Migration validation today
-─────────────────────────────            ─────────────────────────────
-main.py                                  tests / direct graph invocation
-  → Orchestrator                           → build_chapter_workflow()
-  → production side effects               → adapter-node parity path
+data/novels/<novel_id>/workflow_checkpoints.sqlite
 ```
 
-Canonical state remains independent from LangGraph checkpoint state. Future migration work must preserve atomic Structured Memory commit and treat Chroma/SQLite as derived state.
+A deterministic thread ID identifies one chapter execution:
 
-## 9. Human authority and future planning repair
+```text
+chapter:<novel_id>:<chapter_index padded to 4 digits>
+```
 
-Planning issues retain three levels:
+Runner behavior:
+
+1. no snapshot → invoke with initial state;
+2. incomplete snapshot with `next` nodes → invoke with `None` and resume;
+3. terminal snapshot → return stored state without replaying nodes.
+
+LangGraph checkpoint is workflow execution state. It does not replace or roll back canonical planning/story state. Canonical state remains managed by `FileStore` and the `StateManager` transaction.
+
+## 6. Review and Structured Memory
+
+The decision path is fail-closed:
+
+```text
+styled chapter + planning/context
+  → StateManager.review_chapter()                 # one LLM analysis
+  → ReviewDecision.from_analysis()                # deterministic
+  → conditional graph routing
+```
+
+PASS is necessary but not sufficient. Downstream nodes proceed only after an explicit successful `StateCommitResult` and completion marker.
+
+The atomic Structured Memory commit covers:
+
+```text
+tracking/character_relationships.md
+tracking/items_equipment.md
+tracking/cultivation_system.md
+tracking/character_states.md
+states/chapter_NNNN_completed
+```
+
+The transaction preserves ALL OLD or ALL NEW when snapshot and rollback succeed:
+
+1. snapshot existing files;
+2. parse/build all candidate documents in memory;
+3. write candidates;
+4. write the completion marker;
+5. roll back every written artifact if any write fails;
+6. sync rebuildable SQLite state only after Markdown success.
+
+Commit failure blocks Fact Digest and RAG. RAG failure does not roll back canonical state.
+
+## 7. Persistence classification
+
+### Canonical planning state
+
+```text
+settings/world_setting.md
+tracking/book_plan.md
+tracking/volume_plan.md
+tracking/volumes/volume_NN.md
+outlines/chapter_plan_chNNNN.md
+```
+
+### Canonical story state
+
+```text
+chapters/chapter_NNNN_styled_*.md
+tracking/character_relationships.md
+tracking/items_equipment.md
+tracking/cultivation_system.md
+tracking/character_states.md
+states/chapter_NNNN_completed
+```
+
+### Derived and diagnostic state
+
+```text
+states/fact_digest_chNNNN_*.md
+state.db
+ChromaDB chapter chunks
+tracking/rag_traces/*.json
+states/review_chNNNN_*.md
+states/post_chapter_update_*.md
+workflow_checkpoints.sqlite        # execution recovery, not story truth
+```
+
+## 8. RAG
+
+`ChapterRetrievalService` owns deterministic query construction, Chroma search, evidence formatting, and retrieval trace persistence. Retrieval is constrained by:
+
+```text
+novel_id
+branch_id = main
+chapter_index < current chapter
+source_type = chapter
+```
+
+Only finalized/styled chapters enter the corpus. `RAGMaintenanceService` provides explicit backfill/rebuild operations. Rebuild aborts if branch clearing fails; per-chapter indexing failures are reported without changing canonical story state.
+
+## 9. Human authority and future E07 work
+
+Planning authority remains:
 
 - **L1** — local execution/prose issue; repair without changing higher plans.
-- **L2** — Chapter/Volume planning issue; requires a modification report and human approval before plan changes.
+- **L2** — Chapter/Volume planning issue; requires a modification report and human approval.
 - **L3** — strategic Book-level issue; halt for human–Agent repair.
 
-The data models for these concepts exist, but automatic L2/L3 repair, rollback, and branching are not current production behavior.
-
-## 10. Historical architecture
-
-Earlier versions used a larger nine-Agent, scene-by-scene runtime with BriefGenerator, consistency/replan components, and synchronization paths centered on `plot_structure.md`. Those modules and commands are no longer the production architecture and have been removed from the working tree. Git history and historical audit documents preserve that context where needed.
+E07.5 inserts HITL after `parse_decision`: PASS continues to `commit_state`; NEEDS_REVISION/HALT pause in `await_human_review` and resume through the same checkpointer/thread ID. The current resume action records human feedback and terminates the non-PASS execution; it cannot promote a verdict to PASS. E07.6 may add rewrite/style/re-review routing after the resumed HITL node.

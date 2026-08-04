@@ -21,8 +21,7 @@
     python main.py style <小说名> --chapter N       # 对已写章节做风格编辑
     python main.py style <小说名> --chapter N --feedback "..."  # 带人工反馈
 
-    # 审阅
-    python main.py review <小说名> --chapter N      # 章节后复盘 → 更新追踪文档
+    # write 已包含审阅、canonical commit、Fact Digest 与 RAG
 
     # 状态
     python main.py status <小说名>                  # 查看进度
@@ -36,8 +35,16 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from src.config.settings import get_settings
-from src.core.orchestrator import Orchestrator
-from src.workflows.chapter_runner import run_chapter_workflow
+from src.core.novel_status import NovelStatusService
+from src.planning.chapter_planning_service import ChapterPlanningService
+from src.planning.novel_lifecycle import NovelLifecycleService
+from src.storage.file_store import FileStore
+from src.storage.rag_maintenance import RAGMaintenanceService
+from src.workflows.chapter_editing import ChapterEditingService
+from src.workflows.chapter_runner import (
+    resume_chapter_workflow,
+    run_chapter_workflow,
+)
 
 
 def _safe_print(text: str, max_len: int = 500):
@@ -48,11 +55,15 @@ def _safe_print(text: str, max_len: int = 500):
 
 def _get_novel_dir(novel_id: str):
     settings = get_settings()
-    d = settings.data_dir / "novels" / novel_id
-    if not d.exists():
+    novel_dir = settings.data_dir / "novels" / novel_id
+    if not novel_dir.exists():
         print(f"小说 '{novel_id}' 不存在。请先运行 init。")
         return None
-    return d
+    file_store = FileStore(novel_id, settings.data_dir)
+    migrated = file_store.migrate_legacy_canonical_if_needed()
+    if migrated:
+        print(f"  [migration] canonical copies created: {list(migrated.keys())}")
+    return novel_dir
 
 
 # ═══ 命令实现 ════════════════════════════════════════════════
@@ -66,8 +77,8 @@ def cmd_init(args):
         if not novel_dir.exists():
             print(f"小说 '{args.name}' 尚未创建。先运行: python main.py init {args.name}")
             return
-        orch = Orchestrator(args.name)
-        novel_dir = orch.file_store.root
+        lifecycle = NovelLifecycleService(args.name)
+        novel_dir = lifecycle.file_store.root
         edited_path = novel_dir / "proposal_edited.md"
         canonical_path = novel_dir / "proposal.md"
 
@@ -78,13 +89,13 @@ def cmd_init(args):
             proposal = canonical_path.read_text(encoding="utf-8")
             print("Using proposal.md [AI CANONICAL]")
         else:
-            proposal = orch.file_store.load_latest("", "proposal")
+            proposal = lifecycle.file_store.load_latest("", "proposal")
             if proposal:
                 print("Using legacy proposal [COMPAT]")
             else:
                 print("未找到创作提案。先运行: python main.py init <小说名>")
                 return
-        orch.initialize_novel(proposal)
+        lifecycle.initialize_novel(proposal)
         print(f"\n下一步: python main.py plan {args.name} --chapter 1")
         return
 
@@ -96,42 +107,41 @@ def cmd_init(args):
             print(f"  编辑 proposal.md 后保存为 proposal_edited.md，然后: python main.py init {args.name} --confirm")
             print(f"  或 --force 重新生成提案")
             return
-    orch = Orchestrator(args.name)
+    lifecycle = NovelLifecycleService(args.name)
     hint = args.premise if hasattr(args, 'premise') and args.premise else ""
-    orch.generate_proposal(hint)
+    lifecycle.generate_proposal(hint)
 
 
 def cmd_status(args):
     if not _get_novel_dir(args.name):
         return
-    orch = Orchestrator(args.name)
-    orch.print_status()
+    NovelStatusService(args.name).print_status()
 
 
 def cmd_plan(args):
     if not _get_novel_dir(args.name):
         return
-    orch = Orchestrator(args.name)
+    planning = ChapterPlanningService(args.name)
     outline = getattr(args, 'outline', "") or ""
     instructions = getattr(args, 'instructions', "") or ""
 
     if args.interactive:
-        _cmd_plan_interactive(orch, args)
+        _cmd_plan_interactive(planning, args)
         return
 
     try:
-        orch.plan_chapter(args.chapter, outline, instructions)
+        planning.plan_chapter(args.chapter, outline, instructions)
     except FileNotFoundError as e:
         print(str(e))
         return
     print(f"\n下一步: python main.py write {args.name} --chapter {args.chapter}")
 
 
-def _cmd_plan_interactive(orch, args):
+def _cmd_plan_interactive(planning, args):
     """交互式章规划 — 6 轮 Q&A。"""
     from src.utils.cli_helpers import InteractivePlanEngine, INTERACTIVE_QUESTIONS
 
-    engine = InteractivePlanEngine(orch.file_store, args.chapter)
+    engine = InteractivePlanEngine(planning.file_store, args.chapter)
     ctx = engine.load_context()
 
     print(f"\n{'='*60}")
@@ -170,9 +180,8 @@ def _cmd_plan_interactive(orch, args):
     print(f"  生成完整章规划...")
     print(f"{'='*60}\n")
 
-    final_prompt = engine.build_final_prompt()
     try:
-        plan = orch.chapter_planner.plan_from_interactive_answers(
+        plan = planning.chapter_planner.plan_from_interactive_answers(
             args.chapter, engine.answers, engine.context)
     except FileNotFoundError as e:
         print(str(e))
@@ -186,87 +195,68 @@ def _cmd_plan_interactive(orch, args):
 def cmd_write(args):
     if not _get_novel_dir(args.name):
         return
-    result = run_chapter_workflow(
-        args.name,
-        args.chapter,
-        chapter_outline=getattr(args, "outline", "") or "",
-        extra_instructions=getattr(args, "instructions", "") or "",
-    )
+
+    resume_feedback = getattr(args, "resume", None)
+    try:
+        if resume_feedback is not None:
+            result = resume_chapter_workflow(
+                args.name,
+                args.chapter,
+                {
+                    "action": "acknowledge",
+                    "feedback": resume_feedback,
+                },
+            )
+        else:
+            result = run_chapter_workflow(
+                args.name,
+                args.chapter,
+                chapter_outline=getattr(args, "outline", "") or "",
+                extra_instructions=getattr(args, "instructions", "") or "",
+            )
+    except ValueError as exc:
+        print(f"\n  Chapter workflow resume rejected: {exc}")
+        return
+
     status = result.get("workflow_status", "error")
     verdict = result.get("verdict", "UNKNOWN")
     if status == "completed":
         print(f"\n  Chapter workflow completed: review={verdict}")
         return
+    if status == "WAITING_HUMAN":
+        print(f"\n  Chapter workflow waiting for human input: review={verdict}")
+        for pending in result.get("interrupts", []):
+            payload = pending.get("value", {})
+            print(f"  Interrupt ID: {pending.get('id', '')}")
+            print(f"  Planning level: {payload.get('planning_level', 'L1')}")
+            for reason in payload.get("reasons", [])[:5]:
+                print(f"    - {reason}")
+        print(
+            "  Resume with: python main.py write "
+            f"{args.name} --chapter {args.chapter} --resume \"<人工反馈>\""
+        )
+        return
     if status == "STOPPED_NON_PASS":
-        print(f"\n  Chapter workflow stopped: review={verdict}")
+        print(f"\n  Chapter workflow stopped after human review: review={verdict}")
         return
     print(f"\n  Chapter workflow halted: {result.get('error', status)}")
-    return
-    print(f"\n下一步: python main.py review {args.name} --chapter {args.chapter}")
 
 
 def cmd_style(args):
     if not _get_novel_dir(args.name):
         return
-    orch = Orchestrator(args.name)
     feedback = getattr(args, 'feedback', "") or ""
-    orch.style_edit(args.chapter, feedback)
+    ChapterEditingService(args.name).style_edit(args.chapter, feedback)
     print(f"\n风格修改完成。如需继续调整: python main.py style {args.name} --chapter {args.chapter} --feedback \"...\"")
-
-
-def cmd_review(args):
-    """E06.2.1: 检查 review 结果并呈现正确的 workflow 状态。"""
-    if not _get_novel_dir(args.name):
-        return
-    orch = Orchestrator(args.name)
-    result = orch.review_chapter(args.chapter)
-
-    decision = result.get("decision", "UNKNOWN")
-    workflow_status = result.get("workflow_status", "")
-    commit_status = result.get("commit_status", "")
-    planning_level = result.get("planning_level", "L1")
-
-    if decision == "PASS" and workflow_status != "ERROR":
-        # Canonical commit 成功
-        print(f"\n  Review PASS — Canonical state committed")
-        print(f"  下一步: python main.py plan {args.name} --chapter {args.chapter + 1}")
-    elif decision == "PASS" and workflow_status == "ERROR":
-        # Runtime Commit Failure
-        print(f"\n  Canonical state commit failed — workflow halted")
-        print(f"  原因: {result.get('error', '未知')}")
-        print(f"  请检查文件系统权限后重新 review。")
-    elif decision == "NEEDS_REVISION":
-        print(f"\n  当前章节需要修订 — 不要继续规划下一章")
-        t1_count = len(result.get("t1_issues", []))
-        t2_count = len(result.get("t2_issues", []))
-        print(f"  T1: {t1_count}  T2: {t2_count}")
-        print(f"  修复后重新运行: python main.py write {args.name} --chapter {args.chapter}")
-        print(f"  然后: python main.py review {args.name} --chapter {args.chapter}")
-    elif decision == "HALT":
-        if planning_level == "L3":
-            print(f"\n  Strategic issue detected — planning_level = L3")
-            print(f"  需要战略层修复（Book Plan / 角色命运 / 世界观铁律违反）")
-        else:
-            print(f"\n  Planning issue detected — planning_level = {planning_level}")
-            print(f"  需要人工 / 规划层处理")
-        reasons = result.get("reasons", [])
-        if reasons:
-            for r in reasons[:5]:
-                print(f"    - {r}")
-    elif decision == "UNKNOWN":
-        print(f"\n  Supervisor decision unresolved — workflow halted")
-        print(f"  raw_analysis 已保存在 states/review_ch*，请人工判断。")
-    else:
-        print(f"\n  Unexpected decision: {decision}")
 
 
 def cmd_new_volume(args):
     if not _get_novel_dir(args.name):
         return
-    orch = Orchestrator(args.name)
+    lifecycle = NovelLifecycleService(args.name)
     notes = getattr(args, 'notes', "") or ""
     try:
-        orch.start_new_volume(volume_number=args.volume, notes=notes)
+        lifecycle.start_new_volume(volume_number=args.volume, notes=notes)
     except (FileNotFoundError, ValueError) as e:
         print(str(e))
         return
@@ -276,8 +266,7 @@ def cmd_rag_index(args):
     """补齐/重建 RAG 索引 (E04 / E06.2.1)。"""
     if not _get_novel_dir(args.name):
         return
-    orch = Orchestrator(args.name)
-    result = orch.rag_index_backfill(rebuild=args.rebuild)
+    result = RAGMaintenanceService(args.name).run(rebuild=args.rebuild)
     if result.get("rebuild_aborted"):
         print(f"\n  RAG 重建已中止。未修改索引。")
 
@@ -294,8 +283,6 @@ def main():
     p = subparsers.add_parser("init", help="Phase1:生成提案 / Phase2:--confirm 生成大纲")
     p.add_argument("name"); p.add_argument("premise", nargs="?", default="")
     p.add_argument("--force", action="store_true")
-    p.add_argument("--outline")
-    p.add_argument("--instructions")
     p.add_argument("--confirm", action="store_true")
 
     # status
@@ -309,17 +296,14 @@ def main():
     p.add_argument("--interactive", action="store_true", help="交互式Q&A模式(待实现)")
 
     # write
-    p = subparsers.add_parser("write", help="写一章 (DeepSeekWriter + ClaudeStylist)")
+    p = subparsers.add_parser("write", help="运行或恢复完整章节 LangGraph workflow")
     p.add_argument("name"); p.add_argument("--chapter", type=int, required=True)
+    p.add_argument("--resume", help="确认 NEEDS_REVISION/HALT，并记录人工反馈")
 
     # style
     p = subparsers.add_parser("style", help="Claude风格编辑")
     p.add_argument("name"); p.add_argument("--chapter", type=int, required=True)
     p.add_argument("--feedback", help="人工风格反馈")
-
-    # review
-    p = subparsers.add_parser("review", help="章节复盘 → 更新追踪文档")
-    p.add_argument("name"); p.add_argument("--chapter", type=int, required=True)
 
     # new-volume
     p = subparsers.add_parser("new-volume", help="当前卷完成后生成下一卷规划 (Rolling Horizon)")
@@ -345,7 +329,7 @@ def main():
     cmds = {
         "init": cmd_init, "status": cmd_status,
         "plan": cmd_plan, "write": cmd_write,
-        "style": cmd_style, "review": cmd_review,
+        "style": cmd_style,
         "new-volume": cmd_new_volume,
         "rag-index": cmd_rag_index,
     }

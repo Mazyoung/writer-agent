@@ -53,7 +53,7 @@ class ClaudeStylist:
         """风格编辑 — 只负责 LLM 转换，返回 styled text。
 
         E05: 不再保存文件、不执行 StyleChecker。
-        Orchestrator 负责所有 workflow side effects。
+        调用方负责保存与确定性风格检查。
         """
         user_msg = self._build_message(draft_text, chapter_index,
                                         emotion_palette, scene_plan_text,
