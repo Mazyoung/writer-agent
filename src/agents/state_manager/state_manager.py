@@ -229,7 +229,8 @@ class StateManager(BaseAgent):
         commit_result = self._commit_all_tracking_docs(
             chapter_index, ch_label,
             rels, items, cult, char_states,
-            state_result, log_result)
+            state_result, log_result,
+            create_completion_marker=True)
 
         changes["_commit_result"] = commit_result
 
@@ -565,7 +566,9 @@ class StateManager(BaseAgent):
                                    cult: CultivationSystem,
                                    char_states: "CharacterStateList",
                                    state_result: dict,
-                                   log_result: dict) -> StateCommitResult:
+                                   log_result: dict,
+                                   create_completion_marker: bool = False,
+                                   ) -> StateCommitResult:
         """E06.2.1: 原子化提交所有 canonical tracking docs（含回滚）。
 
         PREPARE (validate snapshot) → COMMIT → ROLLBACK on failure.
@@ -576,6 +579,9 @@ class StateManager(BaseAgent):
         """
         result = StateCommitResult(success=False)
         tracking_dir = self.fs.root / "tracking"
+        completion_marker = (
+            self.fs.root / "states" / f"chapter_{chapter_index:04d}_completed"
+        )
 
         # ── Phase 4a: PREPARE — SNAPSHOT originals ──
         doc_names = [
@@ -644,6 +650,34 @@ class StateManager(BaseAgent):
                         rollback_errors.append(
                             f"rollback {rolled} 失败: {type(re).__name__}: {re}")
                 break  # stop trying to write more
+
+        if not commit_errors and create_completion_marker:
+            try:
+                completion_marker.write_text(
+                    "Review PASS\nCanonical commit success\n",
+                    encoding="utf-8")
+                result.changed_files.append(
+                    f"states/chapter_{chapter_index:04d}_completed")
+            except Exception as e:
+                commit_errors.append(
+                    f"completion_marker: {type(e).__name__}: {e}")
+                for rolled in written:
+                    original = originals.get(rolled)
+                    try:
+                        if original is not None:
+                            (tracking_dir / f"{rolled}.md").write_text(
+                                original, encoding="utf-8")
+                        elif (tracking_dir / f"{rolled}.md").exists():
+                            (tracking_dir / f"{rolled}.md").unlink()
+                    except Exception as re:
+                        rollback_errors.append(
+                            f"rollback {rolled} 失败: {type(re).__name__}: {re}")
+                try:
+                    completion_marker.unlink(missing_ok=True)
+                except Exception as re:
+                    rollback_errors.append(
+                        "rollback completion_marker 失败: "
+                        f"{type(re).__name__}: {re}")
 
         if commit_errors:
             result.error_message = "; ".join(commit_errors)

@@ -537,10 +537,17 @@ class TestE07_2_PassHappyPath(unittest.TestCase):
 
         commit_ok = StateCommitResult(success=True)
         commit_ok.changed_files = ["tracking/character_relationships.md"]
-        mock_sm.update_tracking_docs.return_value = {
-            "_commit_result": commit_ok,
-            "updated_rels": True,
-        }
+        marker = tmp / "states" / "chapter_0003_completed"
+
+        def successful_commit(*args, **kwargs):
+            marker.write_text(
+                "Review PASS\nCanonical commit success\n", encoding="utf-8")
+            return {
+                "_commit_result": commit_ok,
+                "updated_rels": True,
+            }
+
+        mock_sm.update_tracking_docs.side_effect = successful_commit
         from src.storage.document_formats import FactDigest
         mock_sm.extract_fact_digest_from_analysis.return_value = FactDigest(
             chapter_index=3, confirmed_events="Alice entered the ruins")
@@ -650,9 +657,19 @@ class TestE07_2_SafetyClosureGraphInvoke(unittest.TestCase):
         }
         pass_decision = ReviewDecision(verdict="PASS")
         self.mock_state_manager.parse_review_decision.return_value = pass_decision
-        self.mock_state_manager.update_tracking_docs.return_value = {
-            "_commit_result": StateCommitResult(success=True),
-        }
+        marker = self.mock_fs.root / "states" / "chapter_0001_completed"
+
+        def successful_commit(*args, **kwargs):
+            marker.write_text(
+                "Review PASS\nCanonical commit success\n", encoding="utf-8")
+            return {
+                "_commit_result": StateCommitResult(
+                    success=True,
+                    changed_files=["states/chapter_0001_completed"],
+                ),
+            }
+
+        self.mock_state_manager.update_tracking_docs.side_effect = successful_commit
         from src.storage.document_formats import FactDigest
         self.mock_state_manager.extract_fact_digest_from_analysis.return_value = (
             FactDigest(chapter_index=1, confirmed_events="A confirmed event")
@@ -805,6 +822,7 @@ class TestE07_2_SafetyClosureGraphInvoke(unittest.TestCase):
         """commit failure → no Fact Digest / RAG。"""
         from src.storage.document_formats import StateCommitResult
 
+        self.mock_state_manager.update_tracking_docs.side_effect = None
         self.mock_state_manager.update_tracking_docs.return_value = {
             "_commit_result": StateCommitResult(
                 success=False, error_message="disk full"
@@ -893,27 +911,6 @@ class TestE07_2_SafetyClosureGraphInvoke(unittest.TestCase):
         self.assertTrue(marker.exists())
         self.assertIn("RAG index failed", result["error"])
 
-    def test_completion_marker_write_failure_stops_derived_state(self):
-        """Marker write failure must not claim completion or run derived state."""
-        marker = self.mock_fs.root / "states" / "chapter_0001_completed"
-        original_write_text = Path.write_text
-
-        def fail_marker_write(path_self, data, *args, **kwargs):
-            if path_self == marker.with_suffix(".tmp"):
-                raise OSError("marker disk read-only")
-            return original_write_text(path_self, data, *args, **kwargs)
-
-        with patch.object(Path, "write_text", new=fail_marker_write):
-            result = self.graph.invoke(self.initial_state)
-
-        self.assertEqual(result["workflow_status"], "error")
-        self.assertTrue(result["commit_success"],
-                        "canonical commit 已成功，不得倒写为失败")
-        self.assertIn("completion marker write failed", result["commit_error"])
-        self.assertFalse(marker.exists())
-        self.mock_state_manager.extract_fact_digest_from_analysis.assert_not_called()
-        self.mock_chroma.index_chapter.assert_not_called()
-
     def test_graph_invoke_non_main_branch_fails_before_side_effects(self):
         """E07 当前只接受 main，显式非 main 必须在首节点前失败。"""
         state = {**self.initial_state, "branch_id": "experiment"}
@@ -933,6 +930,131 @@ class TestE07_2_SafetyClosureGraphInvoke(unittest.TestCase):
 
 class TestE07_2_RealCommitFailureGraphInvoke(unittest.TestCase):
     """Full graph with real StateManager commit and rollback behavior."""
+
+    def test_completion_marker_failure_rolls_back_and_allows_retry(self):
+        from src.agents.state_manager.state_manager import StateManager
+        from src.config.settings import get_settings
+        from src.storage.chroma_store import RetrievalTrace
+        from src.storage.document_formats import ChapterPlan
+        from src.storage.file_store import FileStore
+        from src.storage.sqlite_store import SQLiteStore
+        from src.workflows.chapter_workflow import build_chapter_workflow
+        from src.workflows.retrieval_service import RetrievalOutcome
+
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        settings = get_settings()
+        original_data_dir = settings.data_dir
+        settings.data_dir = tmp
+        self.addCleanup(setattr, settings, "data_dir", original_data_dir)
+
+        novel_id = "marker_failure_graph"
+        fs = FileStore(novel_id, tmp)
+        root = fs.root
+        old_rels = "# OLD RELATIONSHIPS\n## 关系详情\n## 关系变更日志\n"
+        old_items = "# OLD ITEMS\n## 主角持有\n"
+        old_cult = "# OLD CULTIVATION\n## 角色修炼状态\n"
+        for name, content in {
+            "character_relationships": old_rels,
+            "items_equipment": old_items,
+            "cultivation_system": old_cult,
+        }.items():
+            (root / "tracking" / f"{name}.md").write_text(
+                content, encoding="utf-8")
+        (root / "outlines" / "chapter_plan_ch0001.md").write_text(
+            "# 第1章规划：《测试》\n## 场景1：开始\n", encoding="utf-8")
+
+        analysis = """## 事实摘要
+### 确定的事件
+事件发生
+## 状态变更（State Delta）
+### 角色关系当前状态
+- 柯林 ↔ 瘸子莫: 关系类型=伙伴, 当前状态=信任, 态度=友好
+### 角色物品状态
+#### 获得
+- 徽章: 持有者=柯林, 来源=背包, 状态=可用
+### 角色修炼状态
+### 角色当前状态
+### 伏笔状态
+## 审阅决策
+- **决策**: PASS
+- **严重性**: PASS
+- **规划级别**: L1
+"""
+        plan = ChapterPlan(chapter_index=1)
+        plan.scenes = [MagicMock()]
+        retrieval = RetrievalOutcome(
+            trace=RetrievalTrace(chapter_index=1, success=True))
+        report = MagicMock(errors=0, warnings=0)
+        report.summary.return_value = "OK"
+        marker = root / "states" / "chapter_0001_completed"
+        original_write_text = Path.write_text
+
+        def fail_marker(path_self, data, *args, **kwargs):
+            if path_self == marker:
+                raise OSError("completion marker write failed")
+            return original_write_text(path_self, data, *args, **kwargs)
+
+        with patch(
+            "src.workflows.retrieval_service.ChapterRetrievalService"
+        ) as mock_retrieval, patch(
+            "src.agents.author.chapter_planner.ChapterPlanner"
+        ) as mock_planner_cls, patch(
+            "src.agents.author.deepseek_writer.DeepSeekWriter"
+        ) as mock_writer_cls, patch(
+            "src.agents.author.claude_stylist.ClaudeStylist"
+        ) as mock_stylist_cls, patch(
+            "src.agents.author.style_checker.StyleChecker"
+        ) as mock_checker_cls, patch.object(
+            StateManager, "review_chapter",
+            return_value={"raw_analysis": analysis, "filepath": None},
+        ), patch.object(
+            Path, "write_text", new=fail_marker,
+        ), patch.object(
+            StateManager, "extract_fact_digest_from_analysis"
+        ) as mock_digest, patch(
+            "src.storage.chroma_store.ChromaStore.index_chapter"
+        ) as mock_rag:
+            mock_retrieval.return_value.retrieve.return_value = retrieval
+            mock_planner_cls.return_value.plan_chapter.return_value = plan
+            mock_writer_cls.return_value.write_chapter.return_value = "draft"
+            mock_stylist_cls.return_value.edit_chapter.return_value = "styled"
+            mock_checker_cls.return_value.check_all.return_value = report
+
+            result = build_chapter_workflow().invoke({
+                "novel_id": novel_id, "chapter_index": 1,
+                "chapter_outline": "", "extra_instructions": "",
+            })
+
+        self.assertEqual(result["workflow_status"], "error")
+        self.assertFalse(result["commit_success"])
+        self.assertIn("completion_marker", result["commit_error"])
+        self.assertEqual(
+            (root / "tracking" / "character_relationships.md").read_text(
+                encoding="utf-8"), old_rels)
+        self.assertEqual(
+            (root / "tracking" / "items_equipment.md").read_text(
+                encoding="utf-8"), old_items)
+        self.assertEqual(
+            (root / "tracking" / "cultivation_system.md").read_text(
+                encoding="utf-8"), old_cult)
+        self.assertFalse(marker.exists())
+        mock_digest.assert_not_called()
+        mock_rag.assert_not_called()
+
+        # With OLD canonical state and no marker, ordinary Generate may retry.
+        with patch(
+            "src.workflows.retrieval_service.ChapterRetrievalService"
+        ) as retry_retrieval, patch(
+            "src.agents.author.chapter_planner.ChapterPlanner"
+        ) as retry_planner:
+            retry_retrieval.return_value.retrieve.return_value = retrieval
+            retry_planner.return_value.plan_chapter.return_value = plan
+            retry_result = __import__(
+                "src.workflows.chapter_workflow", fromlist=["plan_chapter"]
+            ).plan_chapter({"novel_id": novel_id, "chapter_index": 1})
+        self.assertNotIn("ERROR_ALREADY_EXISTS", retry_result.get("error", ""))
+        retry_retrieval.return_value.retrieve.assert_called_once()
 
     def test_real_state_manager_second_write_failure_rolls_back_and_stops(self):
         from src.agents.state_manager.state_manager import StateManager

@@ -1704,7 +1704,8 @@ class TestCommitFailureBlocksDownstream(_TmpNovelCase):
         orig_commit = StateManager._commit_all_tracking_docs
 
         def failing_commit(self, chapter_index, ch_label, rels, items, cult,
-                          char_states, state_result, log_result):
+                          char_states, state_result, log_result,
+                          create_completion_marker=False):
             from src.storage.document_formats import StateCommitResult
             return StateCommitResult(
                 success=False,

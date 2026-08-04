@@ -478,34 +478,18 @@ def commit_state(state: ChapterWorkflowState) -> dict[str, Any]:
             "error": f"Canonical state commit failed: {error_msg}",
         }
 
-    print(f"  [commit_state] 提交成功: {commit_result.changed_files}")
     marker = FileStore(novel_id, settings.data_dir).root / "states" / (
         f"chapter_{chapter_index:04d}_completed"
     )
-    marker_tmp = marker.with_suffix(".tmp")
-    try:
-        marker_tmp.write_text(
-            "Review PASS\nCanonical commit success\n",
-            encoding="utf-8",
-        )
-        marker_tmp.replace(marker)
-    except Exception as exc:
-        try:
-            marker_tmp.unlink(missing_ok=True)
-        except OSError:
-            pass
+    if not marker.exists():
         return {
-            "commit_success": True,
-            "commit_error": (
-                f"completion marker write failed: {type(exc).__name__}: {exc}"
-            ),
+            "commit_success": False,
+            "commit_error": "completion marker missing after canonical transaction",
             "workflow_status": "error",
-            "error": (
-                "Canonical commit succeeded but completion marker write failed; "
-                "chapter completion was not recorded"
-            ),
+            "error": "Canonical transaction did not produce completion marker",
         }
 
+    print(f"  [commit_state] 提交成功: {commit_result.changed_files}")
     return {
         "commit_success": True,
         "completion_marker_path": str(marker),
