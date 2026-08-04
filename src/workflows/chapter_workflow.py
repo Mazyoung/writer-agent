@@ -1,8 +1,8 @@
-"""E07.2 — Chapter Workflow PASS Happy Path (Adapter Nodes).
+"""E07.3 — Chapter Workflow conditional routing state machine.
 
 Each Node is an adapter that calls an existing Agent/Service.
-No conditional routing (→ E07.3). No checkpoint (→ E07.4).
-Side-by-side with existing production runtime.
+Conditional edges stop failed and non-PASS paths before downstream work.
+No checkpoint, interrupt, or revision loop (E07.4+).
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ from src.storage.sqlite_store import SQLiteStore
 class ChapterWorkflowState(TypedDict, total=False):
     """State carried across one chapter workflow execution.
 
-    E07.2: Extended with data-flow fields for the full PASS happy path.
+    E07.3: Data flow plus explicit decision and terminal status fields.
     Only contains data that must flow between Nodes.
     """
 
@@ -42,8 +42,8 @@ class ChapterWorkflowState(TypedDict, total=False):
     styled_text: str              # style_edit → save_styled → review_chapter
     raw_analysis: str             # review_chapter → parse_decision → commit_state
 
-    # ── Decision routing (temporary fields — replaced by conditional edges in E07.3) ──
-    verdict: str                  # parse_decision → require_pass
+    # ── Decision routing ──
+    verdict: str                  # parse_decision → conditional edge
     review_reasons: list[str]
     t1_issues: list[str]
     planning_level: str
@@ -72,9 +72,8 @@ class ChapterWorkflowState(TypedDict, total=False):
 
 
 def _error_result(message: str) -> dict[str, Any]:
-    """Return the shared fail-closed state for a linear graph failure."""
+    """Return the shared fail-closed runtime error state."""
     return {
-        "commit_success": False,
         "workflow_status": "error",
         "error": message,
     }
@@ -83,18 +82,9 @@ def _error_result(message: str) -> dict[str, Any]:
 def _guard_node(
     node: Callable[[ChapterWorkflowState], dict[str, Any]],
 ) -> Callable[[ChapterWorkflowState], dict[str, Any]]:
-    """Stop side effects after failure and normalize node exceptions."""
+    """Normalize a node's own exceptions into workflow error state."""
     @wraps(node)
     def guarded(state: ChapterWorkflowState) -> dict[str, Any]:
-        if state.get("workflow_status") == "error":
-            return {}
-
-        branch_id = state.get("branch_id", "main")
-        if branch_id != "main":
-            return _error_result(
-                f"Unsupported branch_id '{branch_id}': E07 currently supports only 'main'"
-            )
-
         try:
             result = node(state)
         except Exception as exc:
@@ -103,11 +93,70 @@ def _guard_node(
             )
 
         if result.get("workflow_status") == "error":
-            result.setdefault("commit_success", False)
             result.setdefault("error", f"{node.__name__} failed")
         return result
 
     return guarded
+
+
+@_guard_node
+def preflight(state: ChapterWorkflowState) -> dict[str, Any]:
+    """Validate mechanical generation prerequisites before side effects."""
+    novel_id = state.get("novel_id")
+    if not isinstance(novel_id, str) or not novel_id.strip():
+        return _error_result("Invalid novel_id: a non-empty string is required")
+
+    chapter_index = state.get("chapter_index")
+    if (isinstance(chapter_index, bool)
+            or not isinstance(chapter_index, int)
+            or chapter_index <= 0):
+        return _error_result("Invalid chapter_index: a positive integer is required")
+
+    branch_id = state.get("branch_id", "main")
+    if branch_id != "main":
+        return _error_result(
+            f"Unsupported branch_id '{branch_id}': E07 currently supports only 'main'"
+        )
+
+    fs = FileStore(novel_id, get_settings().data_dir)
+    completion_marker = (
+        fs.root / "states" / f"chapter_{chapter_index:04d}_completed"
+    )
+    if completion_marker.exists():
+        return _error_result(
+            f"ERROR_ALREADY_EXISTS: 第{chapter_index}章已完成，普通 Generate 禁止覆盖"
+        )
+
+    return {"workflow_status": "PREFLIGHT_OK"}
+
+
+def _route_after_node(
+    state: ChapterWorkflowState,
+    success_target: str,
+) -> str:
+    return END if state.get("workflow_status") == "error" else success_target
+
+
+def _route_after_decision(state: ChapterWorkflowState) -> str:
+    if state.get("workflow_status") == "error":
+        return END
+    verdict = state.get("verdict", "UNKNOWN")
+    if verdict == "PASS":
+        return "commit_state"
+    if verdict == "UNKNOWN":
+        return END
+    return "stop_non_pass"
+
+
+def _route_after_commit(state: ChapterWorkflowState) -> str:
+    if (state.get("workflow_status") == "error"
+            or state.get("commit_success") is not True):
+        return END
+    return "save_fact_digest"
+
+
+def _route_after_fact_digest(state: ChapterWorkflowState) -> str:
+    return END if state.get("workflow_status") == "error" else "rag_index"
 
 
 # ── Node: plan_chapter ────────────────────────────────────
@@ -128,14 +177,6 @@ def plan_chapter(state: ChapterWorkflowState) -> dict[str, Any]:
     extra_instructions = state.get("extra_instructions", "")
 
     fs = FileStore(novel_id, get_settings().data_dir)
-    completion_marker = (
-        fs.root / "states" / f"chapter_{chapter_index:04d}_completed"
-    )
-    if completion_marker.exists():
-        return _error_result(
-            f"ERROR_ALREADY_EXISTS: 第{chapter_index}章已完成，普通 Generate 禁止覆盖"
-        )
-
     retrieval = ChapterRetrievalService(novel_id).retrieve(
         chapter_index, chapter_outline, extra_instructions)
 
@@ -361,6 +402,15 @@ def parse_decision(state: ChapterWorkflowState) -> dict[str, Any]:
     sqlite = SQLiteStore(settings.data_dir / "novels" / novel_id / "state.db")
     sm = StateManager(novel_id, sqlite)
     decision = sm.parse_review_decision(raw_analysis)
+    if decision.verdict == "UNKNOWN":
+        return {
+            "verdict": "UNKNOWN",
+            "review_reasons": decision.reasons,
+            "t1_issues": decision.t1_issues,
+            "planning_level": decision.planning_level,
+            "workflow_status": "error",
+            "error": "Review verdict UNKNOWN; commit blocked fail-closed",
+        }
 
     print(f"  [parse_decision] 审阅决策: {decision.verdict}"
           + (f" — {'; '.join(decision.reasons[:3])}" if decision.reasons else ""))
@@ -374,32 +424,19 @@ def parse_decision(state: ChapterWorkflowState) -> dict[str, Any]:
     }
 
 
-# ── Node: require_pass ───────────────────────────────────
+# ── Node: stop_non_pass ──────────────────────────────────
 
-@_guard_node
-def require_pass(state: ChapterWorkflowState) -> dict[str, Any]:
-    """E07.2 temporary fail-closed guard (replaced by conditional edges in E07.3).
-
-    Only PASS may proceed to commit_state.
-    NEEDS_REVISION, HALT, UNKNOWN, and any other verdict → STOP.
-    """
+def stop_non_pass(state: ChapterWorkflowState) -> dict[str, Any]:
+    """Finalize an explicit non-PASS review as a business terminal state."""
     verdict = state.get("verdict", "UNKNOWN")
-
-    if verdict == "PASS":
-        print(f"  [require_pass] PASS → 继续 commit")
-        return {}  # allow downstream to proceed
-
-    # Non-PASS: fail-closed — set guard flag for downstream nodes
     reasons = state.get("review_reasons", [])
-    print(f"  [require_pass] {verdict} → 停止（禁止 commit）"
-          + (f": {'; '.join(reasons[:3])}" if reasons else ""))
-
+    detail = f"Review verdict: {verdict}"
+    if reasons:
+        detail += f" — {'; '.join(reasons[:3])}"
     return {
         "commit_success": False,
-        "commit_error": f"Review verdict: {verdict}"
-                        + (f" — {'; '.join(reasons[:3])}" if reasons else ""),
+        "commit_error": detail,
         "workflow_status": "STOPPED_NON_PASS",
-        "error": f"Review verdict is {verdict}, not PASS. Commit blocked.",
     }
 
 
@@ -412,17 +449,11 @@ def commit_state(state: ChapterWorkflowState) -> dict[str, Any]:
     Reuses existing ALL-OLD / ALL-NEW atomic commit.
     Does NOT rewrite _parse_state_deltas() or _commit_all_tracking_docs().
 
-    Guard: skipped if require_pass blocked (verdict != PASS).
-    Guard: if commit fails → commit_success=False → downstream blocked.
+    Defense-in-depth: only PASS may commit, and failures return an error state.
     """
     from src.agents.state_manager.state_manager import StateManager
 
-    # Guard 1: require_pass must have allowed this
-    if state.get("workflow_status") == "STOPPED_NON_PASS":
-        print(f"  [commit_state] SKIPPED — workflow stopped (non-PASS verdict)")
-        return {}
-
-    # Guard 2: defense-in-depth — re-verify verdict is PASS
+    # Defense-in-depth — conditional routing should only send PASS here.
     verdict = state.get("verdict", "")
     if verdict != "PASS":
         print(f"  [commit_state] SKIPPED — verdict is '{verdict}', not PASS")
@@ -615,44 +646,57 @@ def rag_index(state: ChapterWorkflowState) -> dict[str, Any]:
 # ═══════════════════════════════════════════════════════════
 
 def build_chapter_workflow() -> Any:
-    """Build and compile the Chapter Workflow StateGraph.
-
-    E07.2: Full PASS happy path as linear adapter-node chain.
-    Topology: START → plan_chapter → write_draft → style_edit → save_styled
-              → review_chapter → parse_decision → require_pass
-              → commit_state → save_fact_digest → rag_index → END
-
-    No conditional routing (→ E07.3). No checkpoint (→ E07.4).
-    require_pass is a regular node with guard flags for downstream.
-
-    Returns:
-        Compiled graph (CompiledStateGraph) ready for invoke().
-    """
+    """Build and compile the E07.3 conditional Chapter Workflow."""
     graph = StateGraph(ChapterWorkflowState)
 
-    # ── Add nodes ──
+    graph.add_node("preflight", preflight)
     graph.add_node("plan_chapter", plan_chapter)
     graph.add_node("write_draft", write_draft)
     graph.add_node("style_edit", style_edit)
     graph.add_node("save_styled", save_styled)
     graph.add_node("review_chapter", review_chapter)
     graph.add_node("parse_decision", parse_decision)
-    graph.add_node("require_pass", require_pass)
+    graph.add_node("stop_non_pass", stop_non_pass)
     graph.add_node("commit_state", commit_state)
     graph.add_node("save_fact_digest", save_fact_digest)
     graph.add_node("rag_index", rag_index)
 
-    # ── Linear edges: PASS happy path ──
-    graph.add_edge(START, "plan_chapter")
-    graph.add_edge("plan_chapter", "write_draft")
-    graph.add_edge("write_draft", "style_edit")
-    graph.add_edge("style_edit", "save_styled")
-    graph.add_edge("save_styled", "review_chapter")
-    graph.add_edge("review_chapter", "parse_decision")
-    graph.add_edge("parse_decision", "require_pass")
-    graph.add_edge("require_pass", "commit_state")
-    graph.add_edge("commit_state", "save_fact_digest")
-    graph.add_edge("save_fact_digest", "rag_index")
+    graph.add_edge(START, "preflight")
+    for node, target in [
+        ("preflight", "plan_chapter"),
+        ("plan_chapter", "write_draft"),
+        ("write_draft", "style_edit"),
+        ("style_edit", "save_styled"),
+        ("save_styled", "review_chapter"),
+        ("review_chapter", "parse_decision"),
+    ]:
+        graph.add_conditional_edges(
+            node,
+            lambda state, next_node=target: _route_after_node(
+                state, next_node),
+            {target: target, END: END},
+        )
+
+    graph.add_conditional_edges(
+        "parse_decision",
+        _route_after_decision,
+        {
+            "commit_state": "commit_state",
+            "stop_non_pass": "stop_non_pass",
+            END: END,
+        },
+    )
+    graph.add_edge("stop_non_pass", END)
+    graph.add_conditional_edges(
+        "commit_state",
+        _route_after_commit,
+        {"save_fact_digest": "save_fact_digest", END: END},
+    )
+    graph.add_conditional_edges(
+        "save_fact_digest",
+        _route_after_fact_digest,
+        {"rag_index": "rag_index", END: END},
+    )
     graph.add_edge("rag_index", END)
 
     return graph.compile()
