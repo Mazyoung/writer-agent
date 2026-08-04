@@ -37,6 +37,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from src.config.settings import get_settings
 from src.core.orchestrator import Orchestrator
+from src.workflows.chapter_runner import run_chapter_workflow
 
 
 def _safe_print(text: str, max_len: int = 500):
@@ -185,8 +186,22 @@ def _cmd_plan_interactive(orch, args):
 def cmd_write(args):
     if not _get_novel_dir(args.name):
         return
-    orch = Orchestrator(args.name)
-    result = orch.write_chapter(args.chapter)
+    result = run_chapter_workflow(
+        args.name,
+        args.chapter,
+        chapter_outline=getattr(args, "outline", "") or "",
+        extra_instructions=getattr(args, "instructions", "") or "",
+    )
+    status = result.get("workflow_status", "error")
+    verdict = result.get("verdict", "UNKNOWN")
+    if status == "completed":
+        print(f"\n  Chapter workflow completed: review={verdict}")
+        return
+    if status == "STOPPED_NON_PASS":
+        print(f"\n  Chapter workflow stopped: review={verdict}")
+        return
+    print(f"\n  Chapter workflow halted: {result.get('error', status)}")
+    return
     print(f"\n下一步: python main.py review {args.name} --chapter {args.chapter}")
 
 
@@ -279,6 +294,8 @@ def main():
     p = subparsers.add_parser("init", help="Phase1:生成提案 / Phase2:--confirm 生成大纲")
     p.add_argument("name"); p.add_argument("premise", nargs="?", default="")
     p.add_argument("--force", action="store_true")
+    p.add_argument("--outline")
+    p.add_argument("--instructions")
     p.add_argument("--confirm", action="store_true")
 
     # status

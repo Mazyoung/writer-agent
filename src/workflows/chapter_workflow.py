@@ -645,8 +645,12 @@ def rag_index(state: ChapterWorkflowState) -> dict[str, Any]:
 # Builder
 # ═══════════════════════════════════════════════════════════
 
-def build_chapter_workflow() -> Any:
-    """Build and compile the E07.3 conditional Chapter Workflow."""
+def build_chapter_workflow(checkpointer: Any = None) -> Any:
+    """Build and compile the workflow with an optional checkpointer.
+
+    The graph owns orchestration state only. Canonical story state remains
+    managed by the existing StateManager transaction.
+    """
     graph = StateGraph(ChapterWorkflowState)
 
     graph.add_node("preflight", preflight)
@@ -699,4 +703,4 @@ def build_chapter_workflow() -> Any:
     )
     graph.add_edge("rag_index", END)
 
-    return graph.compile()
+    return graph.compile(checkpointer=checkpointer)
