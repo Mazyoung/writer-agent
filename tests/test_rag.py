@@ -217,6 +217,9 @@ class TestFutureLeakage(_TempChromaCase):
                         content="第{}章独特关键词XYZ。".format(ci) * 200)
         results = self.store.search(
             "test_novel", "main", "独特关键词XYZ", chapter_index=5, top_k=10)
+        self.assertGreater(len(results), 0,
+                           "positive control: 可见的第3章必须能被检索到")
+        self.assertIn(3, {r.chapter_index for r in results})
         for r in results:
             self.assertLess(r.chapter_index, 5,
                             "chapter_index={} 不应 ≥ 5".format(r.chapter_index))
@@ -228,6 +231,9 @@ class TestFutureLeakage(_TempChromaCase):
                         content="章节{}内容。".format(ci) * 200)
         results = self.store.search(
             "test_novel", "main", "章节6", chapter_index=4, top_k=10)
+        self.assertGreater(len(results), 0,
+                           "positive control: ch1-ch3 历史数据必须可见")
+        self.assertTrue({r.chapter_index for r in results} & {1, 2, 3})
         for r in results:
             self.assertLess(r.chapter_index, 4,
                             "chapter_index={} 不应 ≥ 4".format(r.chapter_index))
@@ -238,9 +244,22 @@ class TestNovelIsolation(_TempChromaCase):
         """小说 A 不能检索小说 B 的内容（E04 P0 #7）。"""
         self._index(novel_id="novel_a", chapter_index=1,
                     content="小说A的绝密情报。 " * 200)
-        results = self.store.search(
+        self._index(novel_id="novel_b", chapter_index=1,
+                    content="小说B自己的公开记录。 " * 200)
+
+        results_a = self.store.search(
+            "novel_a", "main", "绝密情报", chapter_index=99, top_k=10)
+        self.assertGreater(len(results_a), 0,
+                           "positive control: 小说A必须能检索自己的数据")
+        self.assertTrue(all("novel_a" in r.doc_id for r in results_a))
+
+        results_b = self.store.search(
             "novel_b", "main", "绝密情报", chapter_index=99, top_k=10)
-        self.assertEqual(len(results), 0, "小说B 不应检索到小说A 的内容")
+        self.assertGreater(len(results_b), 0,
+                           "positive control: 小说B必须有自己的可见数据")
+        self.assertTrue(all("novel_b" in r.doc_id for r in results_b))
+        self.assertTrue(all("novel_a" not in r.doc_id for r in results_b),
+                        "小说B 不应检索到小说A 的内容")
 
 
 class TestBranchIsolation(_TempChromaCase):
@@ -251,12 +270,24 @@ class TestBranchIsolation(_TempChromaCase):
         self._index(branch_id="experiment", chapter_index=1,
                     content="实验分支完全不同的走向。 " * 200)
 
-        # 从 main 检索"实验" —— 不应返回 experiment 分支内容
-        results = self.store.search(
+        # 两个方向都必须有 positive control，同时保持相互隔离。
+        main_results = self.store.search(
             "test_novel", "main", "实验", chapter_index=99, top_k=10)
-        for r in results:
-            self.assertNotIn("experiment", r.doc_id,
-                             "main 分支不应检索到 experiment 分支")
+        self.assertGreater(len(main_results), 0,
+                           "positive control: main 数据必须可见")
+        self.assertTrue(all("_main_" in r.doc_id for r in main_results))
+        self.assertTrue(all("experiment" not in r.doc_id for r in main_results),
+                        "main 分支不应检索到 experiment 分支")
+
+        experiment_results = self.store.search(
+            "test_novel", "experiment", "主分支", chapter_index=99, top_k=10)
+        self.assertGreater(len(experiment_results), 0,
+                           "positive control: experiment 数据必须可见")
+        self.assertTrue(all("_experiment_" in r.doc_id
+                            for r in experiment_results))
+        self.assertTrue(all("_main_" not in r.doc_id
+                            for r in experiment_results),
+                        "experiment 分支不应检索到 main 分支")
 
 
 class TestEmptyRetrieval(_TempChromaCase):

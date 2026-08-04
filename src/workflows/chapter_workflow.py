@@ -127,6 +127,15 @@ def plan_chapter(state: ChapterWorkflowState) -> dict[str, Any]:
     extra_instructions = state.get("extra_instructions", "")
 
     fs = FileStore(novel_id, get_settings().data_dir)
+    chapters_dir = fs.root / "chapters"
+    styled_prefix = f"chapter_{chapter_index:04d}_styled"
+    completed = (chapters_dir / f"{styled_prefix}.md").exists() or any(
+        chapters_dir.glob(f"{styled_prefix}_*.md"))
+    if completed:
+        return _error_result(
+            f"ERROR_ALREADY_EXISTS: 第{chapter_index}章已存在完成态 styled chapter，"
+            "普通 Generate 禁止覆盖"
+        )
 
     retrieval = ChapterRetrievalService(novel_id).retrieve(
         chapter_index, chapter_outline, extra_instructions)

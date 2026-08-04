@@ -570,7 +570,8 @@ class StateManager(BaseAgent):
 
         PREPARE (validate snapshot) → COMMIT → ROLLBACK on failure.
 
-        保证 ALL OLD or ALL NEW，绝不出现 PARTIAL NEW。
+        Snapshot 与 rollback 均成功时保持 ALL OLD / ALL NEW。
+        rollback 自身失败时返回明确 degraded failure，canonical state 可能不一致。
         Snapshot 读取失败 → fail-closed: 不开始任何写入。
         """
         result = StateCommitResult(success=False)
@@ -618,6 +619,7 @@ class StateManager(BaseAgent):
         # ── Phase 4c: COMMIT with rollback ──
         written: list[str] = []
         commit_errors: list[str] = []
+        rollback_errors: list[str] = []
 
         for name in doc_names:
             content = candidates.get(name)
@@ -639,14 +641,21 @@ class StateManager(BaseAgent):
                         elif (tracking_dir / f"{rolled}.md").exists():
                             (tracking_dir / f"{rolled}.md").unlink()
                     except Exception as re:
-                        result.warnings.append(
-                            f"rollback {rolled} 失败（状态可能不一致）: {re}")
+                        rollback_errors.append(
+                            f"rollback {rolled} 失败: {type(re).__name__}: {re}")
                 break  # stop trying to write more
 
         if commit_errors:
             result.error_message = "; ".join(commit_errors)
-            result.warnings.insert(0, f"第{chapter_index}章 tracking doc 提交失败，"
-                                   f"已回滚 {len(written)} 个文件")
+            if rollback_errors:
+                result.warnings.append(
+                    f"第{chapter_index}章 tracking doc 提交失败；回滚未完全成功，"
+                    "canonical state 可能不一致")
+                result.warnings.extend(rollback_errors)
+            else:
+                result.warnings.append(
+                    f"第{chapter_index}章 tracking doc 提交失败，"
+                    f"已成功回滚 {len(written)} 个文件")
             for err in commit_errors:
                 result.warnings.append(f"  - {err}")
             return result

@@ -1542,6 +1542,9 @@ class TestAtomicRollback(_TmpNovelCase):
                          "第二个文件保存失败 → commit 必须报告 FAILED")
         self.assertIn("items_equipment", commit_result.error_message,
                       "错误信息必须包含失败组件名")
+        warnings = "\n".join(commit_result.warnings)
+        self.assertIn("已成功回滚 1 个文件", warnings)
+        self.assertNotIn("canonical state 可能不一致", warnings)
 
         # ── Assert: ALL OLD — relationships rolled back ──
         current_rels = (root / "tracking" / "character_relationships.md").read_text(
@@ -1566,6 +1569,72 @@ class TestAtomicRollback(_TmpNovelCase):
             encoding="utf-8")
         self.assertIn("OLD CULTIVATION v1", current_cult,
                       "修炼文件必须保持 OLD 内容")
+
+    def test_rollback_failure_reports_degraded_state(self):
+        """Rollback 自身失败时不得误报全部成功回滚。"""
+        from unittest.mock import patch
+
+        root = self._setup_review_dirs("atom_rollback_failure")
+        sqlite = SQLiteStore(root / "state.db")
+        sm = StateManager("atom_rollback_failure", sqlite)
+        sm.fs = __import__(
+            'src.storage.file_store', fromlist=['FileStore']).FileStore(
+                "atom_rollback_failure", self.settings.data_dir)
+
+        old_rels = "# OLD RELATIONSHIPS\n## 关系详情\n## 关系变更日志\n"
+        old_items = "# OLD ITEMS\n## 主角持有\n"
+        old_cult = "# OLD CULTIVATION\n## 角色修炼状态\n"
+        tracking = root / "tracking"
+        (tracking / "character_relationships.md").write_text(
+            old_rels, encoding="utf-8")
+        (tracking / "items_equipment.md").write_text(
+            old_items, encoding="utf-8")
+        (tracking / "cultivation_system.md").write_text(
+            old_cult, encoding="utf-8")
+
+        analysis = """## 状态变更（State Delta）
+### 角色关系当前状态
+- 柯林 ↔ 瘸子莫: 关系类型=伙伴, 当前状态=新状态, 态度=友好
+### 角色物品状态
+#### 获得
+- 徽章: 持有者=柯林, 来源=背包, 状态=可用
+### 角色修炼状态
+### 角色当前状态
+### 伏笔状态
+- 蓝光: 状态=OPEN, 回收章节=
+"""
+        original_save = sm.fs.save_tracking_doc
+        save_calls = []
+
+        def fail_second_save(name, content):
+            save_calls.append(name)
+            if len(save_calls) == 2:
+                raise OSError("second canonical write failed")
+            return original_save(name, content)
+
+        original_write_text = Path.write_text
+        rel_path = tracking / "character_relationships.md"
+
+        def fail_rollback_write(path_self, data, *args, **kwargs):
+            if path_self == rel_path and data == old_rels:
+                raise OSError("rollback write failed")
+            return original_write_text(path_self, data, *args, **kwargs)
+
+        with patch.object(sm.fs, "save_tracking_doc",
+                          side_effect=fail_second_save), \
+             patch.object(Path, "write_text", new=fail_rollback_write), \
+             patch.object(sqlite, "upsert_foreshadow") as mock_foreshadow, \
+             patch.object(sm, "_sync_sqlite") as mock_sync:
+            result = sm.update_tracking_docs(1, "正文", analysis)
+
+        commit_result = result["_commit_result"]
+        self.assertFalse(commit_result.success)
+        warnings = "\n".join(commit_result.warnings)
+        self.assertIn("rollback character_relationships 失败", warnings)
+        self.assertIn("canonical state 可能不一致", warnings)
+        self.assertNotIn("已成功回滚", warnings)
+        mock_foreshadow.assert_not_called()
+        mock_sync.assert_not_called()
 
     def test_all_files_committed_when_no_failure(self):
         """所有文件保存成功 → ALL NEW，changed_files 正确。"""

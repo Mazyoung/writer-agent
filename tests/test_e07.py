@@ -17,6 +17,7 @@ E07.2 tests:
 """
 
 import json
+import shutil
 import sys
 import tempfile
 import unittest
@@ -304,9 +305,12 @@ class TestE07_2_PassHappyPath(unittest.TestCase):
             "extra_instructions": "test instructions",
         }
 
+    @patch("src.workflows.chapter_workflow.FileStore")
     @patch("src.storage.chroma_store.ChromaStore")
     @patch("src.agents.author.chapter_planner.ChapterPlanner")
-    def test_plan_chapter_node_returns_plan_text(self, mock_planner_cls, mock_chroma_cls):
+    def test_plan_chapter_node_returns_plan_text(
+        self, mock_planner_cls, mock_chroma_cls, mock_fs_cls,
+    ):
         """plan_chapter 返回 chapter_plan_text + PLANNED status。"""
         from src.workflows.chapter_workflow import plan_chapter, ChapterWorkflowState
         from src.storage.document_formats import ChapterPlan
@@ -318,6 +322,11 @@ class TestE07_2_PassHappyPath(unittest.TestCase):
         mock_planner.plan_chapter.return_value = fake_plan
 
         mock_chroma_cls.return_value.search.return_value = []
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        mock_fs_cls.return_value.root = tmp
+        (tmp / "chapters").mkdir()
+        mock_fs_cls.return_value.load_canonical.return_value = "plan text"
 
         state: ChapterWorkflowState = dict(self.base_state)
         result = plan_chapter(state)
@@ -480,8 +489,10 @@ class TestE07_2_PassHappyPath(unittest.TestCase):
         mock_fs.load_canonical.return_value = "# Chapter Plan\n## 一、章节信息\n章大纲: test\n总场景数: 2"
         mock_fs.load_latest.return_value = "styled chapter text"
         mock_fs.load_tracking_doc.return_value = ""
-        mock_fs.root = MagicMock()
-        mock_fs.root.__truediv__ = MagicMock(return_value=MagicMock())
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        mock_fs.root = tmp
+        (tmp / "chapters").mkdir()
 
         # ── Mock: plan_chapter (ChromaStore + ChapterPlanner) ──
         mock_chroma = mock_chroma_cls.return_value
@@ -603,7 +614,10 @@ class TestE07_2_SafetyClosureGraphInvoke(unittest.TestCase):
         )
         self.mock_fs.load_latest.return_value = "OLD STYLED ARTIFACT"
         self.mock_fs.load_tracking_doc.return_value = ""
-        self.mock_fs.root = MagicMock()
+        self.fs_tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.fs_tmp, True)
+        self.mock_fs.root = self.fs_tmp / "novels" / "safety_closure_test"
+        (self.mock_fs.root / "chapters").mkdir(parents=True)
 
         fake_plan = ChapterPlan(chapter_index=1)
         fake_plan.scenes = [MagicMock(), MagicMock()]
@@ -672,6 +686,61 @@ class TestE07_2_SafetyClosureGraphInvoke(unittest.TestCase):
         self.mock_state_manager.extract_fact_digest_from_analysis.assert_not_called()
         self.mock_chroma.index_chapter.assert_not_called()
 
+    @patch("src.workflows.retrieval_service.ChapterRetrievalService")
+    def test_graph_invoke_existing_completed_chapter_has_zero_side_effects(
+        self, mock_retrieval_cls,
+    ):
+        """Completed styled chapter blocks ordinary Generate before all work."""
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        self.mock_fs.root = tmp / "novels" / "safety_closure_test"
+        chapters = self.mock_fs.root / "chapters"
+        chapters.mkdir(parents=True)
+        (chapters / "chapter_0001_styled_20260805_120000.md").write_text(
+            "completed", encoding="utf-8")
+
+        result = self.graph.invoke(self.initial_state)
+
+        self.assertEqual(result["workflow_status"], "error")
+        self.assertIn("ERROR_ALREADY_EXISTS", result["error"])
+        mock_retrieval_cls.return_value.retrieve.assert_not_called()
+        self.mock_planner.plan_chapter.assert_not_called()
+        self.mock_writer.write_chapter.assert_not_called()
+        self.mock_stylist.edit_chapter.assert_not_called()
+        self.mock_fs.save.assert_not_called()
+        self.mock_state_manager.review_chapter.assert_not_called()
+        self.mock_state_manager.update_tracking_docs.assert_not_called()
+        self.mock_state_manager.extract_fact_digest_from_analysis.assert_not_called()
+        self.mock_chroma.index_chapter.assert_not_called()
+
+    @patch("src.workflows.retrieval_service.ChapterRetrievalService")
+    def test_draft_and_plan_only_do_not_count_as_completed(
+        self, mock_retrieval_cls,
+    ):
+        """Draft/plan artifacts alone must not trigger ERROR_ALREADY_EXISTS."""
+        from src.storage.chroma_store import RetrievalTrace
+        from src.workflows.retrieval_service import RetrievalOutcome
+
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        self.mock_fs.root = tmp / "novels" / "safety_closure_test"
+        chapters = self.mock_fs.root / "chapters"
+        outlines = self.mock_fs.root / "outlines"
+        chapters.mkdir(parents=True)
+        outlines.mkdir(parents=True)
+        (chapters / "chapter_0001_draft_20260805_120000.md").write_text(
+            "draft", encoding="utf-8")
+        (outlines / "chapter_plan_ch0001.md").write_text(
+            "plan", encoding="utf-8")
+        mock_retrieval_cls.return_value.retrieve.return_value = RetrievalOutcome(
+            trace=RetrievalTrace(chapter_index=1, success=True))
+
+        result = self.graph.invoke(self.initial_state)
+
+        self.assertNotIn("ERROR_ALREADY_EXISTS", result.get("error", ""))
+        mock_retrieval_cls.return_value.retrieve.assert_called_once()
+        self.mock_planner.plan_chapter.assert_called_once()
+
     def test_graph_invoke_write_failure_stops_downstream(self):
         """write failure → no style/save/review/commit/fact digest/RAG。"""
         self.mock_writer.write_chapter.side_effect = RuntimeError("writer down")
@@ -731,6 +800,66 @@ class TestE07_2_SafetyClosureGraphInvoke(unittest.TestCase):
         self.mock_state_manager.extract_fact_digest_from_analysis.assert_not_called()
         self.mock_chroma.index_chapter.assert_not_called()
 
+    @patch("src.workflows.retrieval_service.ChapterRetrievalService")
+    def test_graph_invoke_plan_failure_stops_downstream(
+        self, mock_retrieval_cls,
+    ):
+        """Plan failure stops writer and every later business side effect."""
+        mock_retrieval_cls.return_value.retrieve.side_effect = RuntimeError(
+            "retrieval unavailable")
+
+        result = self.graph.invoke(self.initial_state)
+
+        self.assertEqual(result["workflow_status"], "error")
+        self.assertIn("plan_chapter failed", result["error"])
+        self.mock_planner.plan_chapter.assert_not_called()
+        self.mock_writer.write_chapter.assert_not_called()
+        self.mock_stylist.edit_chapter.assert_not_called()
+        self.mock_state_manager.review_chapter.assert_not_called()
+        self.mock_state_manager.update_tracking_docs.assert_not_called()
+        self.mock_state_manager.extract_fact_digest_from_analysis.assert_not_called()
+        self.mock_chroma.index_chapter.assert_not_called()
+
+    def test_graph_invoke_save_styled_failure_stops_downstream(self):
+        """save_styled failure stops review, commit, Fact Digest, and RAG."""
+        self.mock_fs.save.side_effect = OSError("styled write failed")
+
+        result = self.graph.invoke(self.initial_state)
+
+        self.assertEqual(result["workflow_status"], "error")
+        self.assertIn("save_styled failed", result["error"])
+        self.mock_state_manager.review_chapter.assert_not_called()
+        self.mock_state_manager.update_tracking_docs.assert_not_called()
+        self.mock_state_manager.extract_fact_digest_from_analysis.assert_not_called()
+        self.mock_chroma.index_chapter.assert_not_called()
+
+    def test_graph_invoke_review_failure_stops_downstream(self):
+        """Review failure stops decision parsing and all persistence."""
+        self.mock_state_manager.review_chapter.side_effect = RuntimeError(
+            "review failed")
+
+        result = self.graph.invoke(self.initial_state)
+
+        self.assertEqual(result["workflow_status"], "error")
+        self.assertIn("review_chapter failed", result["error"])
+        self.mock_state_manager.parse_review_decision.assert_not_called()
+        self.mock_state_manager.update_tracking_docs.assert_not_called()
+        self.mock_state_manager.extract_fact_digest_from_analysis.assert_not_called()
+        self.mock_chroma.index_chapter.assert_not_called()
+
+    def test_graph_invoke_parse_decision_failure_stops_downstream(self):
+        """Decision parser exception stops commit, Fact Digest, and RAG."""
+        self.mock_state_manager.parse_review_decision.side_effect = RuntimeError(
+            "parser failed")
+
+        result = self.graph.invoke(self.initial_state)
+
+        self.assertEqual(result["workflow_status"], "error")
+        self.assertIn("parse_decision failed", result["error"])
+        self.mock_state_manager.update_tracking_docs.assert_not_called()
+        self.mock_state_manager.extract_fact_digest_from_analysis.assert_not_called()
+        self.mock_chroma.index_chapter.assert_not_called()
+
     def test_graph_invoke_non_main_branch_fails_before_side_effects(self):
         """E07 当前只接受 main，显式非 main 必须在首节点前失败。"""
         state = {**self.initial_state, "branch_id": "experiment"}
@@ -746,6 +875,130 @@ class TestE07_2_SafetyClosureGraphInvoke(unittest.TestCase):
         self.mock_state_manager.review_chapter.assert_not_called()
         self.mock_state_manager.update_tracking_docs.assert_not_called()
         self.mock_chroma.index_chapter.assert_not_called()
+
+
+class TestE07_2_RealCommitFailureGraphInvoke(unittest.TestCase):
+    """Full graph with real StateManager commit and rollback behavior."""
+
+    def test_real_state_manager_second_write_failure_rolls_back_and_stops(self):
+        from src.agents.state_manager.state_manager import StateManager
+        from src.config.settings import get_settings
+        from src.storage.chroma_store import RetrievalTrace
+        from src.storage.document_formats import ChapterPlan
+        from src.storage.file_store import FileStore
+        from src.storage.sqlite_store import SQLiteStore
+        from src.workflows.chapter_workflow import build_chapter_workflow
+        from src.workflows.retrieval_service import RetrievalOutcome
+
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        settings = get_settings()
+        original_data_dir = settings.data_dir
+        settings.data_dir = tmp
+        self.addCleanup(setattr, settings, "data_dir", original_data_dir)
+
+        novel_id = "real_commit_failure_graph"
+        fs = FileStore(novel_id, tmp)
+        root = fs.root
+        old_rels = "# OLD RELATIONSHIPS\n## 关系详情\n## 关系变更日志\n"
+        old_items = "# OLD ITEMS\n## 主角持有\n"
+        old_cult = "# OLD CULTIVATION\n## 角色修炼状态\n"
+        (root / "tracking" / "character_relationships.md").write_text(
+            old_rels, encoding="utf-8")
+        (root / "tracking" / "items_equipment.md").write_text(
+            old_items, encoding="utf-8")
+        (root / "tracking" / "cultivation_system.md").write_text(
+            old_cult, encoding="utf-8")
+        (root / "outlines" / "chapter_plan_ch0001.md").write_text(
+            "# 第1章规划：《测试》\n## 场景1：开始\n", encoding="utf-8")
+
+        analysis = """## 事实摘要
+### 确定的事件
+事件发生
+## 状态变更（State Delta）
+### 角色关系当前状态
+- 柯林 ↔ 瘸子莫: 关系类型=伙伴, 当前状态=信任, 态度=友好
+### 角色物品状态
+#### 获得
+- 徽章: 持有者=柯林, 来源=背包, 状态=可用
+### 角色修炼状态
+### 角色当前状态
+### 伏笔状态
+## 审阅决策
+- **决策**: PASS
+- **严重性**: PASS
+- **规划级别**: L1
+"""
+        plan = ChapterPlan(chapter_index=1)
+        plan.scenes = [MagicMock()]
+        retrieval = RetrievalOutcome(
+            trace=RetrievalTrace(chapter_index=1, success=True))
+        report = MagicMock(errors=0, warnings=0)
+        report.summary.return_value = "OK"
+
+        save_calls = []
+        original_save_tracking = FileStore.save_tracking_doc
+
+        def fail_second_tracking_write(store, name, content):
+            save_calls.append(name)
+            if len(save_calls) == 2:
+                raise OSError("second tracking write failed")
+            return original_save_tracking(store, name, content)
+
+        with patch(
+            "src.workflows.retrieval_service.ChapterRetrievalService"
+        ) as mock_retrieval, patch(
+            "src.agents.author.chapter_planner.ChapterPlanner"
+        ) as mock_planner_cls, patch(
+            "src.agents.author.deepseek_writer.DeepSeekWriter"
+        ) as mock_writer_cls, patch(
+            "src.agents.author.claude_stylist.ClaudeStylist"
+        ) as mock_stylist_cls, patch(
+            "src.agents.author.style_checker.StyleChecker"
+        ) as mock_checker_cls, patch.object(
+            StateManager, "review_chapter",
+            return_value={"raw_analysis": analysis, "filepath": None},
+        ), patch.object(
+            FileStore, "save_tracking_doc",
+            autospec=True, side_effect=fail_second_tracking_write,
+        ), patch.object(
+            StateManager, "extract_fact_digest_from_analysis"
+        ) as mock_digest, patch.object(
+            StateManager, "_sync_sqlite"
+        ) as mock_sync, patch.object(
+            SQLiteStore, "upsert_foreshadow"
+        ) as mock_foreshadow, patch(
+            "src.storage.chroma_store.ChromaStore.index_chapter"
+        ) as mock_rag:
+            mock_retrieval.return_value.retrieve.return_value = retrieval
+            mock_planner_cls.return_value.plan_chapter.return_value = plan
+            mock_writer_cls.return_value.write_chapter.return_value = "draft"
+            mock_stylist_cls.return_value.edit_chapter.return_value = "styled"
+            mock_checker_cls.return_value.check_all.return_value = report
+
+            result = build_chapter_workflow().invoke({
+                "novel_id": novel_id,
+                "chapter_index": 1,
+                "chapter_outline": "",
+                "extra_instructions": "",
+            })
+
+        self.assertEqual(result["workflow_status"], "error")
+        self.assertFalse(result["commit_success"])
+        self.assertIn("items_equipment", result["commit_error"])
+        self.assertEqual(
+            (root / "tracking" / "character_relationships.md").read_text(
+                encoding="utf-8"), old_rels)
+        self.assertEqual(
+            (root / "tracking" / "items_equipment.md").read_text(
+                encoding="utf-8"), old_items)
+        self.assertEqual(
+            (root / "tracking" / "cultivation_system.md").read_text(
+                encoding="utf-8"), old_cult)
+        mock_sync.assert_not_called()
+        mock_foreshadow.assert_not_called()
+        mock_digest.assert_not_called()
+        mock_rag.assert_not_called()
 
 
 class TestE07_2_RetrievalService(unittest.TestCase):
@@ -850,6 +1103,10 @@ class TestE07_2_RetrievalService(unittest.TestCase):
         plan = ChapterPlan(chapter_index=2)
         mock_planner_cls.return_value.plan_chapter.return_value = plan
         mock_fs_cls.return_value.load_canonical.return_value = "plan text"
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        mock_fs_cls.return_value.root = tmp
+        (tmp / "chapters").mkdir()
 
         result = plan_chapter({
             "novel_id": "warning_test", "chapter_index": 2,
