@@ -1,5 +1,10 @@
 .env
-data/
+data/novels/
+data/*
+!data/examples/
+!data/examples/**
+*.db
+*.sqlite
 __pycache__/
 *.pyc
 *.pyo
