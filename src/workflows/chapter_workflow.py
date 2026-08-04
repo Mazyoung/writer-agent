@@ -52,7 +52,11 @@ class ChapterWorkflowState(TypedDict, total=False):
     commit_success: bool          # commit_state → save_fact_digest → rag_index
     commit_error: str
 
-    # ── Results ──
+    # ── Results / diagnostics ──
+    retrieval_success: bool
+    retrieval_result_count: int
+    retrieval_trace_path: str
+    warnings: list[str]
     fact_digest_generated: bool
     rag_chunks: int
 
@@ -115,6 +119,7 @@ def plan_chapter(state: ChapterWorkflowState) -> dict[str, Any]:
     Side effects: 1 LLM call, 1 chapter plan .md, 1 retrieval trace JSON.
     """
     from src.agents.author.chapter_planner import ChapterPlanner
+    from src.workflows.retrieval_service import ChapterRetrievalService
 
     novel_id = state["novel_id"]
     chapter_index = state["chapter_index"]
@@ -123,15 +128,14 @@ def plan_chapter(state: ChapterWorkflowState) -> dict[str, Any]:
 
     fs = FileStore(novel_id, get_settings().data_dir)
 
-    # RAG retrieval (same flow as Orchestrator._retrieve_evidence)
-    rag_evidence = _run_rag_retrieval(
-        fs, novel_id, chapter_index, chapter_outline, extra_instructions)
+    retrieval = ChapterRetrievalService(novel_id).retrieve(
+        chapter_index, chapter_outline, extra_instructions)
 
     # ChapterPlanner (1 LLM call, saves canonical chapter_plan .md)
     planner = ChapterPlanner(novel_id)
     plan = planner.plan_chapter(
         chapter_index, chapter_outline, extra_instructions,
-        rag_evidence=rag_evidence)
+        rag_evidence=retrieval.evidence)
 
     # Load saved plan text for downstream nodes
     plan_text = fs.load_canonical("outlines", f"chapter_plan_ch{chapter_index:04d}") or ""
@@ -139,140 +143,12 @@ def plan_chapter(state: ChapterWorkflowState) -> dict[str, Any]:
     print(f"  [plan_chapter] {len(plan.scenes)} scenes planned")
     return {
         "chapter_plan_text": plan_text,
+        "retrieval_success": retrieval.trace.success,
+        "retrieval_result_count": len(retrieval.trace.results),
+        "retrieval_trace_path": retrieval.trace_path,
+        "warnings": retrieval.warnings,
         "workflow_status": "PLANNED",
     }
-
-
-def _run_rag_retrieval(
-    fs: FileStore, novel_id: str, chapter_index: int,
-    chapter_outline: str, extra_instructions: str,
-) -> str:
-    """Run RAG retrieval — behavioral parity with Orchestrator._retrieve_evidence().
-
-    Uses the same query builder logic (ChapterPlanner volume extraction,
-    character/item context from tracking docs), same trace creation order
-    (trace before query build), and same evidence formatting.
-
-    Graceful degradation: any error returns empty string.
-    """
-    import json
-    import re
-    from datetime import datetime
-    from src.storage.chroma_store import (
-        ChromaStore, RetrievalTrace, DEFAULT_BRANCH_ID,
-    )
-    from src.agents.author.chapter_planner import ChapterPlanner
-
-    settings = get_settings()
-    chroma = ChromaStore(settings.data_dir / "chroma_db")
-    branch_id = DEFAULT_BRANCH_ID
-    top_k = settings.rag_top_k
-    filters = {
-        "novel_id": novel_id,
-        "branch_id": branch_id,
-        "chapter_index <": chapter_index,
-        "source_type": "chapter",
-    }
-
-    # Create trace BEFORE query build — failures in either step
-    # must produce a failed RetrievalTrace (E04.1 Fix 3, matching production)
-    trace = RetrievalTrace(
-        chapter_index=chapter_index,
-        branch_id=branch_id,
-        query="",       # populated below; empty on query-builder failure
-        top_k=top_k,
-        filters=filters,
-        timestamp=datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
-    )
-
-    try:
-        # Build deterministic query — same logic as Orchestrator._build_retrieval_query():
-        #   Volume events via ChapterPlanner parser (E04.1: single canonical parser)
-        #   + chapter outline
-        #   + character names from relationship tracking
-        #   + item names from items_equipment tracking
-        #   + author instructions
-        planner = ChapterPlanner(novel_id)
-        parts: list[str] = []
-
-        vp_text = fs.load_tracking_doc("volume_plan") or ""
-        if vp_text:
-            vol_context = planner._extract_chapter_from_volume(vp_text, chapter_index)
-            if vol_context:
-                parts.append(vol_context[:1000])
-
-        if chapter_outline:
-            parts.append(chapter_outline[:500])
-
-        rels = fs.load_tracking_doc("character_relationships") or ""
-        char_names: set[str] = set()
-        for m in re.finditer(r'\*\*(.+?)\*\*', rels):
-            name = m.group(1).strip()
-            if 2 <= len(name) <= 6 and not any(
-                kw in name for kw in ["状态", "关系", "类型", "态度", "互动",
-                                       "变更", "物品", "体系", "检查"]
-            ):
-                char_names.add(name)
-        if char_names:
-            parts.append("角色: " + ", ".join(sorted(char_names)[:10]))
-
-        items_text = fs.load_tracking_doc("items_equipment") or ""
-        item_names: set[str] = set()
-        for m in re.finditer(r'\|\s*(.+?)\s*\|', items_text):
-            name = m.group(1).strip()
-            if name and 2 <= len(name) <= 10 and not any(
-                kw in name for kw in ["物品", "来源", "获得", "属性", "状态", "备注",
-                                       "拥有者", "首次出现", "已知属性", "---"]
-            ):
-                item_names.add(name)
-        if item_names:
-            parts.append("物品: " + ", ".join(sorted(item_names)[:10]))
-
-        if extra_instructions:
-            parts.append(extra_instructions[:500])
-
-        query = " ".join(parts) if parts else f"第{chapter_index}章 剧情"
-        trace.query = query
-
-        results = chroma.search(
-            novel_id=novel_id, branch_id=branch_id,
-            query=query, chapter_index=chapter_index, top_k=top_k)
-    except Exception as e:
-        trace.success = False
-        trace.error_message = f"{type(e).__name__}: {e}"
-        print(f"  [RAG WARNING] 检索/查询构建失败: {e}")
-        return ""
-
-    trace.results = results
-    if not results:
-        return ""  # empty retrieval is not a failure (matching production)
-
-    # Save trace (non-blocking)
-    try:
-        traces_dir = fs.root / "tracking" / "rag_traces"
-        traces_dir.mkdir(parents=True, exist_ok=True)
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        (traces_dir / f"retrieval_trace_ch{chapter_index:04d}_{ts}.json").write_text(
-            json.dumps(trace.to_dict(), ensure_ascii=False, indent=2),
-            encoding="utf-8")
-    except Exception:
-        pass
-
-    # Format evidence (matching production)
-    lines = [
-        f"（从 {len(results)} 个历史章节片段中检索到以下相关内容，"
-        f"距离越近越相关）\n"
-    ]
-    for i, r in enumerate(results, 1):
-        lines.append(
-            f"**[证据{i}]** 第{r.chapter_index}章 "
-            f"chunk-{r.chunk_index} "
-            f"(distance={r.distance:.4f}):")
-        lines.append(f"> {r.text[:600]}")
-        lines.append("")
-
-    print(f"  [RAG] 检索到 {len(results)} 个相关历史片段")
-    return "\n".join(lines)
 
 
 # ── Node: write_draft ─────────────────────────────────────
@@ -635,11 +511,21 @@ def save_fact_digest(state: ChapterWorkflowState) -> dict[str, Any]:
     sm = StateManager(novel_id, sqlite)
 
     print(f"  [save_fact_digest] extract_fact_digest_from_analysis()...")
-    sm.extract_fact_digest_from_analysis(raw_analysis, chapter_index)
+    digest = sm.extract_fact_digest_from_analysis(raw_analysis, chapter_index)
+    generated = any([
+        digest.confirmed_items.strip(),
+        digest.confirmed_character_states.strip(),
+        digest.confirmed_events.strip(),
+        digest.confirmed_numbers.strip(),
+        digest.explicitly_absent.strip(),
+        digest.pending_suspense.strip(),
+    ])
 
     return {
-        "fact_digest_generated": True,
-        "workflow_status": "FACT_DIGEST_SAVED",
+        "fact_digest_generated": generated,
+        "workflow_status": (
+            "FACT_DIGEST_SAVED" if generated else "FACT_DIGEST_MISSING"
+        ),
     }
 
 
@@ -664,21 +550,21 @@ def rag_index(state: ChapterWorkflowState) -> dict[str, Any]:
 
     novel_id = state["novel_id"]
     chapter_index = state["chapter_index"]
-
-    fs = FileStore(novel_id, get_settings().data_dir)
+    chapter_text = state.get("styled_text", "")
     settings = get_settings()
 
-    styled_prefix = f"chapter_{chapter_index:04d}_styled"
-    chapter_text = fs.load_latest("chapters", styled_prefix)
     if not chapter_text:
-        print(f"  [RAG WARNING] 第{chapter_index}章 styled 文件不存在，跳过索引")
-        return {"rag_chunks": 0, "workflow_status": "completed"}
+        warning = (
+            f"第{chapter_index}章本次运行缺少 styled_text，跳过 RAG 索引"
+        )
+        print(f"  [RAG WARNING] {warning}")
+        return {
+            "rag_chunks": 0,
+            "warnings": [*state.get("warnings", []), warning],
+            "workflow_status": "completed",
+        }
 
-    # Determine source_path
-    styled_files = sorted(
-        (fs.root / "chapters").glob(f"{styled_prefix}_*.md"), reverse=True)
-    source_path = f"chapters/{styled_files[0].name}" if styled_files else f"chapters/{styled_prefix}"
-
+    source_path = f"chapters/chapter_{chapter_index:04d}_styled"
     chroma = ChromaStore(settings.data_dir / "chroma_db")
     branch_id = DEFAULT_BRANCH_ID  # E07.2: always main branch (no branch semantics)
 

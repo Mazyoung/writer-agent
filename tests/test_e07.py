@@ -16,7 +16,9 @@ E07.2 tests:
   G: No E07.3/E07.4 leakage
 """
 
+import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -526,7 +528,9 @@ class TestE07_2_PassHappyPath(unittest.TestCase):
             "_commit_result": commit_ok,
             "updated_rels": True,
         }
-        mock_sm.extract_fact_digest_from_analysis.return_value = MagicMock()
+        from src.storage.document_formats import FactDigest
+        mock_sm.extract_fact_digest_from_analysis.return_value = FactDigest(
+            chapter_index=3, confirmed_events="Alice entered the ruins")
 
         # ── Mock: rag_index ──
         mock_chroma.index_chapter.return_value = 3
@@ -628,6 +632,10 @@ class TestE07_2_SafetyClosureGraphInvoke(unittest.TestCase):
         self.mock_state_manager.update_tracking_docs.return_value = {
             "_commit_result": StateCommitResult(success=True),
         }
+        from src.storage.document_formats import FactDigest
+        self.mock_state_manager.extract_fact_digest_from_analysis.return_value = (
+            FactDigest(chapter_index=1, confirmed_events="A confirmed event")
+        )
 
         self.mock_chroma = self.mock_chroma_cls.return_value
         self.mock_chroma.search.return_value = []
@@ -738,6 +746,154 @@ class TestE07_2_SafetyClosureGraphInvoke(unittest.TestCase):
         self.mock_state_manager.review_chapter.assert_not_called()
         self.mock_state_manager.update_tracking_docs.assert_not_called()
         self.mock_chroma.index_chapter.assert_not_called()
+
+
+class TestE07_2_RetrievalService(unittest.TestCase):
+    """LangGraph retrieval service trace and evidence contracts."""
+
+    def setUp(self):
+        from src.storage.chroma_store import RetrievalResult
+        from src.workflows.retrieval_service import ChapterRetrievalService
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.service = ChapterRetrievalService.__new__(ChapterRetrievalService)
+        self.service.novel_id = "retrieval_service_test"
+        self.service.settings = MagicMock(rag_top_k=5)
+        self.service.fs = MagicMock(root=self.root)
+        self.service.fs.load_tracking_doc.return_value = ""
+        self.service.chroma = MagicMock()
+        self.service.planner = MagicMock()
+        self.service.planner._extract_chapter_from_volume.return_value = ""
+        self.result = RetrievalResult(
+            doc_id="doc-1", chapter_index=1, chunk_index=0,
+            source_path="chapters/chapter_0001_styled", distance=0.25,
+            text="historical evidence",
+        )
+
+    def _saved_trace(self):
+        trace_files = list(
+            (self.root / "tracking" / "rag_traces").glob("*.json"))
+        self.assertEqual(len(trace_files), 1)
+        return json.loads(trace_files[0].read_text(encoding="utf-8"))
+
+    def test_retrieval_with_results_saves_success_trace_and_evidence(self):
+        self.service.chroma.search.return_value = [self.result]
+
+        outcome = self.service.retrieve(2, "outline")
+        saved = self._saved_trace()
+
+        self.assertTrue(outcome.trace.success)
+        self.assertEqual(len(outcome.trace.results), 1)
+        self.assertIn("historical evidence", outcome.evidence)
+        self.assertTrue(outcome.trace_path)
+        self.assertTrue(saved["success"])
+        self.assertEqual(len(saved["results"]), 1)
+
+    def test_empty_retrieval_still_saves_success_trace(self):
+        self.service.chroma.search.return_value = []
+
+        outcome = self.service.retrieve(2)
+        saved = self._saved_trace()
+
+        self.assertTrue(outcome.trace.success)
+        self.assertEqual(outcome.trace.results, [])
+        self.assertEqual(outcome.evidence, "")
+        self.assertTrue(outcome.trace_path)
+        self.assertTrue(saved["success"])
+        self.assertEqual(saved["results"], [])
+
+    def test_retrieval_exception_saves_failed_trace(self):
+        self.service.chroma.search.side_effect = RuntimeError("chroma down")
+
+        outcome = self.service.retrieve(2)
+        saved = self._saved_trace()
+
+        self.assertFalse(outcome.trace.success)
+        self.assertEqual(outcome.evidence, "")
+        self.assertIn("chroma down", outcome.trace.error_message)
+        self.assertFalse(saved["success"])
+        self.assertIn("chroma down", saved["error_message"])
+
+    def test_trace_persistence_failure_preserves_evidence_and_warns(self):
+        self.service.chroma.search.return_value = [self.result]
+        self.service._save_trace = MagicMock(
+            side_effect=OSError("trace disk read-only"))
+
+        outcome = self.service.retrieve(2)
+
+        self.assertIn("historical evidence", outcome.evidence)
+        self.assertEqual(outcome.trace_path, "")
+        self.assertTrue(any(
+            "RetrievalTrace persistence failed" in warning
+            and "trace disk read-only" in warning
+            for warning in outcome.warnings
+        ))
+
+    @patch("src.workflows.retrieval_service.ChapterRetrievalService")
+    @patch("src.workflows.chapter_workflow.FileStore")
+    @patch("src.agents.author.chapter_planner.ChapterPlanner")
+    def test_graph_exposes_trace_warning_without_planning_error(
+        self, mock_planner_cls, mock_fs_cls, mock_service_cls,
+    ):
+        from src.storage.chroma_store import RetrievalTrace
+        from src.storage.document_formats import ChapterPlan
+        from src.workflows.chapter_workflow import plan_chapter
+        from src.workflows.retrieval_service import RetrievalOutcome
+
+        mock_service_cls.return_value.retrieve.return_value = RetrievalOutcome(
+            evidence="usable evidence",
+            trace=RetrievalTrace(chapter_index=2, success=True),
+            warnings=["RetrievalTrace persistence failed: OSError: readonly"],
+        )
+        plan = ChapterPlan(chapter_index=2)
+        mock_planner_cls.return_value.plan_chapter.return_value = plan
+        mock_fs_cls.return_value.load_canonical.return_value = "plan text"
+
+        result = plan_chapter({
+            "novel_id": "warning_test", "chapter_index": 2,
+        })
+
+        self.assertEqual(result["workflow_status"], "PLANNED")
+        self.assertIn("RetrievalTrace persistence failed", result["warnings"][0])
+        mock_planner_cls.return_value.plan_chapter.assert_called_once()
+
+
+class TestE07_2_FactDigestObservability(unittest.TestCase):
+    """Fact Digest flag reflects actual extracted content."""
+
+    @patch("src.agents.state_manager.state_manager.StateManager")
+    def test_empty_fact_digest_reports_false(self, mock_sm_cls):
+        from src.storage.document_formats import FactDigest
+        from src.workflows.chapter_workflow import save_fact_digest
+
+        mock_sm_cls.return_value.extract_fact_digest_from_analysis.return_value = (
+            FactDigest(chapter_index=1)
+        )
+        result = save_fact_digest({
+            "novel_id": "digest_test", "chapter_index": 1,
+            "raw_analysis": "analysis", "commit_success": True,
+        })
+
+        self.assertFalse(result["fact_digest_generated"])
+        self.assertEqual(result["workflow_status"], "FACT_DIGEST_MISSING")
+
+    @patch("src.agents.state_manager.state_manager.StateManager")
+    def test_valid_fact_digest_reports_true(self, mock_sm_cls):
+        from src.storage.document_formats import FactDigest
+        from src.workflows.chapter_workflow import save_fact_digest
+
+        mock_sm_cls.return_value.extract_fact_digest_from_analysis.return_value = (
+            FactDigest(chapter_index=1, confirmed_events="event occurred")
+        )
+        result = save_fact_digest({
+            "novel_id": "digest_test", "chapter_index": 1,
+            "raw_analysis": "analysis", "commit_success": True,
+        })
+
+        self.assertTrue(result["fact_digest_generated"])
+        self.assertEqual(result["workflow_status"], "FACT_DIGEST_SAVED")
 
 
 # ═══════════════════════════════════════════════════════════
@@ -986,6 +1142,7 @@ class TestE07_2_RAGFailureNoRollback(unittest.TestCase):
         state: ChapterWorkflowState = {
             "novel_id": "test",
             "chapter_index": 1,
+            "styled_text": "CURRENT INVOCATION STYLED",
             "commit_success": True,
             "workflow_status": "FACT_DIGEST_SAVED",
         }
@@ -1012,11 +1169,35 @@ class TestE07_2_RAGFailureNoRollback(unittest.TestCase):
         state: ChapterWorkflowState = {
             "novel_id": "test",
             "chapter_index": 1,
+            "styled_text": "CURRENT INVOCATION STYLED",
             "commit_success": True,
         }
         result = rag_index(state)
 
         self.assertEqual(result["workflow_status"], "completed")
+
+    @patch("src.workflows.chapter_workflow.FileStore")
+    @patch("src.storage.chroma_store.ChromaStore")
+    def test_rag_indexes_current_invocation_styled_text(
+        self, mock_chroma_cls, mock_fs_cls,
+    ):
+        """RAG content comes from state, never an older disk artifact."""
+        from src.workflows.chapter_workflow import rag_index
+
+        mock_fs_cls.return_value.load_latest.return_value = "OLD DISK STYLED"
+        mock_chroma_cls.return_value.index_chapter.return_value = 2
+
+        result = rag_index({
+            "novel_id": "test", "chapter_index": 1,
+            "styled_text": "CURRENT INVOCATION STYLED",
+            "commit_success": True,
+        })
+
+        self.assertEqual(result["rag_chunks"], 2)
+        mock_fs_cls.return_value.load_latest.assert_not_called()
+        kwargs = mock_chroma_cls.return_value.index_chapter.call_args.kwargs
+        self.assertEqual(kwargs["content"], "CURRENT INVOCATION STYLED")
+        self.assertEqual(kwargs["source_path"], "chapters/chapter_0001_styled")
 
 
 # ═══════════════════════════════════════════════════════════
