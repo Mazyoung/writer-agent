@@ -401,8 +401,8 @@ class TestE07_2_PassHappyPath(unittest.TestCase):
         self.assertEqual(result["verdict"], "PASS")
         self.assertEqual(result["workflow_status"], "DECISION_PASS")
 
-    def test_real_truncated_review_markdown_returns_pass(self):
-        """真实 review 格式在角色塑造/决策区前被截断时仍解析为 PASS。"""
+    def test_real_truncated_review_markdown_returns_unknown(self):
+        """缺失显式审阅决策的截断 review 必须 fail-closed。"""
         from src.agents.state_manager.state_manager import StateManager
 
         review_path = (
@@ -414,7 +414,7 @@ class TestE07_2_PassHappyPath(unittest.TestCase):
 
         self.assertNotIn("## 审阅决策", analysis)
         self.assertTrue(analysis.rstrip().endswith("+表"))
-        self.assertEqual(decision.verdict, "PASS")
+        self.assertEqual(decision.verdict, "UNKNOWN")
 
     def test_missing_decision_without_truncated_quality_prefix_stays_unknown(self):
         """普通缺失决策区仍保持 fail-closed，不能由单个 PASS 推断。"""
@@ -563,6 +563,181 @@ class TestE07_2_PassHappyPath(unittest.TestCase):
         mock_sm.update_tracking_docs.assert_called_once()
         mock_sm.extract_fact_digest_from_analysis.assert_called_once()
         mock_chroma.index_chapter.assert_called_once()
+
+
+class TestE07_2_SafetyClosureGraphInvoke(unittest.TestCase):
+    """E07.2 Safety Closure Phase 1 graph.invoke regressions."""
+
+    def setUp(self):
+        from src.agents.state_manager.state_manager import StateManager
+        from src.storage.document_formats import (
+            ChapterPlan, ReviewDecision, StateCommitResult,
+        )
+        from src.workflows.chapter_workflow import build_chapter_workflow
+
+        self.real_parse_decision = StateManager.__new__(
+            StateManager).parse_review_decision
+
+        targets = {
+            "fs": "src.workflows.chapter_workflow.FileStore",
+            "sqlite": "src.workflows.chapter_workflow.SQLiteStore",
+            "planner": "src.agents.author.chapter_planner.ChapterPlanner",
+            "writer": "src.agents.author.deepseek_writer.DeepSeekWriter",
+            "stylist": "src.agents.author.claude_stylist.ClaudeStylist",
+            "checker": "src.agents.author.style_checker.StyleChecker",
+            "state_manager": "src.agents.state_manager.state_manager.StateManager",
+            "chroma": "src.storage.chroma_store.ChromaStore",
+        }
+        for name, target in targets.items():
+            patcher = patch(target)
+            setattr(self, f"mock_{name}_cls", patcher.start())
+            self.addCleanup(patcher.stop)
+
+        self.mock_fs = self.mock_fs_cls.return_value
+        self.mock_fs.load_canonical.return_value = (
+            "# Chapter Plan\n## 一、章节信息\n章大纲: test\n总场景数: 2"
+        )
+        self.mock_fs.load_latest.return_value = "OLD STYLED ARTIFACT"
+        self.mock_fs.load_tracking_doc.return_value = ""
+        self.mock_fs.root = MagicMock()
+
+        fake_plan = ChapterPlan(chapter_index=1)
+        fake_plan.scenes = [MagicMock(), MagicMock()]
+        self.mock_planner = self.mock_planner_cls.return_value
+        self.mock_planner.plan_chapter.return_value = fake_plan
+        self.mock_planner._extract_chapter_from_volume.return_value = ""
+
+        self.mock_writer = self.mock_writer_cls.return_value
+        self.mock_writer.write_chapter.return_value = "Draft chapter text."
+
+        self.mock_stylist = self.mock_stylist_cls.return_value
+        self.mock_stylist.edit_chapter.return_value = "Styled chapter text."
+
+        self.mock_checker = self.mock_checker_cls.return_value
+        report = MagicMock(errors=0, warnings=0)
+        report.summary.return_value = "OK"
+        self.mock_checker.check_all.return_value = report
+
+        self.mock_state_manager = self.mock_state_manager_cls.return_value
+        self.mock_state_manager.review_chapter.return_value = {
+            "raw_analysis": "## 审阅决策\n- **决策**: PASS",
+            "filepath": MagicMock(),
+        }
+        pass_decision = ReviewDecision(verdict="PASS")
+        self.mock_state_manager.parse_review_decision.return_value = pass_decision
+        self.mock_state_manager.update_tracking_docs.return_value = {
+            "_commit_result": StateCommitResult(success=True),
+        }
+
+        self.mock_chroma = self.mock_chroma_cls.return_value
+        self.mock_chroma.search.return_value = []
+        self.mock_chroma.index_chapter.return_value = 3
+
+        self.graph = build_chapter_workflow()
+        self.initial_state = {
+            "novel_id": "safety_closure_test",
+            "chapter_index": 1,
+            "chapter_outline": "Test outline",
+            "extra_instructions": "",
+        }
+
+    def test_graph_invoke_truncated_review_returns_unknown(self):
+        """截断 review → UNKNOWN，且不执行 commit。"""
+        review_path = (
+            Path(__file__).parent
+            / "fixtures" / "review_ch0001_truncated.md"
+        )
+        truncated = review_path.read_text(encoding="utf-8")
+        self.mock_state_manager.review_chapter.return_value = {
+            "raw_analysis": truncated,
+            "filepath": MagicMock(),
+        }
+        self.mock_state_manager.parse_review_decision.side_effect = (
+            self.real_parse_decision
+        )
+
+        result = self.graph.invoke(self.initial_state)
+
+        self.assertEqual(result["verdict"], "UNKNOWN")
+        self.assertEqual(result["workflow_status"], "STOPPED_NON_PASS")
+        self.mock_state_manager.update_tracking_docs.assert_not_called()
+        self.mock_state_manager.extract_fact_digest_from_analysis.assert_not_called()
+        self.mock_chroma.index_chapter.assert_not_called()
+
+    def test_graph_invoke_write_failure_stops_downstream(self):
+        """write failure → no style/save/review/commit/fact digest/RAG。"""
+        self.mock_writer.write_chapter.side_effect = RuntimeError("writer down")
+
+        result = self.graph.invoke(self.initial_state)
+
+        self.assertEqual(result["workflow_status"], "error")
+        self.assertIn("write_draft failed", result["error"])
+        self.mock_stylist.edit_chapter.assert_not_called()
+        self.mock_fs.save.assert_not_called()
+        self.mock_state_manager.review_chapter.assert_not_called()
+        self.mock_state_manager.update_tracking_docs.assert_not_called()
+        self.mock_state_manager.extract_fact_digest_from_analysis.assert_not_called()
+        self.mock_chroma.index_chapter.assert_not_called()
+
+    def test_graph_invoke_style_failure_stops_downstream(self):
+        """style failure → no save/review/commit/fact digest/RAG。"""
+        self.mock_stylist.edit_chapter.side_effect = RuntimeError("stylist down")
+
+        result = self.graph.invoke(self.initial_state)
+
+        self.assertEqual(result["workflow_status"], "error")
+        self.assertIn("style_edit failed", result["error"])
+        self.mock_fs.save.assert_not_called()
+        self.mock_state_manager.review_chapter.assert_not_called()
+        self.mock_state_manager.update_tracking_docs.assert_not_called()
+        self.mock_state_manager.extract_fact_digest_from_analysis.assert_not_called()
+        self.mock_chroma.index_chapter.assert_not_called()
+
+    def test_graph_invoke_does_not_fallback_to_old_styled(self):
+        """本次无 styled_text 时不得从磁盘采用旧 styled artifact。"""
+        self.mock_stylist.edit_chapter.return_value = ""
+
+        result = self.graph.invoke(self.initial_state)
+
+        self.assertEqual(result["workflow_status"], "error")
+        self.assertIn("styled_text", result["error"])
+        self.mock_fs.load_latest.assert_not_called()
+        self.mock_state_manager.review_chapter.assert_not_called()
+        self.mock_state_manager.update_tracking_docs.assert_not_called()
+
+    def test_graph_invoke_commit_failure_blocks_fact_digest_and_rag(self):
+        """commit failure → no Fact Digest / RAG。"""
+        from src.storage.document_formats import StateCommitResult
+
+        self.mock_state_manager.update_tracking_docs.return_value = {
+            "_commit_result": StateCommitResult(
+                success=False, error_message="disk full"
+            ),
+        }
+
+        result = self.graph.invoke(self.initial_state)
+
+        self.assertEqual(result["workflow_status"], "error")
+        self.assertFalse(result["commit_success"])
+        self.assertIn("disk full", result["commit_error"])
+        self.mock_state_manager.extract_fact_digest_from_analysis.assert_not_called()
+        self.mock_chroma.index_chapter.assert_not_called()
+
+    def test_graph_invoke_non_main_branch_fails_before_side_effects(self):
+        """E07 当前只接受 main，显式非 main 必须在首节点前失败。"""
+        state = {**self.initial_state, "branch_id": "experiment"}
+
+        result = self.graph.invoke(state)
+
+        self.assertEqual(result["workflow_status"], "error")
+        self.assertIn("supports only 'main'", result["error"])
+        self.mock_chroma.search.assert_not_called()
+        self.mock_planner.plan_chapter.assert_not_called()
+        self.mock_writer.write_chapter.assert_not_called()
+        self.mock_stylist.edit_chapter.assert_not_called()
+        self.mock_state_manager.review_chapter.assert_not_called()
+        self.mock_state_manager.update_tracking_docs.assert_not_called()
+        self.mock_chroma.index_chapter.assert_not_called()
 
 
 # ═══════════════════════════════════════════════════════════

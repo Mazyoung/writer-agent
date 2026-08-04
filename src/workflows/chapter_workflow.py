@@ -7,6 +7,8 @@ Side-by-side with existing production runtime.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from functools import wraps
 from typing import TypedDict, Any
 
 from langgraph.graph import StateGraph, START, END
@@ -63,8 +65,49 @@ class ChapterWorkflowState(TypedDict, total=False):
 # E07.2 Adapter Nodes
 # ═══════════════════════════════════════════════════════════
 
+
+def _error_result(message: str) -> dict[str, Any]:
+    """Return the shared fail-closed state for a linear graph failure."""
+    return {
+        "commit_success": False,
+        "workflow_status": "error",
+        "error": message,
+    }
+
+
+def _guard_node(
+    node: Callable[[ChapterWorkflowState], dict[str, Any]],
+) -> Callable[[ChapterWorkflowState], dict[str, Any]]:
+    """Stop side effects after failure and normalize node exceptions."""
+    @wraps(node)
+    def guarded(state: ChapterWorkflowState) -> dict[str, Any]:
+        if state.get("workflow_status") == "error":
+            return {}
+
+        branch_id = state.get("branch_id", "main")
+        if branch_id != "main":
+            return _error_result(
+                f"Unsupported branch_id '{branch_id}': E07 currently supports only 'main'"
+            )
+
+        try:
+            result = node(state)
+        except Exception as exc:
+            return _error_result(
+                f"{node.__name__} failed: {type(exc).__name__}: {exc}"
+            )
+
+        if result.get("workflow_status") == "error":
+            result.setdefault("commit_success", False)
+            result.setdefault("error", f"{node.__name__} failed")
+        return result
+
+    return guarded
+
+
 # ── Node: plan_chapter ────────────────────────────────────
 
+@_guard_node
 def plan_chapter(state: ChapterWorkflowState) -> dict[str, Any]:
     """Plan chapter: RAG retrieval + ChapterPlanner.plan_chapter().
 
@@ -234,6 +277,7 @@ def _run_rag_retrieval(
 
 # ── Node: write_draft ─────────────────────────────────────
 
+@_guard_node
 def write_draft(state: ChapterWorkflowState) -> dict[str, Any]:
     """Write draft: DeepSeekWriter.write_chapter().
 
@@ -282,6 +326,7 @@ def _load_prev_chapter_end(fs: FileStore, chapter_index: int) -> str:
 
 # ── Node: style_edit ──────────────────────────────────────
 
+@_guard_node
 def style_edit(state: ChapterWorkflowState) -> dict[str, Any]:
     """Style-edit draft: ClaudeStylist.edit_chapter().
 
@@ -321,6 +366,7 @@ def style_edit(state: ChapterWorkflowState) -> dict[str, Any]:
 
 # ── Node: save_styled ─────────────────────────────────────
 
+@_guard_node
 def save_styled(state: ChapterWorkflowState) -> dict[str, Any]:
     """Save styled chapter + run StyleChecker.
 
@@ -354,6 +400,7 @@ def save_styled(state: ChapterWorkflowState) -> dict[str, Any]:
 
 # ── Node: review_chapter ──────────────────────────────────
 
+@_guard_node
 def review_chapter(state: ChapterWorkflowState) -> dict[str, Any]:
     """Review chapter: StateManager.review_chapter().
 
@@ -367,18 +414,11 @@ def review_chapter(state: ChapterWorkflowState) -> dict[str, Any]:
     chapter_index = state["chapter_index"]
     styled_text = state.get("styled_text", "")
 
-    # Enforce: review requires styled chapter
+    # The review may only consume the styled text produced by this invocation.
     if not styled_text:
-        fs = FileStore(novel_id, get_settings().data_dir)
-        styled_text = fs.load_latest("chapters", f"chapter_{chapter_index:04d}_styled") or ""
-    if not styled_text:
-        return {
-            "workflow_status": "error",
-            "error": (
-                f"第{chapter_index}章 styled 文件不存在。"
-                f"Review 只接受 styled 章节（经过 ClaudeStylist 编辑）。"
-            ),
-        }
+        return _error_result(
+            f"第{chapter_index}章本次运行未产生 styled_text，禁止使用历史 styled 文件"
+        )
 
     fs = FileStore(novel_id, get_settings().data_dir)
     settings = get_settings()
@@ -411,6 +451,7 @@ def review_chapter(state: ChapterWorkflowState) -> dict[str, Any]:
 
 # ── Node: parse_decision ──────────────────────────────────
 
+@_guard_node
 def parse_decision(state: ChapterWorkflowState) -> dict[str, Any]:
     """Parse ReviewDecision from raw_analysis (deterministic, 0 LLM).
 
@@ -451,6 +492,7 @@ def parse_decision(state: ChapterWorkflowState) -> dict[str, Any]:
 
 # ── Node: require_pass ───────────────────────────────────
 
+@_guard_node
 def require_pass(state: ChapterWorkflowState) -> dict[str, Any]:
     """E07.2 temporary fail-closed guard (replaced by conditional edges in E07.3).
 
@@ -479,6 +521,7 @@ def require_pass(state: ChapterWorkflowState) -> dict[str, Any]:
 
 # ── Node: commit_state ────────────────────────────────────
 
+@_guard_node
 def commit_state(state: ChapterWorkflowState) -> dict[str, Any]:
     """Commit canonical state: StateManager.update_tracking_docs().
 
@@ -520,16 +563,13 @@ def commit_state(state: ChapterWorkflowState) -> dict[str, Any]:
             "error": "raw_analysis 为空，无法提交 canonical state",
         }
 
-    # Load styled from FileStore if not in state
-    if not styled_text:
-        fs = FileStore(novel_id, get_settings().data_dir)
-        styled_text = fs.load_latest("chapters", f"chapter_{chapter_index:04d}_styled") or ""
+    # Commit may only consume the styled text produced by this invocation.
     if not styled_text:
         return {
-            "commit_success": False,
+            **_error_result(
+                "styled_text 为空，禁止使用历史 styled 文件提交 canonical state"
+            ),
             "commit_error": "styled_text 为空，无法提交 canonical state",
-            "workflow_status": "error",
-            "error": "styled_text 为空，无法提交 canonical state",
         }
 
     settings = get_settings()
@@ -563,6 +603,7 @@ def commit_state(state: ChapterWorkflowState) -> dict[str, Any]:
 
 # ── Node: save_fact_digest ────────────────────────────────
 
+@_guard_node
 def save_fact_digest(state: ChapterWorkflowState) -> dict[str, Any]:
     """Save Fact Digest: StateManager.extract_fact_digest_from_analysis().
 
@@ -604,6 +645,7 @@ def save_fact_digest(state: ChapterWorkflowState) -> dict[str, Any]:
 
 # ── Node: rag_index ───────────────────────────────────────
 
+@_guard_node
 def rag_index(state: ChapterWorkflowState) -> dict[str, Any]:
     """Index chapter to RAG: ChromaStore.index_chapter().
 
