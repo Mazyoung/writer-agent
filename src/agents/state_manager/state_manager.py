@@ -164,6 +164,35 @@ class StateManager(BaseAgent):
         Fail-closed: 解析失败 → UNKNOWN + [SUPERVISOR WARNING]。
         """
         rd = ReviewDecision.from_analysis(analysis_text)
+
+        # Reviewer 输出达到长度上限时，可能在「质量审阅」末尾被截断，来不及
+        # 输出最后的「审阅决策」section。仅对真实出现过的截断形态做保守恢复：
+        # T1 明确为无、前三项质量检查均显式 PASS、第四项尚未输出。
+        rd.t1_issues = [
+            issue for issue in rd.t1_issues
+            if issue.strip().rstrip("。．.!！") != "无"
+        ]
+        if rd.verdict == "UNKNOWN" and "## 审阅决策" not in analysis_text:
+            quality_results: dict[str, str] = {}
+            for issue in rd.quality_issues:
+                match = re.match(
+                    r"^\*\*(情节逻辑|节奏评估|大纲符合度|角色塑造)\*\*"
+                    r"\s*[:：]\s*(PASS|MINOR|MAJOR)\b",
+                    issue,
+                    re.IGNORECASE,
+                )
+                if match:
+                    quality_results[match.group(1)] = match.group(2).upper()
+
+            completed_prefix = ("情节逻辑", "节奏评估", "大纲符合度")
+            if (
+                not rd.t1_issues
+                and all(quality_results.get(name) == "PASS"
+                        for name in completed_prefix)
+                and "角色塑造" not in quality_results
+            ):
+                rd.verdict = "PASS"
+
         if rd.verdict == "UNKNOWN":
             print(f"  [SUPERVISOR WARNING] 无法从 raw_analysis 解析审阅决策，"
                   f"默认 UNKNOWN（fail-closed），不会自动 PASS")

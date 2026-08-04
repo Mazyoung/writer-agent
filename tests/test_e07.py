@@ -401,6 +401,35 @@ class TestE07_2_PassHappyPath(unittest.TestCase):
         self.assertEqual(result["verdict"], "PASS")
         self.assertEqual(result["workflow_status"], "DECISION_PASS")
 
+    def test_real_truncated_review_markdown_returns_pass(self):
+        """真实 review 格式在角色塑造/决策区前被截断时仍解析为 PASS。"""
+        from src.agents.state_manager.state_manager import StateManager
+
+        review_path = (
+            Path(__file__).parent
+            / "fixtures" / "review_ch0001_truncated.md"
+        )
+        analysis = review_path.read_text(encoding="utf-8")
+        decision = StateManager.__new__(StateManager).parse_review_decision(analysis)
+
+        self.assertNotIn("## 审阅决策", analysis)
+        self.assertTrue(analysis.rstrip().endswith("+表"))
+        self.assertEqual(decision.verdict, "PASS")
+
+    def test_missing_decision_without_truncated_quality_prefix_stays_unknown(self):
+        """普通缺失决策区仍保持 fail-closed，不能由单个 PASS 推断。"""
+        from src.agents.state_manager.state_manager import StateManager
+
+        analysis = """## 一致性检查
+### T1（硬错误）
+- 无。
+## 质量审阅
+- **情节逻辑**: PASS
+"""
+        decision = StateManager.__new__(StateManager).parse_review_decision(analysis)
+
+        self.assertEqual(decision.verdict, "UNKNOWN")
+
     def test_full_happy_path_state_flow(self):
         """完整 PASS happy path: state schema 被 graph 接受。"""
         from src.workflows.chapter_workflow import (
