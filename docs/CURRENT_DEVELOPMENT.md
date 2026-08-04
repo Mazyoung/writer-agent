@@ -26,29 +26,34 @@ main.py write
 
 ## Important Files
 
+- `docs/E07_REMAINING_PLAN.md` — authoritative plan for E07.6–E07.9.
 - `src/workflows/chapter_workflow.py` — graph state, nodes, and decision routing.
 - `src/workflows/chapter_runner.py` — checkpoint, interrupt, and resume behavior.
 - `main.py` — production `write` and `--resume` entry points.
 - `src/agents/state_manager/state_manager.py` — review and canonical commit owner.
-- `docs/E07_LANGGRAPH_MIGRATION_GUIDE.md` — constraints for the next E07 change.
 
 ## Known Issues
 
 - E07.5 resume supports only `acknowledge`/`stop`; it does not rewrite, re-style, or re-review.
 - `HALT` has no planning-repair route.
-- The E07.5 report records static verification only; no E07.5 regression tests were run in that stage.
-
 ## Next Task
 
-E07.6: after reviewing the migration guide and current workflow/tests, add the explicitly approved revision loop for human-directed chapter correction without allowing review or commit bypasses.
+E07.6 — complete the single-chapter creation loop defined in `docs/E07_REMAINING_PLAN.md`:
+- establish optional `chapter_intent` and add mandatory Plan Review after Chapter Planning;
+- route failed Plan Review to Human, and require re-review after human plan edits;
+- allow at most one automatic revision from Review #1 to Review #2, then route non-PASS to Human; human prose edits start a new Review #1 with one renewed revision allowance;
+- separate Planner and Writer information boundaries so Writer receives only an approved Chapter Plan and necessary state/history.
+
+After E07.6, follow the same plan through E07.7 (long-term memory/RAG 2.0), E07.8 (current state/persistence 2.0), and E07.9 (Story Savepoint/Rollback). The Chapter Graph backbone should then remain broadly stable.
 
 ## Out of Scope
 
-- Do not start E07.6 until it is explicitly requested.
-- Do not move novel management, volume management, or broad rollback into the Chapter Graph.
-- Do not implement autonomous L2/L3 planning repair, broad state rollback, or RAG refactoring.
+- This handoff update does not implement E07.6 production code.
+- Do not move novel management, volume management, or Story Savepoint/Rollback into the Chapter Graph.
+- Do not implement E07.7 RAG changes, E07.8 persistence changes, or E07.9 rollback early.
 - Do not replace Resume with a fresh Generate or allow normal Generate to overwrite completed chapters.
 
 ## Last Verified
 
-Commit `1952a68` (`0.75`), 2026-08-05. Working tree was clean before this documentation-only handoff update.
+- Runtime commit: `1952a68` (`0.75`), 2026-08-05.
+- Handoff revision: `1e7b0a3` (`0.755`), 2026-08-05.

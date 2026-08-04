@@ -20,8 +20,8 @@
 - Make the smallest coherent change and preserve existing correct behavior.
 - Do not add Agents, LLM calls, architectural layers, or future-stage behavior without an explicit requirement.
 - Do not perform unrelated refactors or silently change canonical state.
-- Add focused tests for critical invariants and run the relevant regression suite before declaring completion.
-- For any E07 or LangGraph workflow change, read `docs/E07_LANGGRAPH_MIGRATION_GUIDE.md` before editing.
+- Verify changes at a level appropriate to their scope, and state clearly what was or was not tested; do not default to expanding the test suite or creating a separate Test Alignment stage.
+- `docs/E07_REMAINING_PLAN.md` is the authoritative roadmap for current E07 development; the old migration guide is historical migration reference only.
 - Use the Conda `writer` environment for Python; do not use the repository-local `venv`.
 - Do not scan the entire repository by default; inspect only files required by the current task.
 
