@@ -47,7 +47,8 @@ class ChapterPlanner(BaseAgent):
                 "缺少长期规划文件: " + ", ".join(missing) +
                 "\n分层规划 (Book → Volume → Chapter) 是 plan 命令的必要输入。"
                 "\n新小说: 先运行 python main.py init <小说名> --confirm 生成。"
-                "\n旧数据: 运行 python migrate.py <小说名> 从 plot_structure.md 迁移。")
+                "\n旧数据: 运行 python scripts/migrate_legacy_data.py <小说名> "
+                "从 plot_structure.md 迁移。")
         return book_plan, volume_plan
 
     def plan_chapter(self, chapter_index: int,

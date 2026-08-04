@@ -1,2 +1,0 @@
- 请阅读 D:\agent\writer\DESIGN_DISCUSSION.md、D:\agent\writer\ARCHITECTURE.md 和
-  D:\agent\writer\CONVERSATION_LOG.md，然后继续开发 nuclear_cultivation 小说项目。

@@ -33,7 +33,7 @@ Priority:
 3. Current canonical runtime state
 4. Recent implementation reports in `docs/`
 5. README / ARCHITECTURE
-6. archived code and historical documents
+6. Historical documents
 
 If documentation conflicts with current source code:
 
@@ -41,7 +41,7 @@ If documentation conflicts with current source code:
 - explicitly report the documentation drift;
 - DO NOT restore an older architecture simply because it appears in old documentation.
 
-Do not treat `archived/`, obsolete prompts, old README content, or historical architecture as current runtime design.
+Do not treat obsolete prompts, old README content, or historical architecture as current runtime design.
 
 ------
 

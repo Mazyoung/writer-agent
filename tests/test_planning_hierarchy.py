@@ -304,7 +304,7 @@ class TestChapterPlannerConsumption(_TmpNovelCase):
             planner.plan_chapter(1)
         msg = str(ctx.exception)
         self.assertIn("tracking/book_plan.md", msg)
-        self.assertIn("migrate.py", msg)  # 必须给出迁移路径，不静默继续
+        self.assertIn("scripts/migrate_legacy_data.py", msg)  # 必须给出迁移路径，不静默继续
 
 
 class TestNewVolumeRolling(_TmpNovelCase):

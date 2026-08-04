@@ -649,7 +649,8 @@ Book Plan 是整本书的长期战略，只写长期有效的内容：
             raise FileNotFoundError(
                 "缺少长期规划文件: " + ", ".join(missing) +
                 "\n新小说: 先运行 python main.py init <小说名> --confirm 生成。"
-                "\n旧数据: 运行 python migrate.py <小说名> 从 plot_structure.md 迁移。")
+                "\n旧数据: 运行 python scripts/migrate_legacy_data.py <小说名> "
+                "从 plot_structure.md 迁移。")
 
         old_vp = VolumePlan.from_markdown(old_text)
         new_index = volume_number if volume_number else old_vp.volume_number + 1

@@ -1,73 +1,138 @@
-| 谁产出        | 产出什么    | 谁消费             |
-| ------------- | ----------- | ------------------ |
-| 1A/1B + _sync | 设定 + 大纲 | 4B→2A→2B（全链路） |
-| 4B            | 简报        | 2A, 3A, 人工       |
-| 2A            | 场景规划    | 2B, 3A             |
-| 2B            | 场景正文    | 2C, 3A, replan     |
-| 2C            | 完整章节    | 3B, 4A, _sync      |
-| 4A            | SQLite 状态 | 4B, 2B, _sync      |
-| 3B            | 审阅        | 写手 (下章), 人工  |
+# Writer-Agent
 
+Writer-Agent is a long-form novel Agent workflow for exploring hierarchical planning, durable story memory, historical evidence retrieval, review gates, and human–Agent collaboration across stories that may span hundreds of chapters.
 
+The project prioritizes engineering correctness, explicit state transitions, testability, and observable artifacts over maximizing the number of Agents.
 
-章节完成后
+## Current runtime
 
-plaintext
+The production CLI entry point is [`main.py`](main.py). It constructs and calls [`src.core.orchestrator.Orchestrator`](src/core/orchestrator.py); LangGraph has **not** replaced this runtime.
 
-```
-│
-├── _sync_settings()
-│   ├── 新角色/地点/组织/设定 → world_setting.md（智能合并到对应章节）
-│   ├── 角色状态变更 → world_setting.md（角色档案节 [第N章: ...]标记）
-│   └── 章节完成标记 → plot_structure.md
-│
-└── StateUpdater (4A)
-    ├── 角色状态 → SQLite character_state 表
-    ├── 新伏笔 → SQLite foreshadowing 表（status='pending'）
-    ├── 伏笔回收 → SQLite（status='resolved'）
-    ├── 世界变化 → SQLite world_state 表
-    └── 冲突线 → SQLite active_conflicts 表
-```
+Current core components:
 
-## 二、取回层（下一章 Step 0→1→2）
+- `WorldBuilder` — world-setting generation
+- `PlotDesigner` — Book Plan and active Volume Plan generation
+- `ChapterPlanner` — chapter-level planning with canonical planning state and RAG evidence
+- `DeepSeekWriter` — draft generation
+- `ClaudeStylist` — chapter style editing
+- `StyleChecker` — deterministic style checks
+- `StateManager` — review analysis, decision parsing, atomic structured-memory updates, and Fact Digest extraction
+- `FileStore`, `SQLiteStore`, and `ChromaStore` — canonical files, rebuildable cache state, and vector retrieval
 
-write_chapter(N+1)
+## Data flow
 
-plaintext
+### Planning
 
-```
-│
-Step 0: load_canonical("world_setting") ─────────────┐
-        load_canonical("plot_structure") ───────────┐ │
-                                                    │ │
-Step 1: 4B BriefGenerator                           │ │
-        ├── 输入: world_setting[:3000] ←────────────┼─┘
-        ├── 输入: plot_structure[:3000] ←───────────┘
-        └── 输入: SQLite.export_all_states() ←── state.db
-            ├── characters (当前所有角色状态)
-            ├── pending_foreshadows (所有未回收伏笔)
-            ├── world_state (世界变化历史)
-            └── active_conflicts (活跃冲突线)
-                  │
-                  ▼
-        └── 输出: brief →包含出场角色+待推进伏笔+需查阅设定
-                  │
-                  ▼
-Step 2: 2A ChapterPlanner
-        ├── 输入: brief（来自4B，已包含设定摘要+伏笔提示）
-        └── 输入: world_setting[:2000]（直接传入，兜底）
-                  │
-                  ▼
-        └── 输出: scene_plan →每个场景标注需查阅的设定
+```text
+Book Plan
+  → Active Volume Plan
+  → Chapter Plan
+  → Draft / styled chapter
 ```
 
-## 三、逐层保证
+Canonical planning files live under each runtime novel directory:
 
-表格
+```text
+tracking/book_plan.md
+tracking/volume_plan.md
+outlines/chapter_plan_chNNNN.md
+```
 
-|  层  |                 设定变更                 |                   伏笔                   |
-| :--: | :--------------------------------------: | :--------------------------------------: |
-| 存储 |        world_setting.md 合并写入         |         SQLite foreshadowing 表          |
-| 取回 |     Step 0 load_canonical 直接读文件     |  export_all_states 查 status='pending'   |
-| 传递 |       4B 简报 →2A 规划 两层都收到        |      4B 简报明确列出 "需推进的伏笔"      |
-| 执行 | 2B 写手 context 含 world_setting [:2500] | 2B 写手 context 含 export_states_summary |
+Completed volumes can be archived under `tracking/volumes/` by the explicit `new-volume` command. `plot_structure.md` is legacy migration input, not current production planning state.
+
+### Review and memory
+
+A styled chapter is reviewed by `StateManager`. Its deterministic `ReviewDecision` controls the production path:
+
+```text
+PASS
+  → atomic Structured Memory commit
+  → deterministic Fact Digest extraction
+  → RAG indexing
+
+NEEDS_REVISION / HALT / UNKNOWN
+  → no memory commit
+  → no Fact Digest
+  → no RAG indexing
+```
+
+The atomic commit covers:
+
+- `tracking/character_relationships.md`
+- `tracking/items_equipment.md`
+- `tracking/cultivation_system.md`
+- `tracking/character_states.md`
+
+Fact Digests are derived from the review analysis without another LLM call. SQLite and Chroma are derived or rebuildable state; canonical Markdown remains the story-state source of truth.
+
+### RAG
+
+Only finalized/styled chapters are indexed. Chapter planning retrieves filtered historical chunks through `ChromaStore`, prevents future-chapter leakage, and writes JSON retrieval traces under `tracking/rag_traces/`. The CLI can backfill or rebuild the current branch index.
+
+## LangGraph migration
+
+[`src/workflows/chapter_workflow.py`](src/workflows/chapter_workflow.py) contains the E07 migration workflow. At the current E07.2 stage it implements the PASS happy path as adapter nodes over existing Agents and services.
+
+It remains a migration/behavioral-parity path:
+
+- production `main.py` still uses `Orchestrator`;
+- conditional routing, checkpoint/resume, HITL interrupts, and revision loops belong to later E07 stages;
+- canonical memory commit semantics remain independent from LangGraph execution state.
+
+Read [`docs/E07_LANGGRAPH_MIGRATION_GUIDE.md`](docs/E07_LANGGRAPH_MIGRATION_GUIDE.md) before changing workflow code.
+
+## Basic usage
+
+The current test environment uses Python 3.14.6. Install the dependencies in `requirements.txt`, then configure `.env` locally. At minimum, production generation requires `DEEPSEEK_API_KEY`; `.env` is ignored by Git.
+
+```bash
+python main.py init my_novel "A concise story premise"
+# Review proposal.md and optionally save proposal_edited.md
+python main.py init my_novel --confirm
+
+python main.py plan my_novel --chapter 1
+python main.py write my_novel --chapter 1
+python main.py review my_novel --chapter 1
+python main.py status my_novel
+```
+
+Additional commands:
+
+```bash
+python main.py style my_novel --chapter 1 --feedback "..."
+python main.py new-volume my_novel --notes "..."
+python main.py rag-index my_novel
+python main.py rag-index my_novel --rebuild
+```
+
+Runtime data is written to `data/novels/` and is not version controlled. A curated, non-secret demonstration chain is available under [`examples/memory_anchor_demo/`](examples/memory_anchor_demo/).
+
+Legacy novels that only contain `plot_structure.md` can be converted with the standalone utility:
+
+```bash
+python scripts/migrate_legacy_data.py <novel_id> --dry-run
+python scripts/migrate_legacy_data.py <novel_id>
+```
+
+The migration utility is not connected to the production runtime.
+
+## Tests
+
+The authoritative regression command is:
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+When `pytest` is installed, the same suite can also be run with:
+
+```bash
+python -m pytest
+```
+
+## Documentation
+
+- [`docs/claude.md`](docs/claude.md) — project engineering rules and source-of-truth policy
+- [`ARCHITECTURE.md`](ARCHITECTURE.md) — current runtime architecture and state boundaries
+- [`docs/E07_LANGGRAPH_MIGRATION_GUIDE.md`](docs/E07_LANGGRAPH_MIGRATION_GUIDE.md) — mandatory E07 migration constraints
+- `docs/E0*_*.md` — stage-specific implementation and closure reports

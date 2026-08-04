@@ -2,15 +2,16 @@
 迁移脚本：将旧格式的小说数据转换为新系统的追踪文档格式。
 
 用法:
-    python migrate.py <小说名>          # 迁移指定小说
-    python migrate.py --all             # 迁移所有小说
-    python migrate.py <小说名> --dry-run  # 预览变更不写入
+    python scripts/migrate_legacy_data.py <小说名>           # 迁移指定小说
+    python scripts/migrate_legacy_data.py --all              # 迁移所有小说
+    python scripts/migrate_legacy_data.py <小说名> --dry-run  # 预览变更不写入
 """
 
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent))
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.config.settings import get_settings
 from src.storage.file_store import FileStore
