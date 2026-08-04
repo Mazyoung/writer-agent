@@ -326,6 +326,7 @@ class TestE07_2_PassHappyPath(unittest.TestCase):
         self.addCleanup(shutil.rmtree, tmp, True)
         mock_fs_cls.return_value.root = tmp
         (tmp / "chapters").mkdir()
+        (tmp / "states").mkdir()
         mock_fs_cls.return_value.load_canonical.return_value = "plan text"
 
         state: ChapterWorkflowState = dict(self.base_state)
@@ -493,6 +494,7 @@ class TestE07_2_PassHappyPath(unittest.TestCase):
         self.addCleanup(shutil.rmtree, tmp, True)
         mock_fs.root = tmp
         (tmp / "chapters").mkdir()
+        (tmp / "states").mkdir()
 
         # ── Mock: plan_chapter (ChromaStore + ChapterPlanner) ──
         mock_chroma = mock_chroma_cls.return_value
@@ -567,6 +569,10 @@ class TestE07_2_PassHappyPath(unittest.TestCase):
         self.assertEqual(result["novel_id"], "invoke_test",
                          "Input fields preserved by state merge")
         self.assertEqual(result["chapter_index"], 3)
+        marker_path = Path(result["completion_marker_path"])
+        self.assertTrue(marker_path.exists())
+        self.assertIn("Canonical commit success", marker_path.read_text(
+            encoding="utf-8"))
 
         # ── Verify call order: each agent must have been called ──
         mock_planner.plan_chapter.assert_called_once()
@@ -618,6 +624,7 @@ class TestE07_2_SafetyClosureGraphInvoke(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.fs_tmp, True)
         self.mock_fs.root = self.fs_tmp / "novels" / "safety_closure_test"
         (self.mock_fs.root / "chapters").mkdir(parents=True)
+        (self.mock_fs.root / "states").mkdir()
 
         fake_plan = ChapterPlan(chapter_index=1)
         fake_plan.scenes = [MagicMock(), MagicMock()]
@@ -682,22 +689,32 @@ class TestE07_2_SafetyClosureGraphInvoke(unittest.TestCase):
 
         self.assertEqual(result["verdict"], "UNKNOWN")
         self.assertEqual(result["workflow_status"], "STOPPED_NON_PASS")
+        marker = self.mock_fs.root / "states" / "chapter_0001_completed"
+        self.assertFalse(marker.exists())
         self.mock_state_manager.update_tracking_docs.assert_not_called()
         self.mock_state_manager.extract_fact_digest_from_analysis.assert_not_called()
         self.mock_chroma.index_chapter.assert_not_called()
 
+        # A styled artifact from the rejected run must not block a retry.
+        (self.mock_fs.root / "chapters" /
+         "chapter_0001_styled_20260805_130000.md").write_text(
+             "rejected styled artifact", encoding="utf-8")
+        retry = self.graph.invoke(self.initial_state)
+        self.assertNotIn("ERROR_ALREADY_EXISTS", retry.get("error", ""))
+        self.assertEqual(self.mock_planner.plan_chapter.call_count, 2)
+
     @patch("src.workflows.retrieval_service.ChapterRetrievalService")
-    def test_graph_invoke_existing_completed_chapter_has_zero_side_effects(
+    def test_graph_invoke_completed_marker_has_zero_side_effects(
         self, mock_retrieval_cls,
     ):
-        """Completed styled chapter blocks ordinary Generate before all work."""
+        """Completion marker blocks ordinary Generate before all work."""
         tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, tmp, True)
         self.mock_fs.root = tmp / "novels" / "safety_closure_test"
-        chapters = self.mock_fs.root / "chapters"
-        chapters.mkdir(parents=True)
-        (chapters / "chapter_0001_styled_20260805_120000.md").write_text(
-            "completed", encoding="utf-8")
+        states = self.mock_fs.root / "states"
+        states.mkdir(parents=True)
+        (states / "chapter_0001_completed").write_text(
+            "Review PASS\nCanonical commit success\n", encoding="utf-8")
 
         result = self.graph.invoke(self.initial_state)
 
@@ -714,10 +731,10 @@ class TestE07_2_SafetyClosureGraphInvoke(unittest.TestCase):
         self.mock_chroma.index_chapter.assert_not_called()
 
     @patch("src.workflows.retrieval_service.ChapterRetrievalService")
-    def test_draft_and_plan_only_do_not_count_as_completed(
+    def test_styled_draft_and_plan_without_marker_are_not_completed(
         self, mock_retrieval_cls,
     ):
-        """Draft/plan artifacts alone must not trigger ERROR_ALREADY_EXISTS."""
+        """Styled/draft/plan artifacts without marker do not block Generate."""
         from src.storage.chroma_store import RetrievalTrace
         from src.workflows.retrieval_service import RetrievalOutcome
 
@@ -730,6 +747,8 @@ class TestE07_2_SafetyClosureGraphInvoke(unittest.TestCase):
         outlines.mkdir(parents=True)
         (chapters / "chapter_0001_draft_20260805_120000.md").write_text(
             "draft", encoding="utf-8")
+        (chapters / "chapter_0001_styled_20260805_120500.md").write_text(
+            "styled but not completed", encoding="utf-8")
         (outlines / "chapter_plan_ch0001.md").write_text(
             "plan", encoding="utf-8")
         mock_retrieval_cls.return_value.retrieve.return_value = RetrievalOutcome(
@@ -797,6 +816,8 @@ class TestE07_2_SafetyClosureGraphInvoke(unittest.TestCase):
         self.assertEqual(result["workflow_status"], "error")
         self.assertFalse(result["commit_success"])
         self.assertIn("disk full", result["commit_error"])
+        marker = self.mock_fs.root / "states" / "chapter_0001_completed"
+        self.assertFalse(marker.exists())
         self.mock_state_manager.extract_fact_digest_from_analysis.assert_not_called()
         self.mock_chroma.index_chapter.assert_not_called()
 
@@ -857,6 +878,39 @@ class TestE07_2_SafetyClosureGraphInvoke(unittest.TestCase):
         self.assertEqual(result["workflow_status"], "error")
         self.assertIn("parse_decision failed", result["error"])
         self.mock_state_manager.update_tracking_docs.assert_not_called()
+        self.mock_state_manager.extract_fact_digest_from_analysis.assert_not_called()
+        self.mock_chroma.index_chapter.assert_not_called()
+
+    def test_graph_invoke_rag_failure_keeps_completion_marker(self):
+        """RAG derived-state failure cannot revoke committed completion."""
+        self.mock_chroma.index_chapter.side_effect = RuntimeError("rag down")
+
+        result = self.graph.invoke(self.initial_state)
+
+        marker = self.mock_fs.root / "states" / "chapter_0001_completed"
+        self.assertEqual(result["workflow_status"], "completed")
+        self.assertTrue(result["commit_success"])
+        self.assertTrue(marker.exists())
+        self.assertIn("RAG index failed", result["error"])
+
+    def test_completion_marker_write_failure_stops_derived_state(self):
+        """Marker write failure must not claim completion or run derived state."""
+        marker = self.mock_fs.root / "states" / "chapter_0001_completed"
+        original_write_text = Path.write_text
+
+        def fail_marker_write(path_self, data, *args, **kwargs):
+            if path_self == marker.with_suffix(".tmp"):
+                raise OSError("marker disk read-only")
+            return original_write_text(path_self, data, *args, **kwargs)
+
+        with patch.object(Path, "write_text", new=fail_marker_write):
+            result = self.graph.invoke(self.initial_state)
+
+        self.assertEqual(result["workflow_status"], "error")
+        self.assertTrue(result["commit_success"],
+                        "canonical commit 已成功，不得倒写为失败")
+        self.assertIn("completion marker write failed", result["commit_error"])
+        self.assertFalse(marker.exists())
         self.mock_state_manager.extract_fact_digest_from_analysis.assert_not_called()
         self.mock_chroma.index_chapter.assert_not_called()
 
@@ -1107,6 +1161,7 @@ class TestE07_2_RetrievalService(unittest.TestCase):
         self.addCleanup(shutil.rmtree, tmp, True)
         mock_fs_cls.return_value.root = tmp
         (tmp / "chapters").mkdir()
+        (tmp / "states").mkdir()
 
         result = plan_chapter({
             "novel_id": "warning_test", "chapter_index": 2,

@@ -49,8 +49,9 @@ class ChapterWorkflowState(TypedDict, total=False):
     planning_level: str
 
     # ── Commit guard ──
-    commit_success: bool          # commit_state → save_fact_digest → rag_index
+    commit_success: bool          # commit_state → mark_completed → fact_digest → rag_index
     commit_error: str
+    completion_marker_path: str
 
     # ── Results / diagnostics ──
     retrieval_success: bool
@@ -127,14 +128,12 @@ def plan_chapter(state: ChapterWorkflowState) -> dict[str, Any]:
     extra_instructions = state.get("extra_instructions", "")
 
     fs = FileStore(novel_id, get_settings().data_dir)
-    chapters_dir = fs.root / "chapters"
-    styled_prefix = f"chapter_{chapter_index:04d}_styled"
-    completed = (chapters_dir / f"{styled_prefix}.md").exists() or any(
-        chapters_dir.glob(f"{styled_prefix}_*.md"))
-    if completed:
+    completion_marker = (
+        fs.root / "states" / f"chapter_{chapter_index:04d}_completed"
+    )
+    if completion_marker.exists():
         return _error_result(
-            f"ERROR_ALREADY_EXISTS: 第{chapter_index}章已存在完成态 styled chapter，"
-            "普通 Generate 禁止覆盖"
+            f"ERROR_ALREADY_EXISTS: 第{chapter_index}章已完成，普通 Generate 禁止覆盖"
         )
 
     retrieval = ChapterRetrievalService(novel_id).retrieve(
@@ -480,8 +479,36 @@ def commit_state(state: ChapterWorkflowState) -> dict[str, Any]:
         }
 
     print(f"  [commit_state] 提交成功: {commit_result.changed_files}")
+    marker = FileStore(novel_id, settings.data_dir).root / "states" / (
+        f"chapter_{chapter_index:04d}_completed"
+    )
+    marker_tmp = marker.with_suffix(".tmp")
+    try:
+        marker_tmp.write_text(
+            "Review PASS\nCanonical commit success\n",
+            encoding="utf-8",
+        )
+        marker_tmp.replace(marker)
+    except Exception as exc:
+        try:
+            marker_tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return {
+            "commit_success": True,
+            "commit_error": (
+                f"completion marker write failed: {type(exc).__name__}: {exc}"
+            ),
+            "workflow_status": "error",
+            "error": (
+                "Canonical commit succeeded but completion marker write failed; "
+                "chapter completion was not recorded"
+            ),
+        }
+
     return {
         "commit_success": True,
+        "completion_marker_path": str(marker),
         "workflow_status": "COMMITTED",
     }
 
