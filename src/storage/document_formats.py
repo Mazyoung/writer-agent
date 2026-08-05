@@ -423,6 +423,9 @@ class ContextPackage:
     foreshadow_nodes: str = ""         # 本章伏笔节点
     emotion_palette: str = ""          # 情感调色板
     forbidden_list: str = ""           # 禁止清单
+    historical_facts: str = ""         # Planner-adopted FACT records
+    historical_sources: str = ""       # Only locally expanded prose excerpts
+    future_constraints: str = ""       # Curated constraints, never full plans
 
 
 @dataclass
@@ -459,6 +462,9 @@ class ChapterPlan:
         cp.context.foreshadow_nodes = _extract_section(ctx_text, "### 关键伏笔节点")
         cp.context.emotion_palette = _extract_section(ctx_text, "### 情感调色板")
         cp.context.forbidden_list = _extract_section(ctx_text, "### 禁止清单")
+        cp.context.historical_facts = _extract_section(ctx_text, "### 采用的历史事实")
+        cp.context.historical_sources = _extract_section(ctx_text, "### 历史原文局部")
+        cp.context.future_constraints = _extract_section(ctx_text, "### 未来规划约束")
 
         # Part A: 场景计划
         scenes_text = _extract_section(text, "## 三、场景级写作计划")
@@ -510,6 +516,15 @@ class ChapterPlan:
         lines.append(self.context.emotion_palette or "待填写")
         lines.append("")
         lines.append("### 禁止清单")
+        lines.append("")
+        lines.append("### 采用的历史事实")
+        lines.append(self.context.historical_facts or "暂无")
+        lines.append("")
+        lines.append("### 历史原文局部")
+        lines.append(self.context.historical_sources or "暂无")
+        lines.append("")
+        lines.append("### 未来规划约束")
+        lines.append(self.context.future_constraints or "暂无")
         lines.append(self.context.forbidden_list or "暂无")
         lines.append("")
 
@@ -556,6 +571,12 @@ class ChapterPlan:
         if prev_chapter_end:
             parts.append("## [必读] 上一章结尾（第一句话必须衔接此内容）\n" + prev_chapter_end[-500:])
 
+        if self.context.historical_facts:
+            parts.append("## [必读] Planner 采用的历史事实\n" + self.context.historical_facts)
+        if self.context.historical_sources:
+            parts.append("## [必读] 按需展开的历史原文\n" + self.context.historical_sources)
+        if self.context.future_constraints:
+            parts.append("## [约束] Planner 筛选的未来规划约束\n" + self.context.future_constraints)
         parts.append(f"## 第{self.chapter_index}章写作指令")
         parts.append(f"章大纲：{self.chapter_outline}")
         parts.append(f"章节类型：{self.chapter_type}")
@@ -838,7 +859,46 @@ class CultivationSystem:
         return "\n".join(lines)
 
 
-# ── FactDigest (现有格式，保持兼容) ─────────────────────────
+# ── FactDigest / AtomicFact ─────────────────────────────────
+
+@dataclass
+class AtomicFact:
+    """One stable, embeddable historical fact backed by chapter prose."""
+
+    fact_id: str = ""
+    chapter_index: int = 0
+    fact_type: str = "event"
+    entities: list[str] = field(default_factory=list)
+    paragraph_start: int = 0
+    paragraph_end: int = 0
+    fact_text: str = ""
+
+    @property
+    def paragraph_range(self) -> str:
+        if self.paragraph_start <= 0:
+            return "unknown"
+        if self.paragraph_end <= self.paragraph_start:
+            return str(self.paragraph_start)
+        return f"{self.paragraph_start}-{self.paragraph_end}"
+
+
+_LEGACY_FACT_SECTIONS = (
+    ("确定的物品", "item"),
+    ("确定的角色状态", "character_state"),
+    ("确定的事件", "event"),
+    ("确定的数字/数据", "number"),
+    ("明确未出现的内容（后续章节不得引用）", "explicitly_absent"),
+    ("待解悬念", "suspense"),
+)
+
+
+def _fact_lines(text: str) -> list[str]:
+    facts = []
+    for raw in text.splitlines():
+        line = re.sub(r"^\s*(?:[-*+]\s+|\d+[.)]\s+)", "", raw).strip()
+        if line and line not in {"无", "暂无", "None", "N/A"}:
+            facts.append(line)
+    return facts
 
 @dataclass
 class FactDigest:
@@ -849,6 +909,7 @@ class FactDigest:
     confirmed_numbers: str = ""
     explicitly_absent: str = ""
     pending_suspense: str = ""
+    atomic_facts: list[AtomicFact] = field(default_factory=list)
 
     @classmethod
     def from_markdown(cls, text: str) -> "FactDigest":
@@ -863,9 +924,68 @@ class FactDigest:
             _extract_section(text, "### 明确未出现的内容")
         )
         fd.pending_suspense = _extract_section(text, "### 待解悬念")
+        for match in re.finditer(
+            r"###\s+(FACT-\d{4}-\d{3})\s*\n(.*?)(?=\n###\s+FACT-|\Z)",
+            text,
+            re.DOTALL,
+        ):
+            kv = _parse_key_value(match.group(2))
+            range_text = kv.get("Paragraph Range", kv.get("段落范围", ""))
+            numbers = [int(value) for value in re.findall(r"\d+", range_text)]
+            entities_text = kv.get("Entities", kv.get("实体", ""))
+            entities = [
+                value.strip()
+                for value in re.split(r"[,，、]", entities_text)
+                if value.strip() and value.strip() not in {"无", "暂无", "-"}
+            ]
+            fact_text = kv.get("Fact Text", kv.get("事实", "")).strip()
+            if fact_text:
+                fd.atomic_facts.append(AtomicFact(
+                    fact_id=match.group(1),
+                    chapter_index=fd.chapter_index,
+                    fact_type=kv.get("Fact Type", kv.get("事实类型", "event")),
+                    entities=entities,
+                    paragraph_start=numbers[0] if numbers else 0,
+                    paragraph_end=numbers[-1] if numbers else 0,
+                    fact_text=fact_text,
+                ))
+        if not fd.atomic_facts:
+            values = {
+                "确定的物品": fd.confirmed_items,
+                "确定的角色状态": fd.confirmed_character_states,
+                "确定的事件": fd.confirmed_events,
+                "确定的数字/数据": fd.confirmed_numbers,
+                "明确未出现的内容（后续章节不得引用）": fd.explicitly_absent,
+                "待解悬念": fd.pending_suspense,
+            }
+            sequence = 1
+            for title, fact_type in _LEGACY_FACT_SECTIONS:
+                for fact_text in _fact_lines(values.get(title, "")):
+                    fd.atomic_facts.append(AtomicFact(
+                        fact_id=f"FACT-{fd.chapter_index:04d}-{sequence:03d}",
+                        chapter_index=fd.chapter_index,
+                        fact_type=fact_type,
+                        fact_text=fact_text,
+                    ))
+                    sequence += 1
         return fd
 
     def to_markdown(self) -> str:
+        if self.atomic_facts:
+            lines = [f"# 第{self.chapter_index}章 Fact Digest", "", "## Atomic Facts", ""]
+            for sequence, fact in enumerate(self.atomic_facts, 1):
+                fact.fact_id = f"FACT-{self.chapter_index:04d}-{sequence:03d}"
+                fact.chapter_index = self.chapter_index
+                lines.extend([
+                    f"### {fact.fact_id}",
+                    f"- **Chapter**: {self.chapter_index}",
+                    f"- **Fact Type**: {fact.fact_type or 'event'}",
+                    f"- **Entities**: {', '.join(fact.entities) or '-'}",
+                    f"- **Paragraph Range**: {fact.paragraph_range}",
+                    f"- **Fact Text**: {fact.fact_text}",
+                    "",
+                ])
+            return "\n".join(lines)
         lines = [f"# 第{self.chapter_index}章 事实摘要", ""]
         for title, content in [
             ("确定的物品", self.confirmed_items),

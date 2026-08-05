@@ -102,7 +102,7 @@ class E076Case(unittest.TestCase):
             "stylist": patch("src.agents.author.claude_stylist.ClaudeStylist"),
             "checker": patch("src.agents.author.style_checker.StyleChecker"),
             "state_manager": patch("src.agents.state_manager.state_manager.StateManager"),
-            "chroma": patch("src.storage.chroma_store.ChromaStore"),
+            "chroma": patch("src.storage.atomic_fact_store.AtomicFactStore"),
         }
         mocks = {name: patcher.start() for name, patcher in patchers.items()}
         for patcher in patchers.values():
@@ -129,7 +129,7 @@ class E076Case(unittest.TestCase):
         mocks["state_manager"].return_value.extract_fact_digest_from_analysis.return_value = (
             FactDigest(chapter_index=1, confirmed_events="事件发生")
         )
-        mocks["chroma"].return_value.index_chapter.return_value = 1
+        mocks["chroma"].return_value.index_facts.return_value = 1
         return mocks
 
     def _successful_commit(self, mock_state_manager):
@@ -321,6 +321,68 @@ class TestCheckpointedProseCycle(E076Case):
         )
         mocks["state_manager"].return_value.update_tracking_docs.assert_called_once()
 
+
+
+class TestTerminalCheckpointClosure(E076Case):
+    def _passing_prose_review(self, mocks):
+        mocks["state_manager"].return_value.review_chapter.return_value = {
+            "raw_analysis": decision("PASS"), "filepath": None,
+        }
+        self._successful_commit(mocks["state_manager"])
+
+    def test_error_terminal_without_marker_starts_new_generate(self):
+        mocks = self._patch_runtime()
+        mocks["plan_reviewer"].return_value.review_plan.side_effect = [
+            decision("UNKNOWN"),
+            decision("PASS"),
+        ]
+        self._passing_prose_review(mocks)
+        runner = ChapterWorkflowRunner(self.novel_id, 1)
+
+        failed = runner.run()
+        self.assertEqual(failed["workflow_status"], "error")
+        self.assertFalse(
+            (self.fs.root / "states" / "chapter_0001_completed").exists())
+
+        completed = runner.run(chapter_intent="第二次执行")
+        self.assertEqual(completed["workflow_status"], "completed")
+        self.assertEqual(
+            mocks["planner"].return_value.plan_chapter.call_count, 2)
+
+    def test_stopped_terminal_without_marker_starts_new_generate(self):
+        mocks = self._patch_runtime()
+        mocks["plan_reviewer"].return_value.review_plan.side_effect = [
+            decision("NEEDS_REVISION"),
+            decision("PASS"),
+        ]
+        self._passing_prose_review(mocks)
+        runner = ChapterWorkflowRunner(self.novel_id, 1)
+
+        waiting = runner.run()
+        self.assertEqual(waiting["workflow_status"], "WAITING_HUMAN")
+        stopped = runner.resume({"action": "stop"})
+        self.assertEqual(stopped["workflow_status"], "STOPPED_NON_PASS")
+
+        completed = runner.run()
+        self.assertEqual(completed["workflow_status"], "completed")
+        self.assertEqual(
+            mocks["planner"].return_value.plan_chapter.call_count, 2)
+
+    def test_completed_marker_blocks_new_generate_after_terminal(self):
+        mocks = self._patch_runtime()
+        mocks["plan_reviewer"].return_value.review_plan.return_value = decision("PASS")
+        self._passing_prose_review(mocks)
+        runner = ChapterWorkflowRunner(self.novel_id, 1)
+
+        completed = runner.run()
+        self.assertEqual(completed["workflow_status"], "completed")
+        calls = mocks["planner"].return_value.plan_chapter.call_count
+
+        blocked = runner.run(chapter_intent="不得覆盖")
+        self.assertEqual(blocked["workflow_status"], "error")
+        self.assertIn("ERROR_ALREADY_EXISTS", blocked["error"])
+        self.assertEqual(
+            mocks["planner"].return_value.plan_chapter.call_count, calls)
 
 if __name__ == "__main__":
     unittest.main()

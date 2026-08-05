@@ -6,6 +6,7 @@ is committed by StateManager only after an explicit PASS decision.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from functools import wraps
 from typing import Any, TypedDict
@@ -33,6 +34,7 @@ class ChapterWorkflowState(TypedDict, total=False):
     historical_evidence: str
     draft_text: str
     styled_text: str
+    styled_source_path: str
 
     plan_raw_analysis: str
     plan_verdict: str
@@ -59,6 +61,14 @@ class ChapterWorkflowState(TypedDict, total=False):
     retrieval_success: bool
     retrieval_result_count: int
     retrieval_trace_path: str
+    retrieved_facts: list[dict]
+    expanded_sources: list[dict]
+    chapter_sources_path: str
+    fact_digest_path: str
+    atomic_fact_count: int
+    rag_facts: int
+    derived_state_errors: list[str]
+
     warnings: list[str]
     fact_digest_generated: bool
     rag_chunks: int
@@ -184,6 +194,8 @@ def plan_chapter(state: ChapterWorkflowState) -> dict[str, Any]:
         "retrieval_result_count": len(retrieval.trace.results),
         "retrieval_trace_path": retrieval.trace_path,
         "warnings": retrieval.warnings,
+        "retrieved_facts": retrieval.fact_candidates,
+        "expanded_sources": retrieval.source_excerpts,
         "plan_review_attempt": 0,
         "workflow_status": "PLANNED",
     }
@@ -276,6 +288,67 @@ def _route_after_plan_decision(state: ChapterWorkflowState) -> str:
     return END
 
 
+
+@_guard_node
+def save_chapter_sources(state: ChapterWorkflowState) -> dict[str, Any]:
+    """Write a stable automatic provenance report from the approved plan."""
+    from src.storage.document_formats import ChapterPlan
+
+    plan_text = state.get("chapter_plan_text", "")
+    plan = ChapterPlan.from_markdown(plan_text)
+    adopted_ids = set(re.findall(r"FACT-\d{4}-\d{3}", plan_text))
+    candidates = [
+        fact for fact in state.get("retrieved_facts", [])
+        if fact.get("fact_id") in adopted_ids
+    ]
+    excerpts = list(state.get("expanded_sources", []))
+    chapter_index = state["chapter_index"]
+    lines = [
+        f"# Chapter {chapter_index} Sources",
+        "",
+        "> 自动生成的来源报告；请修改生产源后重新生成，不要直接编辑本文件。",
+        "",
+        "## Chapter Intent",
+        state.get("chapter_intent", "") or "暂无（本章未提供人工 Intent）",
+        "",
+        "## Planning Sources",
+        "- Book Plan: `tracking/book_plan.md`",
+        "- Volume Plan: `tracking/volume_plan.md`",
+        "",
+        "## Adopted Historical Facts",
+    ]
+    if candidates:
+        for fact in candidates:
+            lines.append(
+                f"- **{fact['fact_id']}** (Chapter {fact['chapter_index']}, "
+                f"{fact.get('fact_type', 'event')}): {fact.get('text', '')}"
+            )
+    else:
+        lines.append("- 无")
+    lines.extend(["", "## Future Planning Constraints"])
+    lines.append(plan.context.future_constraints or "暂无")
+    lines.extend(["", "## Expanded Historical Prose"])
+    if excerpts:
+        for source in excerpts:
+            usage = (
+                "adopted" if source.get("fact_id") in adopted_ids
+                else "candidate-only"
+            )
+            lines.append(
+                f"- **{source['fact_id']}**: `{source['source_path']}` "
+                f"paragraphs {source['paragraph_start']}-"
+                f"{source['paragraph_end']} ({usage})"
+            )
+    else:
+        lines.append("- 无")
+    fs = FileStore(state["novel_id"], get_settings().data_dir)
+    path = fs.root / "sources" / f"chapter_{chapter_index:04d}" / "chapter_sources.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return {
+        "chapter_sources_path": str(path.relative_to(fs.root)).replace("\\", "/"),
+        "workflow_status": "SOURCES_SAVED",
+    }
 @_guard_node
 def write_draft(state: ChapterWorkflowState) -> dict[str, Any]:
     """Write from the approved Chapter Plan, not from future plans."""
@@ -375,14 +448,17 @@ def save_styled(state: ChapterWorkflowState) -> dict[str, Any]:
     if not styled:
         return _error_result("styled_text 为空，无法保存")
     fs = FileStore(state["novel_id"], get_settings().data_dir)
-    fs.save("chapters", f"chapter_{state['chapter_index']:04d}_styled", styled)
+    saved_path = fs.save("chapters", f"chapter_{state['chapter_index']:04d}_styled", styled)
     report = StyleChecker(styled).check_all(
         file_path=f"第{state['chapter_index']}章"
     )
     print(report.summary())
     if report.errors > 0:
         print(f"\n  [!] {report.errors} 个错误 + {report.warnings} 个警告，请人工复核。")
-    return {"workflow_status": "STYLED_SAVED"}
+    return {
+        "styled_source_path": str(saved_path.relative_to(fs.root)).replace("\\", "/"),
+        "workflow_status": "STYLED_SAVED",
+    }
 
 
 @_guard_node
@@ -616,75 +692,135 @@ def commit_state(state: ChapterWorkflowState) -> dict[str, Any]:
 def _route_after_commit(state: ChapterWorkflowState) -> str:
     if state.get("workflow_status") == "error" or state.get("commit_success") is not True:
         return END
-    return "save_fact_digest"
+    return "save_chapter_sources"
 
 
-@_guard_node
-def save_fact_digest(state: ChapterWorkflowState) -> dict[str, Any]:
-    """Extract Fact Digest deterministically only after canonical commit."""
-    from src.agents.state_manager.state_manager import StateManager
 
-    if state.get("commit_success") is not True:
-        return {}
-    raw = state.get("raw_analysis", "")
-    if not raw:
-        return _error_result("raw_analysis 为空，无法提取 Fact Digest")
-    fs = FileStore(state["novel_id"], get_settings().data_dir)
-    sqlite = SQLiteStore(fs.root / "state.db")
-    try:
-        digest = StateManager(
-            state["novel_id"], sqlite
-        ).extract_fact_digest_from_analysis(raw, state["chapter_index"])
-    finally:
-        sqlite.close()
-    generated = any([
-        digest.confirmed_items.strip(), digest.confirmed_character_states.strip(),
-        digest.confirmed_events.strip(), digest.confirmed_numbers.strip(),
-        digest.explicitly_absent.strip(), digest.pending_suspense.strip(),
-    ])
+def _derived_failure(state: ChapterWorkflowState, message: str) -> dict[str, Any]:
     return {
-        "fact_digest_generated": generated,
-        "workflow_status": "FACT_DIGEST_SAVED" if generated else "FACT_DIGEST_MISSING",
+        "workflow_status": "completed_with_warnings",
+        "warnings": [*state.get("warnings", []), message],
+        "derived_state_errors": [*state.get("derived_state_errors", []), message],
     }
 
 
-def _route_after_fact_digest(state: ChapterWorkflowState) -> str:
-    return END if state.get("workflow_status") == "error" else "rag_index"
+
+def save_chapter_sources_v2(state: ChapterWorkflowState) -> dict[str, Any]:
+    """Create provenance after commit; report failure is derived-state only."""
+    if state.get("commit_success") is not True:
+        return {}
+    try:
+        return save_chapter_sources.__wrapped__(state)
+    except Exception as exc:
+        return _derived_failure(
+            state,
+            f"chapter_sources.md failed after commit: {type(exc).__name__}: {exc}",
+        )
 
 
-@_guard_node
-def rag_index(state: ChapterWorkflowState) -> dict[str, Any]:
-    """Index final prose as derived state; failure cannot revoke commit."""
-    from src.storage.chroma_store import ChromaStore, DEFAULT_BRANCH_ID
+def _route_after_chapter_sources(state: ChapterWorkflowState) -> str:
+    return (
+        "save_fact_digest"
+        if state.get("commit_success") is True else END
+    )
+
+def save_fact_digest(state: ChapterWorkflowState) -> dict[str, Any]:
+    """Persist Markdown facts after commit; failure never revokes the chapter."""
+    from src.agents.state_manager.state_manager import StateManager
+    from src.storage.document_formats import FactDigest
 
     if state.get("commit_success") is not True:
         return {}
-    text = state.get("styled_text", "")
-    if not text:
-        return {
-            "rag_chunks": 0,
-            "warnings": [*state.get("warnings", []), "缺少 styled_text，跳过 RAG"],
-            "workflow_status": "completed",
-        }
-    settings = get_settings()
+    fs = FileStore(state["novel_id"], get_settings().data_dir)
+    sqlite = SQLiteStore(fs.root / "state.db")
     try:
-        count = ChromaStore(settings.data_dir / "chroma_db").index_chapter(
+        raw = state.get("raw_analysis", "")
+        if not raw:
+            raise ValueError("raw_analysis 为空，无法提取 Fact Digest")
+        digest = StateManager(
+            state["novel_id"], sqlite
+        ).extract_fact_digest_from_analysis(raw, state["chapter_index"])
+        generated = bool(digest.atomic_facts) or any([
+            digest.confirmed_items.strip(),
+            digest.confirmed_character_states.strip(),
+            digest.confirmed_events.strip(),
+            digest.confirmed_numbers.strip(),
+            digest.explicitly_absent.strip(),
+            digest.pending_suspense.strip(),
+        ])
+        if not generated:
+            raise ValueError("Fact Digest 未生成有效事实")
+        paths = sorted(
+            (fs.root / "states").glob(
+                f"fact_digest_ch{state['chapter_index']:04d}_*.md"),
+            reverse=True,
+        )
+        if not paths:
+            paths = [fs.save(
+                "states", f"fact_digest_ch{state['chapter_index']:04d}",
+                digest.to_markdown())]
+        digest_path = paths[0]
+        canonical_digest = FactDigest.from_markdown(digest_path.read_text(encoding="utf-8"))
+        return {
+            "fact_digest_generated": True,
+            "fact_digest_path": str(digest_path.relative_to(fs.root)).replace("\\", "/"),
+            "atomic_fact_count": len(canonical_digest.atomic_facts),
+            "workflow_status": "FACT_DIGEST_SAVED",
+        }
+    except Exception as exc:
+        return {
+            "fact_digest_generated": False,
+            **_derived_failure(
+                state,
+                f"Fact Digest failed after commit: {type(exc).__name__}: {exc}",
+            ),
+        }
+    finally:
+        sqlite.close()
+
+
+def _route_after_fact_digest(state: ChapterWorkflowState) -> str:
+    return "rag_index" if state.get("fact_digest_generated") is True else END
+
+
+def rag_index(state: ChapterWorkflowState) -> dict[str, Any]:
+    """Index Fact Text only; derived failure remains visible and non-blocking."""
+    from src.storage.atomic_fact_store import AtomicFactStore, DEFAULT_BRANCH_ID
+    from src.storage.document_formats import FactDigest
+
+    if state.get("commit_success") is not True:
+        return {}
+    try:
+        fs = FileStore(state["novel_id"], get_settings().data_dir)
+        digest_rel = state.get("fact_digest_path", "")
+        digest_path = fs.root / digest_rel
+        digest = FactDigest.from_markdown(digest_path.read_text(encoding="utf-8"))
+        count = AtomicFactStore(
+            get_settings().data_dir / "chroma_db"
+        ).index_facts(
             novel_id=state["novel_id"],
             branch_id=DEFAULT_BRANCH_ID,
             chapter_index=state["chapter_index"],
-            content=text,
-            source_path=f"chapters/chapter_{state['chapter_index']:04d}_styled",
-            chunk_size=settings.rag_chunk_size,
-            chunk_overlap=settings.rag_chunk_overlap,
+            facts=digest.atomic_facts,
+            source_path=state.get("styled_source_path", ""),
+            digest_path=digest_rel,
         )
-        return {"rag_chunks": count, "workflow_status": "completed"}
-    except Exception as exc:
+        if count <= 0:
+            raise ValueError("Atomic Fact list is empty")
         return {
+            "rag_facts": count,
             "rag_chunks": 0,
             "workflow_status": "completed",
-            "error": f"RAG index failed (non-blocking): {type(exc).__name__}: {exc}",
         }
-
+    except Exception as exc:
+        return {
+            "rag_facts": 0,
+            "rag_chunks": 0,
+            **_derived_failure(
+                state,
+                f"Atomic Fact RAG failed after commit: {type(exc).__name__}: {exc}",
+            ),
+        }
 
 def build_chapter_workflow(checkpointer: Any = None) -> Any:
     """Build the stable E07.6 chapter creation backbone."""
@@ -696,6 +832,7 @@ def build_chapter_workflow(checkpointer: Any = None) -> Any:
         ("review_plan", review_plan),
         ("parse_plan_decision", parse_plan_decision),
         ("await_human_plan", await_human_plan),
+        ("save_chapter_sources", save_chapter_sources_v2),
         ("write_draft", write_draft),
         ("style_edit", style_edit),
         ("auto_revise_chapter", auto_revise_chapter),
@@ -750,6 +887,10 @@ def build_chapter_workflow(checkpointer: Any = None) -> Any:
     )
     graph.add_conditional_edges(
         "commit_state", _route_after_commit,
+        {"save_chapter_sources": "save_chapter_sources", END: END},
+    )
+    graph.add_conditional_edges(
+        "save_chapter_sources", _route_after_chapter_sources,
         {"save_fact_digest": "save_fact_digest", END: END},
     )
     graph.add_conditional_edges(

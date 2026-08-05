@@ -48,9 +48,9 @@ class ChapterWorkflowRunner:
     def _open_graph(self):
         self.checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(self.checkpoint_path, check_same_thread=False)
-        return connection, build_chapter_workflow(
-            checkpointer=SqliteSaver(connection)
-        )
+        checkpointer = SqliteSaver(connection)
+        return connection, checkpointer, build_chapter_workflow(
+            checkpointer=checkpointer)
 
     def _result_or_interrupt(self, graph, result: Any) -> dict[str, Any]:
         snapshot = graph.get_state(self.config)
@@ -65,8 +65,20 @@ class ChapterWorkflowRunner:
         chapter_intent: str = "",
     ) -> dict[str, Any]:
         """Start, continue, or report a paused chapter execution."""
-        connection, graph = self._open_graph()
+        connection, checkpointer, graph = self._open_graph()
         try:
+            marker = (
+                self.file_store.root / "states" /
+                f"chapter_{self.chapter_index:04d}_completed"
+            )
+            if marker.exists():
+                return {
+                    "workflow_status": "error",
+                    "error": (
+                        f"ERROR_ALREADY_EXISTS: 第{self.chapter_index}章已完成，"
+                        "普通 Generate 禁止覆盖"),
+                }
+
             snapshot = graph.get_state(self.config)
             if snapshot.interrupts:
                 print("  [LangGraph] Chapter workflow is waiting for human input.")
@@ -80,8 +92,18 @@ class ChapterWorkflowRunner:
                     graph, graph.invoke(None, config=self.config)
                 )
             if snapshot.values:
-                print("  [LangGraph] Chapter workflow is already terminal; no nodes replayed.")
-                return dict(snapshot.values)
+                terminal_status = str(
+                    snapshot.values.get("workflow_status", "")
+                ).upper()
+                if terminal_status in {"ERROR", "STOPPED_NON_PASS"}:
+                    checkpointer.delete_thread(self.thread_id)
+                    print(
+                        "  [LangGraph] Cleared retryable terminal checkpoint; "
+                        "starting a new chapter execution."
+                    )
+                else:
+                    print("  [LangGraph] Chapter workflow is already terminal; no nodes replayed.")
+                    return dict(snapshot.values)
 
             initial_state = {
                 "novel_id": self.novel_id,
@@ -130,7 +152,7 @@ class ChapterWorkflowRunner:
         if action not in ("edit", "stop"):
             raise ValueError("E07.6 resume action must be 'edit' or 'stop'")
 
-        connection, graph = self._open_graph()
+        connection, _checkpointer, graph = self._open_graph()
         try:
             snapshot = graph.get_state(self.config)
             if not snapshot.interrupts:

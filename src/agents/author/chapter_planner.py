@@ -74,7 +74,7 @@ class ChapterPlanner(BaseAgent):
               f"（{active_vp.status}，{active_vp.chapter_range or '章节范围未定'}）")
         world_setting = self.fs.load_canonical("settings", "world_setting") or ""
         prev_chapter_end = self._load_prev_chapter_end(chapter_index)
-        fact_context = self._load_recent_fact_digests(chapter_index)
+        fact_context = ""  # E07.7: global history enters only through retrieved FACTs.
         rels = self.fs.load_tracking_doc("character_relationships") or ""
         items = self.fs.load_tracking_doc("items_equipment") or ""
         cult = self.fs.load_tracking_doc("cultivation_system") or ""
@@ -88,9 +88,14 @@ class ChapterPlanner(BaseAgent):
         if world_setting:
             parts.append(f"### 世界观设定（最高优先级·硬规则）\n{world_setting[:2000]}")
 
-        # 1.5. RAG Evidence — 历史章节检索结果（E04 P0 #8, #9）
+        # 1.5. E07.7 FACT candidates plus narrowly expanded source prose.
         if rag_evidence:
             parts.append(f"## 【历史检索证据（RAG）】\n{rag_evidence}")
+            parts.append(
+                "只采用与本章设计真正相关的 FACT。将采用项（保留 FACT-ID）写入"
+                "「采用的历史事实」；仅将实际使用的局部原文写入「历史原文局部」。"
+                "未采用的候选事实和原文不得进入 Chapter Plan。"
+            )
 
         # 2. Book Strategic Constraints
         parts.append(f"### 全书战略规划 Book Plan（战略约束层，方向性参考）\n{book_plan[:2000]}")

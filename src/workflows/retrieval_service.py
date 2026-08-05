@@ -10,13 +10,52 @@ from pathlib import Path
 
 from src.agents.author.chapter_planner import ChapterPlanner
 from src.config.settings import get_settings
-from src.storage.chroma_store import (
-    ChromaStore,
+from src.storage.atomic_fact_store import (
+    AtomicFactStore,
     DEFAULT_BRANCH_ID,
-    RetrievalResult,
-    RetrievalTrace,
+    FactSearchResult,
 )
 from src.storage.file_store import FileStore
+
+
+@dataclass
+class FactRetrievalTrace:
+    chapter_index: int = 0
+    branch_id: str = DEFAULT_BRANCH_ID
+    query: str = ""
+    top_k: int = 5
+    filters: dict = field(default_factory=dict)
+    results: list[FactSearchResult] = field(default_factory=list)
+    timestamp: str = ""
+    success: bool = True
+    error_message: str = ""
+
+    def to_dict(self) -> dict:
+        return {
+            "schema": "atomic-fact-v2",
+            "chapter_index": self.chapter_index,
+            "branch_id": self.branch_id,
+            "query": self.query,
+            "top_k": self.top_k,
+            "filters": self.filters,
+            "results": [result.to_dict() for result in self.results],
+            "timestamp": self.timestamp,
+            "success": self.success,
+            "error_message": self.error_message,
+        }
+
+
+@dataclass
+class SourceExcerpt:
+    fact_id: str = ""
+    chapter_index: int = 0
+    source_path: str = ""
+    paragraph_start: int = 0
+    paragraph_end: int = 0
+    text: str = ""
+
+    def to_dict(self) -> dict:
+        return self.__dict__.copy()
 
 
 @dataclass
@@ -24,9 +63,11 @@ class RetrievalOutcome:
     """Observable result of one planning retrieval attempt."""
 
     evidence: str = ""
-    trace: RetrievalTrace = field(default_factory=RetrievalTrace)
+    trace: FactRetrievalTrace = field(default_factory=FactRetrievalTrace)
     trace_path: str = ""
     warnings: list[str] = field(default_factory=list)
+    fact_candidates: list[dict] = field(default_factory=list)
+    source_excerpts: list[dict] = field(default_factory=list)
 
 
 class ChapterRetrievalService:
@@ -37,7 +78,7 @@ class ChapterRetrievalService:
         self.novel_id = novel_id
         self.settings = settings
         self.fs = FileStore(novel_id, settings.data_dir)
-        self.chroma = ChromaStore(settings.data_dir / "chroma_db")
+        self.chroma = AtomicFactStore(settings.data_dir / "chroma_db")
         self.planner = ChapterPlanner(novel_id)
 
     def retrieve(
@@ -48,7 +89,7 @@ class ChapterRetrievalService:
         chapter_intent: str = "",
     ) -> RetrievalOutcome:
         branch_id = DEFAULT_BRANCH_ID
-        trace = RetrievalTrace(
+        trace = FactRetrievalTrace(
             chapter_index=chapter_index,
             branch_id=branch_id,
             query="",
@@ -57,7 +98,7 @@ class ChapterRetrievalService:
                 "novel_id": self.novel_id,
                 "branch_id": branch_id,
                 "chapter_index <": chapter_index,
-                "source_type": "chapter",
+                "source_type": "atomic_fact",
             },
             timestamp=datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
         )
@@ -74,7 +115,10 @@ class ChapterRetrievalService:
                 chapter_index=chapter_index,
                 top_k=trace.top_k,
             )
-            outcome.evidence = self._format_evidence(trace.results)
+            excerpts = self._expand_sources(trace.results)
+            outcome.fact_candidates = [result.to_dict() for result in trace.results]
+            outcome.source_excerpts = [excerpt.to_dict() for excerpt in excerpts]
+            outcome.evidence = self._format_evidence(trace.results, excerpts)
         except Exception as exc:
             trace.success = False
             trace.error_message = f"{type(exc).__name__}: {exc}"
@@ -145,24 +189,79 @@ class ChapterRetrievalService:
         return " ".join(parts) if parts else f"第{chapter_index}章 剧情"
 
     @staticmethod
-    def _format_evidence(results: list[RetrievalResult]) -> str:
+    def _format_evidence(
+        results: list[FactSearchResult], excerpts: list[SourceExcerpt]
+    ) -> str:
         if not results:
             return ""
-
-        lines = [
-            f"（从 {len(results)} 个历史章节片段中检索到以下相关内容，距离越近越相关）\n"
-        ]
-        for index, result in enumerate(results, 1):
+        lines = ["## Candidate Atomic Facts"]
+        for result in results:
             lines.append(
-                f"**[证据{index}]** 第{result.chapter_index}章 "
-                f"chunk-{result.chunk_index} "
-                f"(distance={result.distance:.4f}):"
+                f"- **{result.fact_id}** | Chapter {result.chapter_index} | "
+                f"{result.fact_type} | paragraphs {result.paragraph_start or '?'}"
+                f"-{result.paragraph_end or '?'} | distance={result.distance:.4f}"
             )
-            lines.append(f"> {result.text[:600]}")
+            lines.append(f"  {result.text}")
+        if excerpts:
             lines.append("")
+            lines.append("## On-demand Historical Source Excerpts")
+            for excerpt in excerpts:
+                lines.append(
+                    f"### {excerpt.fact_id} — Chapter {excerpt.chapter_index}, "
+                    f"paragraphs {excerpt.paragraph_start}-{excerpt.paragraph_end}"
+                )
+                lines.append(excerpt.text)
         return "\n".join(lines)
 
-    def _save_trace(self, trace: RetrievalTrace) -> Path:
+    @staticmethod
+    def _split_paragraphs(text: str) -> list[str]:
+        return [part.strip() for part in re.split(r"\n\s*\n", text) if part.strip()]
+
+    def _resolve_source_path(self, result: FactSearchResult) -> Path | None:
+        if result.source_path:
+            candidate = (self.fs.root / result.source_path).resolve()
+            if candidate.is_relative_to(self.fs.root.resolve()) and candidate.is_file():
+                return candidate
+        files = sorted(
+            (self.fs.root / "chapters").glob(
+                f"chapter_{result.chapter_index:04d}_styled_*.md"
+            ),
+            reverse=True,
+        )
+        return files[0] if files else None
+
+    def _expand_sources(
+        self, results: list[FactSearchResult], context_paragraphs: int = 1
+    ) -> list[SourceExcerpt]:
+        """Expand only located ranges, with one neighboring paragraph per side."""
+        excerpts = []
+        for result in results:
+            if result.paragraph_start <= 0:
+                continue
+            path = self._resolve_source_path(result)
+            if path is None:
+                continue
+            paragraphs = self._split_paragraphs(path.read_text(encoding="utf-8"))
+            start = max(1, result.paragraph_start - context_paragraphs)
+            fact_end = result.paragraph_end or result.paragraph_start
+            end = min(len(paragraphs), fact_end + context_paragraphs)
+            if start > len(paragraphs) or end < start:
+                continue
+            numbered = [
+                f"[P{number:04d}] {paragraphs[number - 1]}"
+                for number in range(start, end + 1)
+            ]
+            excerpts.append(SourceExcerpt(
+                fact_id=result.fact_id,
+                chapter_index=result.chapter_index,
+                source_path=str(path.relative_to(self.fs.root)).replace("\\", "/"),
+                paragraph_start=start,
+                paragraph_end=end,
+                text="\n\n".join(numbered),
+            ))
+        return excerpts
+
+    def _save_trace(self, trace: FactRetrievalTrace) -> Path:
         traces_dir = self.fs.root / "tracking" / "rag_traces"
         traces_dir.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")

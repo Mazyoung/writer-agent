@@ -23,6 +23,17 @@ from src.storage.document_formats import (
 from src.storage.sqlite_store import SQLiteStore
 
 
+def _number_chapter_paragraphs(text: str) -> str:
+    """Give Review stable one-based paragraph anchors without changing storage."""
+    paragraphs = [
+        part.strip() for part in re.split(r"\n\s*\n", text) if part.strip()
+    ]
+    return "\n\n".join(
+        f"[P{index:04d}] {paragraph}"
+        for index, paragraph in enumerate(paragraphs, 1)
+    )
+
+
 class StateManager(BaseAgent):
     """章节后状态分析 + 追踪文档更新 + 审阅决策（E06）"""
 
@@ -59,7 +70,8 @@ class StateManager(BaseAgent):
         Returns:
             dict with keys: raw_analysis, filepath
         """
-        parts = [f"## 第 {chapter_index} 章正文\n\n{chapter_text}\n\n---"]
+        numbered_text = _number_chapter_paragraphs(chapter_text)
+        parts = [f"## 第 {chapter_index} 章正文\n\n{numbered_text}\n\n---"]
 
         # E06.1: Review Strategic Context (Book Plan + Active Volume Plan for L2/L3)
         if book_plan_text:
@@ -143,6 +155,7 @@ class StateManager(BaseAgent):
 
         has_content = any([
             fd.confirmed_items.strip(),
+            bool(fd.atomic_facts),
             fd.confirmed_character_states.strip(),
             fd.confirmed_events.strip(),
             fd.confirmed_numbers.strip(),

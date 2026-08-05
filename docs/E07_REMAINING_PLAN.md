@@ -1,5 +1,16 @@
 # writer-agent：E07 后续开发规划
 
+## Current Execution Status (2026-08-05)
+
+- E07.6 is complete, including the closure fix: terminal `ERROR` / `STOPPED_NON_PASS` without a completion marker can start a new Generate; pending/Resume semantics and completed-chapter protection remain unchanged.
+- E07.7 is complete: Markdown Fact Digest → Atomic Facts → `atomic_facts_v2` Chroma, FACT → bounded source-text funnel retrieval, and post-commit `chapter_sources.md` provenance.
+- The production CLI no longer indexes styled-chapter chunks. Legacy `chapter_chunks` are collection-isolated and removable by `rag-index --rebuild`.
+- Post-commit provenance/digest/index failures are observable derived-state errors and do not revoke the canonical chapter.
+- **Next Task: E07.8 — current state / persistence 2.0.**
+
+The stage definitions below remain the scope authority. Any older progress/“current next step” wording inside this roadmap is superseded by this status block and `docs/CURRENT_DEVELOPMENT.md`.
+
+
 > 目标：在当前 LangGraph 基础设施已经基本完成的前提下，减少过细的阶段拆分，把剩余工作压缩为 4 个完整能力闭环。
 >
 > 当前原则：**不再单独规划测试阶段或测试对齐阶段。** 现有测试保留，但每个任务只做必要的针对性验证；除非出现明确 bug，否则不主动扩建测试体系。

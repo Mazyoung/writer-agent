@@ -27,6 +27,13 @@
 - **明确未出现的内容**：读者可能会以为本章出现了但实际上没有的内容。后续章节不得引用。
 - **待解悬念**：本章新制造的未解问题。
 
+同时将以上内容拆成稳定 Atomic Facts。每条只表达一个事实，FACT-ID 按正文顺序使用
+`FACT-NNNN-001`、`FACT-NNNN-002`……；Chapter 使用当前章号；Fact Type 使用
+`item` / `character_state` / `event` / `number` / `explicitly_absent` / `suspense`；
+Entities 只列事实直接涉及的实体；Paragraph Range 必须引用输入正文中的 `[Pxxxx]`
+编号（连续范围写 `12-14`）；Fact Text 是独立、明确、适合语义检索的事实句。
+不要把多项事实合成一条，也不要把正文长段落复制为 Fact Text。
+
 ### 2. 状态变更（State Delta）— E06
 
 你需要输出结构化的状态变更，让系统能确定性地更新当前状态。格式要求：
@@ -127,7 +134,17 @@
 ### 待解悬念
 ...
 
+### FACT-NNNN-001
+- **Chapter**: N
+- **Fact Type**: event
+- **Entities**: 角色A, 物品B
+- **Paragraph Range**: 12-13
+- **Fact Text**: 一条独立、明确的事实句。
+
+[按需继续 FACT-NNNN-002……]
+
 ## 状态变更（State Delta）
+
 ### 角色关系当前状态
 - 角色A ↔ 角色B: 关系类型=XX, 当前状态=XX, 态度=XX [依据: 第X段]
 （只列变化项，不变的不列）

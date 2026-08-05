@@ -35,7 +35,7 @@ WorldBuilder / PlotDesigner    ChapterEditingService          → LangGraph
 | `write` | Run the complete checkpointed chapter workflow, including review and commit |
 | `style` | Re-style an existing chapter with optional human feedback, then save/check it; no review or commit |
 | `new-volume` | Explicitly archive the completed volume and generate the next ACTIVE Volume Plan |
-| `rag-index` | Backfill or rebuild finalized chapter chunks in Chroma |
+| `rag-index` | Backfill/rebuild Atomic Facts from completed chapters' Markdown Fact Digests |
 
 There is no independent `review` command. This prevents a second review/commit path outside the LangGraph state machine.
 
@@ -80,8 +80,8 @@ START → preflight → load_chapter_intent → plan_chapter
                       human prose edit → review_chapter #1
       non-PASS → await_human_plan → interrupt()
           human plan edit → review_plan
-  → commit success → save_fact_digest → rag_index → END
-  → UNKNOWN/runtime/commit/digest error → END
+  → commit success → chapter_sources → save_fact_digest → Atomic Fact rag_index → END
+  → pre-commit error blocks; post-commit derived error remains observable without rollback
 ```
 
 Node ownership:
@@ -102,7 +102,8 @@ Node ownership:
 | `await_human_chapter` | LangGraph `interrupt()`; edited prose starts Review #1 |
 | `commit_state` | `StateManager.update_tracking_docs` |
 | `save_fact_digest` | `StateManager.extract_fact_digest_from_analysis` |
-| `rag_index` | `ChromaStore.index_chapter` |
+| `save_chapter_sources` | stable automatic provenance report under `sources/chapter_NNNN/` |
+| `rag_index` | `AtomicFactStore.index_facts`; embeds Fact Text only |
 
 Graph nodes remain adapters over existing business logic. There is no second implementation of ReviewDecision parsing or canonical commit.
 
@@ -124,7 +125,10 @@ Runner behavior:
 
 1. no snapshot → invoke with initial state;
 2. incomplete snapshot with `next` nodes → invoke with `None` and resume;
-3. terminal snapshot → return stored state without replaying nodes.
+3. pending interrupt → wait for `Command(resume=...)` on the same thread;
+4. terminal `ERROR`/`STOPPED_NON_PASS` without completion marker → delete only that thread's obsolete execution checkpoint and start a new Generate;
+5. completion marker present → reject ordinary Generate even if a terminal checkpoint exists;
+6. other terminal snapshot → return stored state without replaying nodes.
 
 LangGraph checkpoint is workflow execution state. It does not replace or roll back canonical planning/story state. Canonical state remains managed by `FileStore` and the `StateManager` transaction.
 
@@ -160,7 +164,7 @@ The transaction preserves ALL OLD or ALL NEW when snapshot and rollback succeed:
 5. roll back every written artifact if any write fails;
 6. sync rebuildable SQLite state only after Markdown success.
 
-Commit failure blocks Fact Digest and RAG. RAG failure does not roll back canonical state.
+Commit failure blocks chapter sources, Fact Digest, and RAG. Once the completion marker exists, any source-report/Fact Digest/Chroma failure is a derived-state error: it is returned and printed, but never rolls back canonical state.
 
 ## 7. Persistence classification
 
@@ -189,8 +193,9 @@ states/chapter_NNNN_completed
 
 ```text
 states/fact_digest_chNNNN_*.md
+sources/chapter_NNNN/chapter_sources.md
 state.db
-ChromaDB chapter chunks
+ChromaDB `atomic_facts_v2` (Fact Text documents + source metadata)
 tracking/rag_traces/*.json
 states/review_chNNNN_*.md
 states/post_chapter_update_*.md
@@ -199,16 +204,24 @@ workflow_checkpoints.sqlite        # execution recovery, not story truth
 
 ## 8. RAG
 
-`ChapterRetrievalService` owns deterministic query construction, Chroma search, evidence formatting, and retrieval trace persistence. Retrieval is constrained by:
+Production long-term memory is:
+
+```text
+completed styled chapter → Review → Markdown Fact Digest → Atomic Facts → Chroma
+```
+
+Each Atomic Fact stores a stable FACT-ID, chapter, type, entities, paragraph range, and Fact Text. Chroma embeds only Fact Text in versioned collection `atomic_facts_v2`. Retrieval is constrained by:
 
 ```text
 novel_id
 branch_id = main
 chapter_index < current chapter
-source_type = chapter
+source_type = atomic_fact
 ```
 
-Only finalized/styled chapters enter the corpus. `RAGMaintenanceService` provides explicit backfill/rebuild operations. Rebuild aborts if branch clearing fails; per-chapter indexing failures are reported without changing canonical story state.
+`ChapterRetrievalService` searches FACT candidates, then reads only valid matched paragraph ranges from the referenced styled chapter, with one neighboring paragraph on each side. Planner selects the facts/excerpts it adopts into the Chapter Plan; Writer never receives the full Book/Volume plans or unselected candidates.
+
+Legacy `chapter_chunks` remain in a separate, unqueried collection until maintenance. `rag-index --rebuild` recreates Atomic Facts from Markdown digests and removes the selected novel/branch's legacy chunks. Legacy six-section digests are deterministically projected into facts with unknown source ranges; they are searchable but cannot trigger prose expansion until regenerated with paragraph metadata.
 
 ## 9. Human authority and future E07 work
 
@@ -218,4 +231,4 @@ Planning authority remains:
 - **L2** — Chapter/Volume planning issue; requires a modification report and human approval.
 - **L3** — strategic Book-level issue; halt for human–Agent repair.
 
-E07.5 inserts HITL after `parse_decision`: PASS continues to `commit_state`; NEEDS_REVISION/HALT pause in `await_human_review` and resume through the same checkpointer/thread ID. The current resume action records human feedback and terminates the non-PASS execution; it cannot promote a verdict to PASS. E07.6 may add rewrite/style/re-review routing after the resumed HITL node.
+E07.6's plan/prose review loop and HITL checkpoint semantics are complete. E07.7's fact-only long-term memory is complete. The next architecture stage is E07.8 current-state/persistence 2.0; it is not implemented here.

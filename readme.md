@@ -29,7 +29,7 @@ Current components:
 - `ChapterWorkflowRunner` — persistent SQLite checkpoint/resume boundary
 - `ChapterRetrievalService` — deterministic retrieval query, evidence, and trace lifecycle
 - scoped services for initialization, standalone planning/editing, status, and RAG maintenance
-- `FileStore`, `SQLiteStore`, and `ChromaStore` — canonical files, rebuildable cache state, and vector retrieval
+- `FileStore`, `SQLiteStore`, and `AtomicFactStore` — canonical files, rebuildable cache state, and fact-only vector retrieval
 
 ## Data flow
 
@@ -59,7 +59,7 @@ START → preflight → load_chapter_intent → plan_chapter
   → review_plan → parse_plan_decision
       PASS → write_draft → style_edit → save_styled
         → review_chapter #1 → parse_chapter_decision
-            PASS → commit_state → save_fact_digest → rag_index → END
+            PASS → commit_state → chapter_sources → save_fact_digest → rag_index → END
             NEEDS_REVISION (L1) → auto_revise_chapter (once)
               → save_styled → review_chapter #2
                   PASS → commit path
@@ -71,7 +71,7 @@ START → preflight → load_chapter_intent → plan_chapter
 UNKNOWN/malformed decisions and runtime/API/database/disk errors → error → END
 ```
 
-`ChapterWorkflowRunner` maps each novel/chapter pair to a deterministic LangGraph `thread_id` and persists execution checkpoints in `workflow_checkpoints.sqlite`. Human resume stays on that thread: a plan edit is reviewed again before Writer, while a prose edit starts a fresh Review #1 cycle with one renewed automatic revision allowance. Checkpoints recover workflow execution position and pending interrupts; they do not replace canonical story state or implement story rollback.
+`ChapterWorkflowRunner` maps each novel/chapter pair to a deterministic LangGraph `thread_id` and persists execution checkpoints in `workflow_checkpoints.sqlite`. Human resume stays on that thread. Pending nodes and interrupts continue the same execution. If an execution is terminal `ERROR`/`STOPPED_NON_PASS` and no completion marker exists, a later ordinary Generate automatically clears only that thread's obsolete checkpoint and starts a new execution. A completion marker always blocks ordinary Generate.
 
 ### Review and memory
 
@@ -97,11 +97,12 @@ The atomic commit covers:
 - `tracking/character_states.md`
 - the chapter completion marker
 
-Fact Digests are derived from the review analysis without another LLM call. SQLite and Chroma are derived or rebuildable state; canonical Markdown remains the story-state source of truth.
+Fact Digests are derived from the review analysis without another LLM call and persist Atomic Facts as Markdown records containing FACT-ID, chapter, type, entities, paragraph range, and Fact Text. `sources/chapter_NNNN/chapter_sources.md` records the approved plan's actual intent/planning sources, adopted FACT IDs, curated future constraints, and expanded prose locations.
+SQLite and Chroma are derived or rebuildable state; canonical Markdown remains the story-state source of truth. Post-commit Fact Digest, source-report, or Chroma failure never removes the completion marker and is printed as a derived-state error.
 
 ### RAG
 
-Only finalized/styled chapters are indexed. Chapter planning retrieves filtered historical chunks through `ChromaStore`, prevents future-chapter leakage, and writes JSON retrieval traces under `tracking/rag_traces/`. The CLI can backfill or rebuild the main-branch index.
+Chroma collection `atomic_facts_v2` embeds only `Fact Text`; full styled chapters are not a production vector corpus. Planning searches earlier FACTs, expands only a matched FACT's paragraph range (plus one neighboring paragraph on each side), and gives Writer only the facts/excerpts adopted into the reviewed Chapter Plan. `rag-index --rebuild` rebuilds from completed chapters' Markdown Fact Digests and removes this novel/branch's legacy `chapter_chunks`; collection versioning prevents old/new retrieval mixing even before cleanup.
 
 ## CLI usage
 

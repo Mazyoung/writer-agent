@@ -39,7 +39,7 @@ from src.core.novel_status import NovelStatusService
 from src.planning.chapter_planning_service import ChapterPlanningService
 from src.planning.novel_lifecycle import NovelLifecycleService
 from src.storage.file_store import FileStore
-from src.storage.rag_maintenance import RAGMaintenanceService
+from src.storage.rag_maintenance_v2 import RAGMaintenanceService
 from src.workflows.chapter_editing import ChapterEditingService
 from src.workflows.chapter_runner import (
     resume_chapter_workflow,
@@ -223,8 +223,13 @@ def cmd_write(args):
 
     status = result.get("workflow_status", "error")
     verdict = result.get("verdict", "UNKNOWN")
-    if status == "completed":
+    if status in {"completed", "completed_with_warnings"}:
         print(f"\n  Chapter workflow completed: review={verdict}")
+        for warning in result.get("derived_state_errors", []):
+            print(f"  [DERIVED STATE ERROR] {warning}")
+        if status == "completed_with_warnings" and not result.get("derived_state_errors"):
+            for warning in result.get("warnings", []):
+                print(f"  [WARNING] {warning}")
         return
     if status == "WAITING_HUMAN":
         print(f"\n  Chapter workflow waiting for human input: review={verdict}")
