@@ -259,7 +259,7 @@ class TestMigration(E078Case):
 
 
 class TestCommitBoundary(E078Case):
-    def test_commit_writes_matching_markdown_sqlite_and_marker(self):
+    def test_commit_writes_matching_markdown_sqlite_and_derived_marker(self):
         base, _text, digest = self.store.initialize_empty()
         candidate = self.store.apply_delta(
             base, StateDelta.from_analysis(FULL_DELTA_ANALYSIS),
@@ -270,7 +270,7 @@ class TestCommitBoundary(E078Case):
         expected_hash = self.store.content_hash(canonical)
         self.assertTrue(self.sqlite.current_state_projection_matches(
             self.novel_id, expected_hash))
-        marker = (self.fs.root / "states" / "chapter_0001_completed").read_text(
+        marker = (self.fs.root / "states" / "chapter_0001_derived").read_text(
             encoding="utf-8")
         self.assertIn(expected_hash, marker)
 
@@ -283,7 +283,7 @@ class TestCommitBoundary(E078Case):
         self.assertFalse(result.success)
         self.assertEqual(self.store.load_text(), text)
         self.assertFalse(
-            (self.fs.root / "states" / "chapter_0001_completed").exists())
+            (self.fs.root / "states" / "chapter_0001_derived").exists())
 
     def test_sqlite_failure_restores_markdown_and_marker(self):
         base, text, digest = self.store.initialize_empty()
@@ -298,7 +298,7 @@ class TestCommitBoundary(E078Case):
         self.assertFalse(result.success)
         self.assertEqual(self.store.load_text(), text)
         self.assertFalse(
-            (self.fs.root / "states" / "chapter_0001_completed").exists())
+            (self.fs.root / "states" / "chapter_0001_derived").exists())
 
     def test_state_manager_requires_complete_delta(self):
         self.store.initialize_empty()
@@ -307,7 +307,7 @@ class TestCommitBoundary(E078Case):
         ).update_tracking_docs(1, "正文", "## 审阅决策\n- **决策**: PASS")
         self.assertFalse(result["_commit_result"].success)
         self.assertFalse(
-            (self.fs.root / "states" / "chapter_0001_completed").exists())
+            (self.fs.root / "states" / "chapter_0001_derived").exists())
 
 
 class TestWorkflowContext(E078Case):

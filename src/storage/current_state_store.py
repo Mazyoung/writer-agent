@@ -55,7 +55,23 @@ class CurrentStateStore:
         return CurrentState.from_markdown(text)
 
     def _completed_through_chapter(self) -> int:
+        """Infer a migration base; production completion comes from prose identity."""
         chapters = []
+        for path in (self.fs.root / "states").glob("chapter_*_derived"):
+            match = re.fullmatch(r"chapter_(\d{4})_derived", path.name)
+            if match:
+                chapters.append(int(match.group(1)))
+        if chapters:
+            return max(chapters)
+        canonical = [
+            int(match.group(1))
+            for path in self.fs.list_chapters()
+            if (match := re.fullmatch(r"chapter_(\d{4})\.md", path.name))
+        ]
+        if canonical:
+            return max(canonical)
+        # Read-only compatibility for pre-closure migrations. New production
+        # never creates or interprets this as canonical completion.
         for path in (self.fs.root / "states").glob("chapter_*_completed"):
             match = re.fullmatch(r"chapter_(\d{4})_completed", path.name)
             if match:
@@ -313,7 +329,7 @@ class CurrentStateStore:
         result = StateCommitResult(success=False)
         marker = (
             self.fs.root / "states" /
-            f"chapter_{candidate.through_chapter:04d}_completed"
+            f"chapter_{candidate.through_chapter:04d}_derived"
         )
         previous_text = self.load_text()
         candidate_text = candidate.to_markdown()
@@ -325,7 +341,7 @@ class CurrentStateStore:
                 "Current State base hash changed during checkpointed execution")
             return result
         if marker.exists() and current_sha256 != candidate_sha256:
-            result.error_message = "Completion marker exists for a different Current State"
+            result.error_message = "Derived marker exists for a different Current State"
             return result
 
         wrote_markdown = False
@@ -339,7 +355,7 @@ class CurrentStateStore:
                 self.novel_id, candidate, candidate_sha256, commit=False)
             if not marker.exists():
                 marker.write_text(
-                    "Review PASS\nCanonical commit success\n"
+                    "Derivation success\n"
                     f"Chapter: {candidate.through_chapter}\n"
                     f"Current-State-SHA256: {candidate_sha256}\n"
                     f"Current-State-Schema: {candidate.schema_version}\n",
@@ -370,7 +386,7 @@ class CurrentStateStore:
                     marker.unlink(missing_ok=True)
                 except Exception as rollback_exc:
                     rollback_errors.append(
-                        f"rollback completion marker failed: "
+                        f"rollback derived marker failed: "
                         f"{type(rollback_exc).__name__}: {rollback_exc}")
             result.error_message = f"Current State commit failed: {type(exc).__name__}: {exc}"
             result.warnings.extend(rollback_errors)
@@ -382,6 +398,6 @@ class CurrentStateStore:
         result.changed_files = [
             "tracking/current_state.md",
             "state.db",
-            f"states/chapter_{candidate.through_chapter:04d}_completed",
+            f"states/chapter_{candidate.through_chapter:04d}_derived",
         ]
         return result

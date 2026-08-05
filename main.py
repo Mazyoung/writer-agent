@@ -197,8 +197,15 @@ def cmd_write(args):
         return
 
     resume_feedback = getattr(args, "resume", None)
+    requested_action = getattr(args, "action", None)
     try:
-        if getattr(args, "stop", False):
+        if requested_action:
+            result = resume_chapter_workflow(
+                args.name,
+                args.chapter,
+                {"action": requested_action, "feedback": resume_feedback or ""},
+            )
+        elif getattr(args, "stop", False):
             result = resume_chapter_workflow(
                 args.name,
                 args.chapter,
@@ -223,13 +230,18 @@ def cmd_write(args):
 
     status = result.get("workflow_status", "error")
     verdict = result.get("verdict", "UNKNOWN")
-    if status in {"completed", "completed_with_warnings"}:
+    if status == "DERIVED_READY":
         print(f"\n  Chapter workflow completed: review={verdict}")
         for warning in result.get("derived_state_errors", []):
             print(f"  [DERIVED STATE ERROR] {warning}")
-        if status == "completed_with_warnings" and not result.get("derived_state_errors"):
-            for warning in result.get("warnings", []):
-                print(f"  [WARNING] {warning}")
+        return
+    if status == "DERIVATION_ERROR":
+        print("\n  Canonical chapter committed; derivation failed and remains retryable.")
+        for warning in result.get("derived_state_errors", []):
+            print(f"  [DERIVATION ERROR] {warning}")
+        return
+    if status == "DISCARDED":
+        print("\n  Candidate/checkpoint discarded; Chapter Intent was preserved.")
         return
     if status == "WAITING_HUMAN":
         print(f"\n  Chapter workflow waiting for human input: review={verdict}")
@@ -242,8 +254,8 @@ def cmd_write(args):
             for reason in payload.get("reasons", [])[:5]:
                 print(f"    - {reason}")
         print(
-            "  Save the human edit above, then resume with: python main.py write "
-            f"{args.name} --chapter {args.chapter} --resume \"<人工反馈>\""
+            "  Resume with --action approve|agent_edit|manual_edit|regenerate|"
+            "pause|discard (manual_edit reads the Edit file shown above)."
         )
         print(
             "  Or stop this execution with: python main.py write "
@@ -318,6 +330,11 @@ def main():
         help="可选 Chapter Intent（--instructions 为兼容别名）",
     )
     p.add_argument("--resume", help="提交人工编辑并记录反馈")
+    p.add_argument(
+        "--action",
+        choices=["approve", "agent_edit", "manual_edit", "regenerate", "pause", "discard"],
+        help="恢复 prose Review / Final Approval 的 Human action",
+    )
     p.add_argument("--stop", action="store_true", help="停止当前等待人工处理的执行")
 
     # style

@@ -67,11 +67,7 @@ class ChapterWorkflowRunner:
         """Start, continue, or report a paused chapter execution."""
         connection, checkpointer, graph = self._open_graph()
         try:
-            marker = (
-                self.file_store.root / "states" /
-                f"chapter_{self.chapter_index:04d}_completed"
-            )
-            if marker.exists():
+            if self.file_store.canonical_chapter_path(self.chapter_index).exists():
                 return {
                     "workflow_status": "error",
                     "error": (
@@ -95,7 +91,7 @@ class ChapterWorkflowRunner:
                 terminal_status = str(
                     snapshot.values.get("workflow_status", "")
                 ).upper()
-                if terminal_status in {"ERROR", "STOPPED_NON_PASS"}:
+                if terminal_status in {"ERROR", "STOPPED_NON_PASS", "DISCARDED"}:
                     checkpointer.delete_thread(self.thread_id)
                     print(
                         "  [LangGraph] Cleared retryable terminal checkpoint; "
@@ -140,19 +136,36 @@ class ChapterWorkflowRunner:
                 raise ValueError(
                     "Human-edited Chapter Plan is invalid or targets another chapter"
                 )
-        elif interrupt_type != "chapter_review":
+        elif interrupt_type not in {"chapter_review", "final_author_approval"}:
             raise ValueError(f"Unsupported pending interrupt type: {interrupt_type}")
         return text
+
+    def _discard_candidate(self, checkpointer: SqliteSaver) -> list[str]:
+        """Delete only this pre-canonical execution; preserve Chapter Intent."""
+        if self.file_store.canonical_chapter_path(self.chapter_index).exists():
+            raise ValueError("discard is forbidden after canonical commit")
+        removed = []
+        patterns = [
+            f"chapters/chapter_{self.chapter_index:04d}_styled*.md",
+            f"outlines/chapter_plan_ch{self.chapter_index:04d}*.md",
+            f"states/review_ch{self.chapter_index:04d}_*.md",
+            f"states/derivation_ch{self.chapter_index:04d}_*.md",
+            f"states/fact_digest_ch{self.chapter_index:04d}_*.md",
+        ]
+        for pattern in patterns:
+            for path in self.file_store.root.glob(pattern):
+                path.unlink()
+                removed.append(str(path.relative_to(self.file_store.root)))
+        checkpointer.delete_thread(self.thread_id)
+        return removed
 
     def resume(self, resume_value: dict[str, Any]) -> dict[str, Any]:
         """Resume the existing interrupt with a validated human edit or stop."""
         if not isinstance(resume_value, dict):
             raise ValueError("Human resume value must be a decision object")
         action = str(resume_value.get("action", "")).strip().lower()
-        if action not in ("edit", "stop"):
-            raise ValueError("E07.6 resume action must be 'edit' or 'stop'")
 
-        connection, _checkpointer, graph = self._open_graph()
+        connection, checkpointer, graph = self._open_graph()
         try:
             snapshot = graph.get_state(self.config)
             if not snapshot.interrupts:
@@ -161,13 +174,30 @@ class ChapterWorkflowRunner:
                 raise ValueError("Chapter workflow has an unexpected number of interrupts")
 
             pending = snapshot.interrupts[0].value
+            if action == "edit" and pending.get("type") in {
+                "chapter_review", "final_author_approval"
+            }:
+                action = "manual_edit"
+            allowed = set(pending.get("allowed_actions", []))
+            if action not in allowed:
+                raise ValueError(
+                    f"Action '{action}' is not allowed for {pending.get('type', 'interrupt')}"
+                )
+            if action == "pause":
+                return self._waiting_result(snapshot)
+            if action == "discard":
+                return {
+                    "workflow_status": "DISCARDED",
+                    "removed_candidates": self._discard_candidate(checkpointer),
+                    "chapter_intent_preserved": True,
+                }
             command_value = {
                 "action": action,
                 "feedback": str(resume_value.get("feedback", "")).strip(),
             }
             # Validate before Command(resume=...) so a bad/missing edit does not
             # consume the pending checkpoint interrupt.
-            if action == "edit":
+            if action in {"edit", "manual_edit"}:
                 command_value["edited_text"] = self._load_human_edit(pending)
 
             print("  [LangGraph] Resuming chapter workflow with human input.")

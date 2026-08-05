@@ -32,10 +32,7 @@ class NovelStatusService:
             status["active_volume"] = active_volume.volume_number
             status["active_volume_status"] = active_volume.status
 
-        chapters_dir = self.file_store.root / "chapters"
-        status["completed_chapters"] = len(
-            list(chapters_dir.glob("chapter_*_styled*.md"))
-        )
+        status["completed_chapters"] = len(self.file_store.list_chapters())
 
         status["has_current_state"] = self.file_store.has_tracking_doc(
             "current_state")

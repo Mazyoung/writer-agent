@@ -1,5 +1,5 @@
 """
-StateManager — 章节后状态分析 + 追踪文档更新 + 审阅决策（E06）。
+StateManager — prose quality review plus post-canonical semantic derivation.
 
 E06 核心变更：
 - review_chapter 接收 world_setting，确保 T1 一致性检查有真实依据
@@ -36,7 +36,7 @@ def _number_chapter_paragraphs(text: str) -> str:
 
 
 class StateManager(BaseAgent):
-    """章节后状态分析 + 追踪文档更新 + 审阅决策（E06）"""
+    """Keep Review and Derivation as separate semantic calls."""
 
     def __init__(self, novel_id: str, sqlite: Optional[SQLiteStore] = None):
         super().__init__("state_manager", novel_id, "state_manager.txt")
@@ -55,7 +55,7 @@ class StateManager(BaseAgent):
                        book_plan_text: str = "",
                        volume_plan_text: str = "",
                        current_state_text: str = "") -> dict:
-        """E06.1: 分析章节 + 战略上下文，返回结构化结果。
+        """Review prose quality only; never derive state or historical facts.
 
         Args:
             chapter_text: 章节正文
@@ -92,7 +92,7 @@ class StateManager(BaseAgent):
 
         if current_state_text:
             parts.append(
-                "## Current State（当前权威状态；只输出本章 State Delta）\n"
+                "## Current State（仅用于正文一致性检查；禁止输出 State Delta）\n"
                 f"{current_state_text}"
             )
         else:
@@ -108,14 +108,39 @@ class StateManager(BaseAgent):
             if current_character_states:
                 parts.append(f"### character_states.md\n{current_character_states}")
 
-        parts.append("---\n请按输出格式分析本章。")
+        parts.append(
+            "---\n请只按质量审阅输出格式分析本章。不要输出 StateDelta、"
+            "Fact Digest、Atomic Facts 或 Volume Progress。"
+        )
 
         user_msg = "\n\n".join(parts)
 
+        self.system_prompt = self.load_prompt("prose_reviewer.txt")
         result = self.run(
             user_message=user_msg,
             save_category="states",
             save_prefix=f"review_ch{chapter_index:04d}",
+        )
+        return {"raw_analysis": result.content, "filepath": result.filepath}
+
+    def derive_chapter(self, canonical_prose: str, chapter_index: int,
+                       previous_current_state: str) -> dict:
+        """Derive StateDelta and Fact Digest only after canonical commit."""
+        if not canonical_prose.strip():
+            raise ValueError("Canonical prose is required for Derivation")
+        numbered_text = _number_chapter_paragraphs(canonical_prose)
+        user_msg = (
+            f"## Canonical Prose — Chapter {chapter_index}\n\n"
+            f"{numbered_text}\n\n---\n\n"
+            "## Previous Current State\n\n"
+            f"{previous_current_state or '暂无'}\n\n---\n"
+            "只从 canonical prose 派生 State Delta 与 Fact Digest / Atomic Facts。"
+        )
+        self.system_prompt = self.load_prompt("chapter_deriver.txt")
+        result = self.run(
+            user_message=user_msg,
+            save_category="states",
+            save_prefix=f"derivation_ch{chapter_index:04d}",
         )
         return {"raw_analysis": result.content, "filepath": result.filepath}
 
@@ -192,7 +217,7 @@ class StateManager(BaseAgent):
                              analysis_text: str, expected_state_sha256: str = "",
                              chapter_title: str = "",
                              styled_source_path: str = "") -> dict:
-        """Apply one reviewed State Delta to Markdown and SQLite deterministically."""
+        """Apply one derived State Delta to Markdown and SQLite deterministically."""
         if self.sqlite is None:
             return {"_commit_result": StateCommitResult(
                 success=False, error_message="SQLiteStore is required for Current State commit")}

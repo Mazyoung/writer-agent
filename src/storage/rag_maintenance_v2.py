@@ -39,13 +39,9 @@ class RAGMaintenanceService:
                 latest[chapter_index] = (timestamp, path)
         return {chapter: value[1] for chapter, value in latest.items()}
 
-    def _latest_styled_path(self, chapter_index: int) -> str:
-        files = sorted(
-            (self.file_store.root / "chapters").glob(
-                f"chapter_{chapter_index:04d}_styled_*.md"),
-            reverse=True,
-        )
-        return f"chapters/{files[0].name}" if files else ""
+    def _canonical_prose_path(self, chapter_index: int) -> str:
+        path = self.file_store.canonical_chapter_path(chapter_index)
+        return f"chapters/{path.name}" if path.is_file() else ""
 
     def run(self, rebuild: bool = False) -> dict:
         branch_id = DEFAULT_BRANCH_ID
@@ -76,11 +72,7 @@ class RAGMaintenanceService:
             "errors": 0,
         }
         for chapter_index, digest_path in sorted(self._latest_digests().items()):
-            marker = (
-                self.file_store.root / "states" /
-                f"chapter_{chapter_index:04d}_completed"
-            )
-            if not marker.exists():
+            if not self.file_store.canonical_chapter_path(chapter_index).exists():
                 continue
             try:
                 digest = FactDigest.from_markdown(
@@ -90,7 +82,7 @@ class RAGMaintenanceService:
                     branch_id=branch_id,
                     chapter_index=chapter_index,
                     facts=digest.atomic_facts,
-                    source_path=self._latest_styled_path(chapter_index),
+                    source_path=self._canonical_prose_path(chapter_index),
                     digest_path=f"states/{digest_path.name}",
                 )
                 stats["indexed_chapters"] += 1

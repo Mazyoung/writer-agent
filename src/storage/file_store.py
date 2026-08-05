@@ -1,6 +1,7 @@
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
+import re
 
 
 class FileStore:
@@ -125,8 +126,33 @@ class FileStore:
         return migrated
 
     def list_chapters(self) -> list[Path]:
-        """列出所有已完成章节"""
-        return sorted(self.root.glob("chapters/chapter_*.md"))
+        """List the one canonical prose file for each completed chapter."""
+        return sorted(
+            path for path in (self.root / "chapters").glob("chapter_*.md")
+            if re.fullmatch(r"chapter_\d{4}\.md", path.name)
+        )
+
+    def canonical_chapter_path(self, chapter_index: int) -> Path:
+        return self.root / "chapters" / f"chapter_{chapter_index:04d}.md"
+
+    def load_canonical_chapter(self, chapter_index: int) -> Optional[str]:
+        """Read formal prose only; candidate and edited files are never history."""
+        path = self.canonical_chapter_path(chapter_index)
+        return path.read_text(encoding="utf-8") if path.exists() else None
+
+    def commit_canonical_chapter(self, chapter_index: int, content: str) -> Path:
+        """Create formal prose exactly once; Generate may never overwrite it."""
+        if not content.strip():
+            raise ValueError("Canonical chapter prose cannot be empty")
+        path = self.canonical_chapter_path(chapter_index)
+        try:
+            with path.open("x", encoding="utf-8") as handle:
+                handle.write(content)
+        except FileExistsError as exc:
+            raise FileExistsError(
+                f"ERROR_ALREADY_EXISTS: canonical chapter {chapter_index} exists"
+            ) from exc
+        return path
 
     def rollback_canonical(self, category: str, filename: str) -> bool:
         """回退 canonical 文件：用 .bak.md 替换 .md。成功返回 True。"""

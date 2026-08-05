@@ -162,13 +162,13 @@ class TestFactOnlyChroma(E077Case):
 
 class TestFactSourceFunnel(E077Case):
     def test_fact_range_expands_only_local_paragraphs(self):
-        path = self.fs.root / "chapters" / "chapter_0072_styled_x.md"
+        path = self.fs.root / "chapters" / "chapter_0072.md"
         path.write_text("第一段。\n\n第二段。\n\n第三段命中。\n\n第四段。\n\n第五段。", encoding="utf-8")
         service = ChapterRetrievalService("e077")
         excerpts = service._expand_sources([FactSearchResult(
             fact_id="FACT-0072-001", chapter_index=72,
             paragraph_start=3, paragraph_end=3,
-            source_path="chapters/chapter_0072_styled_x.md",
+            source_path="chapters/chapter_0072.md",
             text="第三段命中。",
         )])
         self.assertEqual(len(excerpts), 1)
@@ -219,19 +219,19 @@ class TestDerivedFailure(E077Case):
     def test_rag_failure_is_visible_without_revoking_commit(self):
         digest_path = self.fs.root / "states" / "fact_digest_ch0072_x.md"
         digest_path.write_text(ATOMIC_MD, encoding="utf-8")
-        marker = self.fs.root / "states" / "chapter_0072_completed"
-        marker.write_text("PASS", encoding="utf-8")
+        canonical = self.fs.canonical_chapter_path(72)
+        canonical.write_text("canonical prose", encoding="utf-8")
         with patch.object(AtomicFactStore, "index_facts", side_effect=RuntimeError("down")):
             result = rag_index({
                 "novel_id": "e077", "chapter_index": 72,
                 "commit_success": True,
                 "fact_digest_path": "states/fact_digest_ch0072_x.md",
-                "styled_source_path": "chapters/chapter_0072_styled_x.md",
+                "canonical_source_path": "chapters/chapter_0072.md",
                 "warnings": [],
             })
-        self.assertEqual(result["workflow_status"], "completed_with_warnings")
+        self.assertEqual(result["workflow_status"], "DERIVATION_ERROR")
         self.assertIn("Atomic Fact RAG failed", result["derived_state_errors"][0])
-        self.assertTrue(marker.exists())
+        self.assertTrue(canonical.exists())
 
 
 if __name__ == "__main__":

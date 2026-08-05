@@ -120,7 +120,9 @@ class ChapterRetrievalService:
                 top_k=trace.top_k,
             )
             excerpts = self._expand_sources(trace.results)
-            author_markdown = self.fs.load_tracking_doc("author_rag") or ""
+            # author_rag.md is the sole authority; the retired
+            # author_rag_edited.md must never override it.
+            author_markdown = self.fs.load_generated_tracking_doc("author_rag") or ""
             author_results: list[AuthorKnowledgeResult] = []
             if author_markdown.strip():
                 self.author_chroma.ensure_synced(
@@ -233,17 +235,12 @@ class ChapterRetrievalService:
         return [part.strip() for part in re.split(r"\n\s*\n", text) if part.strip()]
 
     def _resolve_source_path(self, result: FactSearchResult) -> Path | None:
+        canonical = self.fs.canonical_chapter_path(result.chapter_index)
         if result.source_path:
             candidate = (self.fs.root / result.source_path).resolve()
-            if candidate.is_relative_to(self.fs.root.resolve()) and candidate.is_file():
+            if candidate == canonical.resolve() and candidate.is_file():
                 return candidate
-        files = sorted(
-            (self.fs.root / "chapters").glob(
-                f"chapter_{result.chapter_index:04d}_styled_*.md"
-            ),
-            reverse=True,
-        )
-        return files[0] if files else None
+        return canonical if canonical.is_file() else None
 
     def _expand_sources(
         self, results: list[FactSearchResult], context_paragraphs: int = 1

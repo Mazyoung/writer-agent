@@ -1,7 +1,7 @@
 """Checkpointed E07.6 single-chapter production workflow.
 
-LangGraph owns orchestration only. Canonical story state remains in Markdown and
-is committed by StateManager only after an explicit PASS decision.
+LangGraph owns orchestration. Review, canonical prose commit, and derivation
+are separate boundaries.
 """
 
 from __future__ import annotations
@@ -37,6 +37,8 @@ class ChapterWorkflowState(TypedDict, total=False):
     draft_text: str
     styled_text: str
     styled_source_path: str
+    canonical_source_path: str
+    derivation_raw_analysis: str
 
     plan_raw_analysis: str
     plan_verdict: str
@@ -55,6 +57,7 @@ class ChapterWorkflowState(TypedDict, total=False):
 
     human_decision: str
     human_feedback: str
+    final_author_approved: bool
 
     commit_success: bool
     commit_error: str
@@ -126,8 +129,7 @@ def preflight(state: ChapterWorkflowState) -> dict[str, Any]:
         )
 
     fs = FileStore(novel_id, get_settings().data_dir)
-    marker = fs.root / "states" / f"chapter_{chapter_index:04d}_completed"
-    if marker.exists():
+    if fs.canonical_chapter_path(chapter_index).exists():
         return _error_result(
             f"ERROR_ALREADY_EXISTS: 第{chapter_index}章已完成，普通 Generate 禁止覆盖"
         )
@@ -391,9 +393,7 @@ def write_draft(state: ChapterWorkflowState) -> dict[str, Any]:
 def _load_prev_chapter_end(fs: FileStore, chapter_index: int) -> str:
     if chapter_index <= 1:
         return ""
-    prev = fs.load_latest("chapters", f"chapter_{chapter_index - 1:04d}_styled")
-    if not prev:
-        prev = fs.load_latest("chapters", f"chapter_{chapter_index - 1:04d}")
+    prev = fs.load_canonical_chapter(chapter_index - 1)
     if not prev:
         return ""
     return prev[-500:] if len(prev) > 500 else prev
@@ -420,33 +420,34 @@ def style_edit(state: ChapterWorkflowState) -> dict[str, Any]:
 
 
 @_guard_node
-def auto_revise_chapter(state: ChapterWorkflowState) -> dict[str, Any]:
-    """Consume the single automatic revision allowance for this review cycle."""
+def agent_edit_chapter(state: ChapterWorkflowState) -> dict[str, Any]:
+    """Locally revise current prose only after an explicit human decision."""
     from src.agents.author.deepseek_writer import DeepSeekWriter
     from src.storage.document_formats import ChapterPlan
 
-    if state.get("review_round", 1) != 1 or state.get("revision_used") is True:
-        return _error_result("Automatic revision allowance already consumed")
-    if state.get("verdict") != "NEEDS_REVISION":
-        return _error_result("Automatic revision requires NEEDS_REVISION")
-    if state.get("planning_level", "L1") != "L1":
-        return _error_result("L2/L3 findings cannot enter automatic prose revision")
+    if state.get("human_decision") != "agent_edit":
+        return _error_result("agent_edit requires an explicit human decision")
 
     plan = ChapterPlan.from_markdown(state.get("chapter_plan_text", ""))
     revised = DeepSeekWriter(state["novel_id"]).revise_chapter(
         plan,
         state.get("styled_text", ""),
-        state.get("review_reasons", []),
+        [*state.get("review_reasons", []), state.get("human_feedback", "")],
         state.get("t1_issues", []),
     )
     if not revised.strip():
         return _error_result("Auto Revision 未产生正文")
     return {
         "styled_text": revised,
-        "review_round": 2,
+        "review_round": state.get("review_round", 1) + 1,
         "revision_used": True,
-        "workflow_status": "AUTO_REVISED",
+        "verdict": "",
+        "workflow_status": "AGENT_EDITED",
     }
+
+
+# Compatibility import only; the Graph never invokes revision automatically.
+auto_revise_chapter = agent_edit_chapter
 
 
 @_guard_node
@@ -535,15 +536,7 @@ parse_decision = parse_chapter_decision
 def _route_after_chapter_decision(state: ChapterWorkflowState) -> str:
     if state.get("workflow_status") == "error":
         return END
-    verdict = state.get("verdict", "UNKNOWN")
-    if verdict == "PASS":
-        return "commit_state"
-    if (verdict == "NEEDS_REVISION"
-            and state.get("planning_level", "L1") == "L1"
-            and state.get("review_round", 1) == 1
-            and state.get("revision_used") is not True):
-        return "auto_revise_chapter"
-    if verdict in ("NEEDS_REVISION", "HALT"):
+    if state.get("verdict") in ("PASS", "NEEDS_REVISION", "HALT"):
         return "await_human_chapter"
     return END
 
@@ -591,11 +584,12 @@ def await_human_plan(state: ChapterWorkflowState) -> dict[str, Any]:
 
 
 def await_human_chapter(state: ChapterWorkflowState) -> dict[str, Any]:
-    """Pause for human prose; an edit starts a fresh Review #1 cycle."""
+    """Require a human decision after every prose Review, including PASS."""
     chapter_index = state.get("chapter_index", 0)
     edit_path = f"chapters/chapter_{chapter_index:04d}_styled_edited.md"
+    passed = state.get("verdict") == "PASS"
     resume_value = interrupt({
-        "type": "chapter_review",
+        "type": "final_author_approval" if passed else "chapter_review",
         "novel_id": state.get("novel_id", ""),
         "chapter_index": chapter_index,
         "verdict": state.get("verdict", "UNKNOWN"),
@@ -604,25 +598,53 @@ def await_human_chapter(state: ChapterWorkflowState) -> dict[str, Any]:
         "t1_issues": state.get("t1_issues", []),
         "review_round": state.get("review_round", 1),
         "edit_path": edit_path,
-        "allowed_actions": ["edit", "stop"],
+        "allowed_actions": [
+            "agent_edit", "manual_edit", "regenerate", "pause", "discard",
+            *(["approve"] if passed else []),
+        ],
     })
     if not isinstance(resume_value, dict):
         return _error_result("Human resume value must be a decision object")
     action = str(resume_value.get("action", "")).strip().lower()
-    if action == "stop":
-        return _stop_after_human(state)
-    edited = str(resume_value.get("edited_text", "")).strip()
-    if action != "edit" or not edited:
-        return _error_result("Chapter resume requires a non-empty human edit")
-    return {
-        "styled_text": edited,
-        "human_decision": "edit",
-        "human_feedback": str(resume_value.get("feedback", "")).strip(),
-        "review_round": 1,
-        "revision_used": False,
-        "verdict": "",
-        "workflow_status": "HUMAN_CHAPTER_EDITED",
-    }
+    feedback = str(resume_value.get("feedback", "")).strip()
+    if action == "approve":
+        if not passed:
+            return _error_result("Only a latest Review PASS can be approved")
+        return {
+            "human_decision": "approve",
+            "final_author_approved": True,
+            "human_feedback": feedback,
+            "workflow_status": "FINAL_AUTHOR_APPROVED",
+        }
+    if action == "agent_edit":
+        return {
+            "human_decision": action,
+            "human_feedback": feedback,
+            "final_author_approved": False,
+            "workflow_status": "AGENT_EDIT_REQUESTED",
+        }
+    if action == "manual_edit":
+        edited = str(resume_value.get("edited_text", "")).strip()
+        if not edited:
+            return _error_result("manual_edit requires non-empty edited prose")
+        return {
+            "styled_text": edited,
+            "human_decision": action,
+            "human_feedback": feedback,
+            "final_author_approved": False,
+            "review_round": state.get("review_round", 1) + 1,
+            "verdict": "",
+            "workflow_status": "MANUAL_EDITED",
+        }
+    if action == "regenerate":
+        return {
+            "human_decision": action,
+            "human_feedback": feedback,
+            "final_author_approved": False,
+            "verdict": "",
+            "workflow_status": "REGENERATE_REQUESTED",
+        }
+    return _error_result(f"Unsupported in-graph human action: {action}")
 
 
 # Compatibility alias; E07.6 routes to the typed interrupt nodes above.
@@ -638,84 +660,111 @@ def _route_after_human_plan(state: ChapterWorkflowState) -> str:
 def _route_after_human_chapter(state: ChapterWorkflowState) -> str:
     if state.get("workflow_status") == "error":
         return END
-    return "review_chapter" if state.get("human_decision") == "edit" else END
+    return {
+        "approve": "commit_canonical_prose",
+        "agent_edit": "agent_edit_chapter",
+        "manual_edit": "save_styled",
+        "regenerate": "write_draft",
+    }.get(state.get("human_decision", ""), END)
 
 
 @_guard_node
-def commit_state(state: ChapterWorkflowState) -> dict[str, Any]:
-    """Commit canonical state only for the final explicit prose PASS."""
-    from src.agents.state_manager.state_manager import StateManager
-
-    verdict = state.get("verdict", "")
-    if verdict != "PASS":
+def commit_canonical_prose(state: ChapterWorkflowState) -> dict[str, Any]:
+    """Create the one formal chapter only after explicit final approval."""
+    if state.get("verdict") != "PASS" or not state.get("final_author_approved"):
         return {
-            **_error_result(f"Commit blocked: verdict '{verdict}' != PASS"),
+            **_error_result("Canonical commit requires Review PASS and final approval"),
             "commit_success": False,
-            "commit_error": f"verdict is '{verdict}', not PASS — commit blocked",
+            "commit_error": "final author approval missing",
         }
-    raw = state.get("raw_analysis", "")
     styled = state.get("styled_text", "")
-    if not raw or not styled:
+    if not styled.strip():
         return {
-            **_error_result("raw_analysis/styled_text 为空，无法提交 canonical state"),
+            **_error_result("styled_text 为空，无法提交 canonical prose"),
             "commit_success": False,
-            "commit_error": "raw_analysis/styled_text missing",
+            "commit_error": "styled_text missing",
         }
-
     fs = FileStore(state["novel_id"], get_settings().data_dir)
-    sqlite = SQLiteStore(fs.root / "state.db")
-    try:
-        from src.storage.document_formats import ChapterPlan
-
-        chapter_plan = ChapterPlan.from_markdown(
-            state.get("chapter_plan_text", ""))
-        changes = StateManager(state["novel_id"], sqlite).update_tracking_docs(
-            state["chapter_index"], styled, raw,
-            expected_state_sha256=state.get("current_state_sha256", ""),
-            chapter_title=chapter_plan.title,
-            styled_source_path=state.get("styled_source_path", ""),
-        )
-    finally:
-        sqlite.close()
-    commit_result = changes.get("_commit_result")
-    if not commit_result or not commit_result.success:
-        message = (
-            "_commit_result missing from changes dict"
-            if commit_result is None else commit_result.error_message
-        )
-        return {
-            **_error_result(f"Canonical state commit failed: {message}"),
-            "commit_success": False,
-            "commit_error": message,
-        }
-
-    marker = fs.root / "states" / f"chapter_{state['chapter_index']:04d}_completed"
-    if not marker.exists():
-        return {
-            **_error_result("Canonical transaction did not produce completion marker"),
-            "commit_success": False,
-            "commit_error": "completion marker missing after canonical transaction",
-        }
+    path = fs.commit_canonical_chapter(state["chapter_index"], styled)
+    relative = str(path.relative_to(fs.root)).replace("\\", "/")
     return {
         "commit_success": True,
-        "completion_marker_path": str(marker),
-        "workflow_status": "COMMITTED",
+        "canonical_source_path": relative,
+        "styled_source_path": relative,
+        "workflow_status": "CANONICAL_COMMITTED",
     }
+
+
+# Compatibility name for direct callers; semantics are prose-only now.
+commit_state = commit_canonical_prose
 
 
 def _route_after_commit(state: ChapterWorkflowState) -> str:
     if state.get("workflow_status") == "error" or state.get("commit_success") is not True:
         return END
-    return "save_chapter_sources"
+    return "derive_chapter"
 
 
 
 def _derived_failure(state: ChapterWorkflowState, message: str) -> dict[str, Any]:
     return {
-        "workflow_status": "completed_with_warnings",
+        "workflow_status": "DERIVATION_ERROR",
         "warnings": [*state.get("warnings", []), message],
         "derived_state_errors": [*state.get("derived_state_errors", []), message],
     }
+
+
+def derive_chapter(state: ChapterWorkflowState) -> dict[str, Any]:
+    """Semantically derive facts/state from canonical prose, then persist state."""
+    from src.agents.state_manager.state_manager import StateManager
+    from src.storage.document_formats import ChapterPlan
+
+    if state.get("commit_success") is not True:
+        return _derived_failure(state, "Derivation requires canonical prose")
+    fs = FileStore(state["novel_id"], get_settings().data_dir)
+    canonical = fs.load_canonical_chapter(state["chapter_index"]) or ""
+    if not canonical:
+        return _derived_failure(state, "Canonical prose missing after commit")
+    sqlite = SQLiteStore(fs.root / "state.db")
+    try:
+        manager = StateManager(state["novel_id"], sqlite)
+        derived = manager.derive_chapter(
+            canonical, state["chapter_index"], state.get("current_state_text", "")
+        )
+        raw = derived.get("raw_analysis", "")
+        if not raw.strip():
+            raise ValueError("Deriver returned empty analysis")
+        chapter_plan = ChapterPlan.from_markdown(state.get("chapter_plan_text", ""))
+        changes = manager.update_tracking_docs(
+            state["chapter_index"], canonical, raw,
+            expected_state_sha256=state.get("current_state_sha256", ""),
+            chapter_title=chapter_plan.title,
+            styled_source_path=state.get("canonical_source_path", ""),
+        )
+        result = changes.get("_commit_result")
+        if not result or not result.success:
+            raise RuntimeError(
+                "_commit_result missing" if result is None else result.error_message
+            )
+    except Exception as exc:
+        return _derived_failure(
+            state, f"State derivation failed: {type(exc).__name__}: {exc}"
+        )
+    finally:
+        sqlite.close()
+    marker = fs.root / "states" / f"chapter_{state['chapter_index']:04d}_derived"
+    return {
+        "derivation_raw_analysis": raw,
+        "completion_marker_path": str(marker),
+        "workflow_status": "CURRENT_STATE_DERIVED",
+    }
+
+
+def _route_after_derivation(state: ChapterWorkflowState) -> str:
+    return (
+        "save_fact_digest"
+        if state.get("workflow_status") == "CURRENT_STATE_DERIVED" else END
+    )
 
 
 
@@ -734,8 +783,8 @@ def save_chapter_sources_v2(state: ChapterWorkflowState) -> dict[str, Any]:
 
 def _route_after_chapter_sources(state: ChapterWorkflowState) -> str:
     return (
-        "save_fact_digest"
-        if state.get("commit_success") is True else END
+        "rag_index"
+        if state.get("workflow_status") == "SOURCES_SAVED" else END
     )
 
 def save_fact_digest(state: ChapterWorkflowState) -> dict[str, Any]:
@@ -748,9 +797,9 @@ def save_fact_digest(state: ChapterWorkflowState) -> dict[str, Any]:
     fs = FileStore(state["novel_id"], get_settings().data_dir)
     sqlite = SQLiteStore(fs.root / "state.db")
     try:
-        raw = state.get("raw_analysis", "")
+        raw = state.get("derivation_raw_analysis", "")
         if not raw:
-            raise ValueError("raw_analysis 为空，无法提取 Fact Digest")
+            raise ValueError("derivation_raw_analysis 为空，无法提取 Fact Digest")
         digest = StateManager(
             state["novel_id"], sqlite
         ).extract_fact_digest_from_analysis(raw, state["chapter_index"])
@@ -794,7 +843,27 @@ def save_fact_digest(state: ChapterWorkflowState) -> dict[str, Any]:
 
 
 def _route_after_fact_digest(state: ChapterWorkflowState) -> str:
-    return "rag_index" if state.get("fact_digest_generated") is True else END
+    return (
+        "update_volume_progress"
+        if state.get("fact_digest_generated") is True else END
+    )
+
+
+def update_volume_progress(state: ChapterWorkflowState) -> dict[str, Any]:
+    """E07.9 boundary: expose the hook without closing/creating any volume."""
+    if state.get("commit_success") is not True:
+        return _derived_failure(state, "Volume Progress requires canonical prose")
+    return {
+        "volume_progress_updated": False,
+        "workflow_status": "VOLUME_PROGRESS_READY",
+    }
+
+
+def _route_after_volume_progress(state: ChapterWorkflowState) -> str:
+    return (
+        "save_chapter_sources"
+        if state.get("workflow_status") == "VOLUME_PROGRESS_READY" else END
+    )
 
 
 def rag_index(state: ChapterWorkflowState) -> dict[str, Any]:
@@ -816,7 +885,7 @@ def rag_index(state: ChapterWorkflowState) -> dict[str, Any]:
             branch_id=DEFAULT_BRANCH_ID,
             chapter_index=state["chapter_index"],
             facts=digest.atomic_facts,
-            source_path=state.get("styled_source_path", ""),
+            source_path=state.get("canonical_source_path", ""),
             digest_path=digest_rel,
         )
         if count <= 0:
@@ -824,7 +893,7 @@ def rag_index(state: ChapterWorkflowState) -> dict[str, Any]:
         return {
             "rag_facts": count,
             "rag_chunks": 0,
-            "workflow_status": "completed",
+            "workflow_status": "DERIVED_READY",
         }
     except Exception as exc:
         return {
@@ -850,13 +919,15 @@ def build_chapter_workflow(checkpointer: Any = None) -> Any:
         ("save_chapter_sources", save_chapter_sources_v2),
         ("write_draft", write_draft),
         ("style_edit", style_edit),
-        ("auto_revise_chapter", auto_revise_chapter),
+        ("agent_edit_chapter", agent_edit_chapter),
         ("save_styled", save_styled),
         ("review_chapter", review_chapter),
         ("parse_chapter_decision", parse_chapter_decision),
         ("await_human_chapter", await_human_chapter),
-        ("commit_state", commit_state),
+        ("commit_canonical_prose", commit_canonical_prose),
+        ("derive_chapter", derive_chapter),
         ("save_fact_digest", save_fact_digest),
+        ("update_volume_progress", update_volume_progress),
         ("rag_index", rag_index),
     ):
         graph.add_node(name, node)
@@ -870,7 +941,7 @@ def build_chapter_workflow(checkpointer: Any = None) -> Any:
         ("review_plan", "parse_plan_decision"),
         ("write_draft", "style_edit"),
         ("style_edit", "save_styled"),
-        ("auto_revise_chapter", "save_styled"),
+        ("agent_edit_chapter", "save_styled"),
         ("save_styled", "review_chapter"),
         ("review_chapter", "parse_chapter_decision"),
     ):
@@ -891,26 +962,38 @@ def build_chapter_workflow(checkpointer: Any = None) -> Any:
     graph.add_conditional_edges(
         "parse_chapter_decision", _route_after_chapter_decision,
         {
-            "commit_state": "commit_state",
-            "auto_revise_chapter": "auto_revise_chapter",
             "await_human_chapter": "await_human_chapter",
             END: END,
         },
     )
     graph.add_conditional_edges(
         "await_human_chapter", _route_after_human_chapter,
-        {"review_chapter": "review_chapter", END: END},
+        {
+            "commit_canonical_prose": "commit_canonical_prose",
+            "agent_edit_chapter": "agent_edit_chapter",
+            "save_styled": "save_styled",
+            "write_draft": "write_draft",
+            END: END,
+        },
     )
     graph.add_conditional_edges(
-        "commit_state", _route_after_commit,
-        {"save_chapter_sources": "save_chapter_sources", END: END},
+        "commit_canonical_prose", _route_after_commit,
+        {"derive_chapter": "derive_chapter", END: END},
     )
     graph.add_conditional_edges(
-        "save_chapter_sources", _route_after_chapter_sources,
+        "derive_chapter", _route_after_derivation,
         {"save_fact_digest": "save_fact_digest", END: END},
     )
     graph.add_conditional_edges(
         "save_fact_digest", _route_after_fact_digest,
+        {"update_volume_progress": "update_volume_progress", END: END},
+    )
+    graph.add_conditional_edges(
+        "update_volume_progress", _route_after_volume_progress,
+        {"save_chapter_sources": "save_chapter_sources", END: END},
+    )
+    graph.add_conditional_edges(
+        "save_chapter_sources", _route_after_chapter_sources,
         {"rag_index": "rag_index", END: END},
     )
     graph.add_edge("rag_index", END)
