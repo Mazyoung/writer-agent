@@ -145,26 +145,19 @@ styled chapter + planning/context
 
 PASS is necessary but not sufficient. Downstream nodes proceed only after an explicit successful `StateCommitResult` and completion marker.
 
-The atomic Structured Memory commit covers:
+The E07.8 current-state commit is:
 
 ```text
-tracking/character_relationships.md
-tracking/items_equipment.md
-tracking/cultivation_system.md
-tracking/character_states.md
-states/chapter_NNNN_completed
+one Review analysis
+  → deterministic State Delta
+  → tracking/current_state.md (generated present-state report)
+  → state.db exact projection
+  → states/chapter_NNNN_completed (with report hash)
 ```
 
-The transaction preserves ALL OLD or ALL NEW when snapshot and rollback succeed:
+`CurrentStateStore` validates and renders the complete snapshot. SQLite v2 tables are replaced transactionally from that snapshot, and exact queries repair the projection when its stored SHA-256 does not match Markdown. Legacy split tracking files/tables remain migration inputs and compatibility data, but production planning/review consume the unified report. `current_state.md` is not a direct human-edit source.
 
-1. snapshot existing files;
-2. parse/build all candidate documents in memory;
-3. write candidates;
-4. write the completion marker;
-5. roll back every written artifact if any write fails;
-6. sync rebuildable SQLite state only after Markdown success.
-
-Commit failure blocks chapter sources, Fact Digest, and RAG. Once the completion marker exists, any source-report/Fact Digest/Chroma failure is a derived-state error: it is returned and printed, but never rolls back canonical state.
+The commit preserves the old state on any pre-completion failure: Markdown, SQLite transaction, and completion marker are rolled back, and the failure blocks chapter sources, Fact Digest, and RAG. Once the marker exists, source-report/Fact Digest/Chroma failures remain visible derived-state warnings and never roll back accepted current state.
 
 ## 7. Persistence classification
 
@@ -178,23 +171,22 @@ tracking/volumes/volume_NN.md
 outlines/chapter_plan_chNNNN.md
 ```
 
-### Canonical story state
+### Canonical story state and present-state authority
 
 ```text
 chapters/chapter_NNNN_styled_*.md
-tracking/character_relationships.md
-tracking/items_equipment.md
-tracking/cultivation_system.md
-tracking/character_states.md
-states/chapter_NNNN_completed
+tracking/current_state.md          # generated/rebuild authority for “now”
+states/chapter_NNNN_completed      # includes current-state hash
 ```
+
+The four pre-E07.8 split tracking files are retained only as deterministic migration inputs for existing novels.
 
 ### Derived and diagnostic state
 
 ```text
 states/fact_digest_chNNNN_*.md
 sources/chapter_NNNN/chapter_sources.md
-state.db
+state.db                           # exact query projection of current_state.md
 ChromaDB `atomic_facts_v2` (Fact Text documents + source metadata)
 tracking/rag_traces/*.json
 states/review_chNNNN_*.md

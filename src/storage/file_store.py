@@ -160,6 +160,22 @@ class FileStore:
         """检查 tracking 文档是否存在。"""
         return self.has_canonical("tracking", name)
 
+    def load_generated_tracking_doc(self, name: str) -> Optional[str]:
+        """Read a generated report without accepting a human-edit override."""
+        path = self.root / "tracking" / f"{name}.md"
+        return path.read_text(encoding="utf-8") if path.exists() else None
+
+    def save_generated_tracking_doc(self, name: str, content: str) -> Path:
+        """Atomically replace one generated tracking report."""
+        path = self.root / "tracking" / f"{name}.md"
+        temporary = path.with_suffix(".tmp")
+        try:
+            temporary.write_text(content, encoding="utf-8")
+            temporary.replace(path)
+        finally:
+            temporary.unlink(missing_ok=True)
+        return path
+
     def load_feedback(self, prefix: str) -> Optional[str]:
         """加载人工反馈文件。"""
         return self.load_canonical("feedback", prefix)

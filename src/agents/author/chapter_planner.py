@@ -55,7 +55,8 @@ class ChapterPlanner(BaseAgent):
                      chapter_outline: str = "",
                      extra_instructions: str = "",
                      rag_evidence: str = "",
-                     chapter_intent: str = "") -> ChapterPlan:
+                     chapter_intent: str = "",
+                     current_state_text: str = "") -> ChapterPlan:
         """生成完整章规划（Part A + Part B）。
 
         消费链：Book Plan + Active Volume Plan + Memory（追踪文档/事实摘要）。
@@ -75,10 +76,17 @@ class ChapterPlanner(BaseAgent):
         world_setting = self.fs.load_canonical("settings", "world_setting") or ""
         prev_chapter_end = self._load_prev_chapter_end(chapter_index)
         fact_context = ""  # E07.7: global history enters only through retrieved FACTs.
-        rels = self.fs.load_tracking_doc("character_relationships") or ""
-        items = self.fs.load_tracking_doc("items_equipment") or ""
-        cult = self.fs.load_tracking_doc("cultivation_system") or ""
-        char_states = self.fs.load_tracking_doc("character_states") or ""
+        if not current_state_text:
+            from src.storage.current_state_store import CurrentStateStore
+            from src.storage.sqlite_store import SQLiteStore
+
+            sqlite = SQLiteStore(self.fs.root / "state.db")
+            try:
+                _state, current_state_text, _digest = CurrentStateStore(
+                    self.novel_id, self.fs, sqlite
+                ).ensure_initialized()
+            finally:
+                sqlite.close()
 
         # 构建 prompt —— 按优先级从高到低排列
         parts = []
@@ -108,16 +116,9 @@ class ChapterPlanner(BaseAgent):
             if vol_context:
                 parts.append(f"### 当前卷规划中本章对应的事件（Volume Plan）\n{vol_context}")
 
-        # 4. Actual Memory / Facts — 追踪文档 + 前章事实（Part B 原材料）
-        parts.append("## 当前追踪文档（Part B 上下文包的原材料）")
-        if rels:
-            parts.append(f"### character_relationships.md\n{rels[:3000]}")
-        if items:
-            parts.append(f"### items_equipment.md\n{items[:2000]}")
-        if cult:
-            parts.append(f"### cultivation_system.md\n{cult[:1500]}")
-        if char_states:
-            parts.append(f"### character_states.md (Authoritative Current State)\n{char_states[:1500]}")
+        # 4. Actual present state — one generated snapshot (Part B material)
+        parts.append("## 当前状态（tracking/current_state.md；Part B 原材料）")
+        parts.append(current_state_text or "暂无")
         if fact_context:
             parts.append(f"### 前章事实摘要（已发生的实际事实，优先于未来计划）\n{fact_context[:2500]}")
 
@@ -202,9 +203,16 @@ class ChapterPlanner(BaseAgent):
 
         适合在交互式规划中快速生成上下文包初稿供人工审阅。
         """
-        rels = self.fs.load_tracking_doc("character_relationships") or "暂无"
-        items = self.fs.load_tracking_doc("items_equipment") or "暂无"
-        cult = self.fs.load_tracking_doc("cultivation_system") or "暂无"
+        from src.storage.current_state_store import CurrentStateStore
+        from src.storage.sqlite_store import SQLiteStore
+
+        sqlite = SQLiteStore(self.fs.root / "state.db")
+        try:
+            _state, current_state, _digest = CurrentStateStore(
+                self.novel_id, self.fs, sqlite
+            ).ensure_initialized()
+        finally:
+            sqlite.close()
         fact_context = self._load_recent_fact_digests(chapter_index)
 
         # 提取禁止清单
@@ -228,9 +236,9 @@ class ChapterPlanner(BaseAgent):
             foreshadow = f"## 待解悬念（来自前章）\n{suspense}\n\n## 本章建议\n[待人工填写]"
 
         return ContextPackage(
-            character_relations=rels[:3000] if rels != "暂无" else rels,
-            items_tracking=items[:2000] if items != "暂无" else items,
-            cultivation_status=cult[:1500] if cult != "暂无" else cult,
+            character_relations=current_state,
+            items_tracking=current_state,
+            cultivation_status=current_state,
             foreshadow_nodes=foreshadow or "待人工填写",
             emotion_palette="待人工填写",
             forbidden_list=forbidden or "暂无",

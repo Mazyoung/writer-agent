@@ -137,13 +137,21 @@ class InteractivePlanEngine:
         prev = self._load_prev_end()
         ctx["prev_chapter_end"] = prev[-400:] if prev else "（第一章，无上一章）"
 
-        # 角色关系
-        ctx["character_relations"] = self.fs.load_tracking_doc("character_relationships") or "暂无"
+        from src.storage.current_state_store import CurrentStateStore
+        from src.storage.sqlite_store import SQLiteStore
 
-        # 物品
-        ctx["items_tracking"] = self.fs.load_tracking_doc("items_equipment") or "暂无"
+        sqlite = SQLiteStore(self.fs.root / "state.db")
+        try:
+            _state, current_state, _digest = CurrentStateStore(
+                self.fs.novel_id, self.fs, sqlite
+            ).ensure_initialized()
+        finally:
+            sqlite.close()
 
-        # 伏笔
+        ctx["character_relations"] = current_state
+        ctx["items_tracking"] = current_state
+
+        # Factual open foreshadows come from generated current state, not plans.
         ctx["pending_foreshadows"] = self._load_pending_foreshadows()
         ctx["suspense"] = self._load_suspense()
 
@@ -208,11 +216,24 @@ class InteractivePlanEngine:
         return prev or ""
 
     def _load_pending_foreshadows(self) -> str:
-        bp = self.fs.load_tracking_doc("book_plan") or ""
-        if not bp:
+        from src.storage.current_state_store import CurrentStateStore
+        from src.storage.sqlite_store import SQLiteStore
+
+        sqlite = SQLiteStore(self.fs.root / "state.db")
+        try:
+            CurrentStateStore(
+                self.fs.novel_id, self.fs, sqlite
+            ).ensure_initialized()
+            rows = sqlite.get_current_pending_foreshadows(self.fs.novel_id)
+        finally:
+            sqlite.close()
+        if not rows:
             return "暂无"
-        m = re.search(r'## 全局伏笔追踪\s*\n(.*?)(?=##|\Z)', bp, re.DOTALL)
-        return m.group(1).strip() if m else "暂无"
+        return "\n".join(
+            f"- {row['foreshadow_id']}: {row['description']} "
+            f"(上次推进: 第{row['last_progress_chapter']}章)"
+            for row in rows
+        )
 
     def _load_suspense(self) -> str:
         parts = []

@@ -18,8 +18,9 @@ from src.storage.document_formats import (
     FactDigest, CharacterRelationships, ItemsEquipment, CultivationSystem,
     RelationshipChange, RelationshipEntry, ItemLog, ItemEntry, CharacterCultivation,
     CharacterStateEntry, CharacterStateList,
-    ReviewDecision, StateCommitResult, _extract_section,
+    ReviewDecision, StateCommitResult, StateDelta, _extract_section,
 )
+from src.storage.current_state_store import CurrentStateStore
 from src.storage.sqlite_store import SQLiteStore
 
 
@@ -37,7 +38,7 @@ def _number_chapter_paragraphs(text: str) -> str:
 class StateManager(BaseAgent):
     """章节后状态分析 + 追踪文档更新 + 审阅决策（E06）"""
 
-    def __init__(self, novel_id: str, sqlite: SQLiteStore):
+    def __init__(self, novel_id: str, sqlite: Optional[SQLiteStore] = None):
         super().__init__("state_manager", novel_id, "state_manager.txt")
         self.sqlite = sqlite
         from src.config.settings import get_settings
@@ -52,7 +53,8 @@ class StateManager(BaseAgent):
                        current_character_states: str = "",
                        world_setting: str = "",
                        book_plan_text: str = "",
-                       volume_plan_text: str = "") -> dict:
+                       volume_plan_text: str = "",
+                       current_state_text: str = "") -> dict:
         """E06.1: 分析章节 + 战略上下文，返回结构化结果。
 
         Args:
@@ -88,20 +90,23 @@ class StateManager(BaseAgent):
 
         parts.append(f"## 章规划（用于对比）\n{chapter_plan_text or '暂无'}\n\n---")
 
-        parts.append("## 当前追踪文档\n")
-
-        parts.append(f"### character_relationships.md\n"
-                     f"{current_relationships or '暂无'}")
-
-        parts.append(f"### items_equipment.md\n"
-                     f"{current_items or '暂无'}")
-
-        parts.append(f"### cultivation_system.md\n"
-                     f"{current_cultivation or '暂无'}")
-
-        if current_character_states:
-            parts.append(f"### character_states.md\n"
-                         f"{current_character_states}")
+        if current_state_text:
+            parts.append(
+                "## Current State（当前权威状态；只输出本章 State Delta）\n"
+                f"{current_state_text}"
+            )
+        else:
+            # Compatibility for direct legacy callers. Production supplies the
+            # one generated Current State report.
+            parts.append("## 当前追踪文档（legacy compatibility）\n")
+            parts.append(f"### character_relationships.md\n"
+                         f"{current_relationships or '暂无'}")
+            parts.append(f"### items_equipment.md\n"
+                         f"{current_items or '暂无'}")
+            parts.append(f"### cultivation_system.md\n"
+                         f"{current_cultivation or '暂无'}")
+            if current_character_states:
+                parts.append(f"### character_states.md\n{current_character_states}")
 
         parts.append("---\n请按输出格式分析本章。")
 
@@ -184,14 +189,44 @@ class StateManager(BaseAgent):
         return rd
 
     def update_tracking_docs(self, chapter_index: int, chapter_text: str,
-                             analysis_text: str) -> dict:
-        """E06.1: 原子化更新追踪文档。
+                             analysis_text: str, expected_state_sha256: str = "",
+                             chapter_title: str = "",
+                             styled_source_path: str = "") -> dict:
+        """Apply one reviewed State Delta to Markdown and SQLite deterministically."""
+        if self.sqlite is None:
+            return {"_commit_result": StateCommitResult(
+                success=False, error_message="SQLiteStore is required for Current State commit")}
+        try:
+            store = CurrentStateStore(self.novel_id, self.fs, self.sqlite)
+            base, _text, actual_sha256 = store.ensure_initialized()
+            if expected_state_sha256 and actual_sha256 != expected_state_sha256:
+                return {"_commit_result": StateCommitResult(
+                    success=False,
+                    error_message=(
+                        "Current State base hash changed during checkpointed execution"),
+                )}
+            delta = StateDelta.from_analysis(analysis_text)
+            candidate = store.apply_delta(
+                base, delta, chapter_index, chapter_title,
+                len(re.sub(r"\s+", "", chapter_text)), styled_source_path,
+            )
+            commit_result = store.commit(
+                expected_state_sha256 or actual_sha256, candidate)
+        except Exception as exc:
+            commit_result = StateCommitResult(
+                success=False,
+                error_message=f"State Delta/current-state apply failed: "
+                              f"{type(exc).__name__}: {exc}",
+            )
+        return {
+            "updated_current_state": commit_result.success,
+            "change_log": f"## 第{chapter_index}章 Current State 更新",
+            "_commit_result": commit_result,
+        }
 
-        LOAD → PARSE ALL → BUILD IN MEMORY → VALIDATE → COMMIT ALL
-
-        不会因中间 parse/apply 异常形成半提交。
-        所有 canonical tracking docs 在所有 delta 解析成功后一次性保存。
-        """
+    def _legacy_update_tracking_docs(self, chapter_index: int, chapter_text: str,
+                                     analysis_text: str) -> dict:
+        """Historical E06 implementation retained for migration tooling only."""
         changes = {"updated_rels": False, "updated_items": False,
                     "updated_cult": False, "updated_character_states": False,
                     "change_log": ""}

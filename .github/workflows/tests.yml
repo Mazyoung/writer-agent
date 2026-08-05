@@ -36,34 +36,20 @@ jobs:
         run: python -m compileall -q main.py src
 
       # These are deterministic, API-free tests that still match the current
-      # post-Orchestrator chapter workflow. Legacy and resource-heavy suites
-      # are intentionally not part of the push/PR smoke gate.
+      # post-Orchestrator architecture. Legacy and resource-heavy suites are
+      # intentionally not part of the push/PR smoke gate.
       - name: Run fast regression tests
         run: |
           python -m pytest -q \
             tests/test_chapter_plan.py \
             tests/test_planning_foundation.py \
-            tests/test_e06.py::TestItemCurrentStateUpdate \
-            tests/test_e06.py::TestRelationshipCurrentStateUpdate \
-            tests/test_e06.py::TestForeshadowingStateUpdate \
             tests/test_e06.py::TestReviewDecisionParsing \
             tests/test_e06.py::TestStateManagerParseDecision \
             tests/test_e06.py::TestPromptParserContract \
             tests/test_e06.py::TestFailClosedDecisionContract \
-            tests/test_e06.py::TestAtomicCommitBoundary \
             tests/test_e06.py::TestCharacterStateRoundTrip \
-            tests/test_e06.py::TestCharacterStateDeltaParsing \
-            tests/test_e06.py::TestAtomicRollback \
             tests/test_e06.py::TestStateCommitResultPropagation \
             tests/test_e06.py::TestSnapshotFailureFailClosed \
-            tests/test_e06.py::TestParseFailureSetsCommitResult \
-            tests/test_e06.py::TestMarkdownFailureSqliteNotCalled \
-            tests/test_e06.py::TestMarkdownSuccessSqliteFailure \
-            tests/test_e07.py::TestChapterWorkflowState \
-            tests/test_e07.py::TestE07_2_PassHappyPath \
-            tests/test_e07.py::TestE07_2_RealCommitFailureGraphInvoke \
-            tests/test_e07.py::TestE07_2_RetrievalService \
-            tests/test_e07.py::TestE07_2_FactDigestObservability \
-            tests/test_e07.py::TestE07_2_CommitFailureBlocksDownstream \
-            tests/test_e07.py::TestE07_2_RAGFailureNoRollback \
-            tests/test_e07.py::TestE07_2_StyledChapterOnce
+            tests/test_e07_6.py \
+            tests/test_e07_7.py \
+            tests/test_e07_8.py

@@ -29,7 +29,7 @@ Current components:
 - `ChapterWorkflowRunner` — persistent SQLite checkpoint/resume boundary
 - `ChapterRetrievalService` — deterministic retrieval query, evidence, and trace lifecycle
 - scoped services for initialization, standalone planning/editing, status, and RAG maintenance
-- `FileStore`, `SQLiteStore`, and `AtomicFactStore` — canonical files, rebuildable cache state, and fact-only vector retrieval
+- `FileStore`, `CurrentStateStore`, `SQLiteStore`, and `AtomicFactStore` — canonical/generated Markdown, exact present-state projection, and fact-only vector retrieval
 
 ## Data flow
 
@@ -55,7 +55,7 @@ Completed volumes can be archived under `tracking/volumes/` by the explicit `new
 ### Chapter execution
 
 ```text
-START → preflight → load_chapter_intent → plan_chapter
+START → preflight → load_current_state → load_chapter_intent → plan_chapter
   → review_plan → parse_plan_decision
       PASS → write_draft → style_edit → save_styled
         → review_chapter #1 → parse_chapter_decision
@@ -89,16 +89,16 @@ NEEDS_REVISION / HALT / UNKNOWN
   → no RAG indexing
 ```
 
-The atomic commit covers:
+The E07.8 current-state commit covers:
 
-- `tracking/character_relationships.md`
-- `tracking/items_equipment.md`
-- `tracking/cultivation_system.md`
-- `tracking/character_states.md`
-- the chapter completion marker
+- the deterministic State Delta parsed from the same Review analysis;
+- `tracking/current_state.md`, a complete generated present-state report;
+- exact current-state tables in `state.db` (characters, relationships, items, cultivation, foreshadows, and current chapter metadata);
+- the chapter completion marker, including the current-state hash.
 
-Fact Digests are derived from the review analysis without another LLM call and persist Atomic Facts as Markdown records containing FACT-ID, chapter, type, entities, paragraph range, and Fact Text. `sources/chapter_NNNN/chapter_sources.md` records the approved plan's actual intent/planning sources, adopted FACT IDs, curated future constraints, and expanded prose locations.
-SQLite and Chroma are derived or rebuildable state; canonical Markdown remains the story-state source of truth. Post-commit Fact Digest, source-report, or Chroma failure never removes the completion marker and is printed as a derived-state error.
+`current_state.md` is the rebuild authority and is not a direct human-edit production surface. SQLite provides exact, novel-isolated queries and is automatically rebuilt when its stored Markdown hash is stale. Existing novels are migrated deterministically from the four legacy split tracking files plus factual legacy SQLite foreshadows; legacy files and tables are retained for compatibility.
+
+Fact Digests are derived from the same Review analysis without another LLM call and persist Atomic Facts as Markdown records containing FACT-ID, chapter, type, entities, paragraph range, and Fact Text. `sources/chapter_NNNN/chapter_sources.md` records the approved plan's actual intent/planning sources, adopted FACT IDs, curated future constraints, and expanded prose locations. Fact Digest and Chroma describe history; `current_state.md` and SQLite describe what is true now. Post-commit Fact Digest, source-report, or Chroma failure never removes the completion marker and is printed as a derived-state error.
 
 ### RAG
 

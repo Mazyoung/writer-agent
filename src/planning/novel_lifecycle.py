@@ -7,8 +7,10 @@ from src.core.novel_status import NovelStatusService
 from src.planning.models import PlanRevision, PlanType, RevisionStatus
 from src.planning.store import PlanningStore
 from src.planning.trigger_policy import ReplanTrigger
+from src.storage.current_state_store import CurrentStateStore
 from src.storage.document_formats import BookPlan, VolumePlan
 from src.storage.file_store import FileStore
+from src.storage.sqlite_store import SQLiteStore
 
 
 class NovelLifecycleService:
@@ -258,10 +260,19 @@ Book Plan 是整本书的长期战略，只写长期有效的内容：
             use_canonical=True,
         ).content
 
+        sqlite = SQLiteStore(self.file_store.root / "state.db")
+        try:
+            CurrentStateStore(
+                self.novel_id, self.file_store, sqlite
+            ).ensure_initialized()
+        finally:
+            sqlite.close()
+
         print(f"\n初始化完成！")
         print(f"  settings/world_setting.md")
         print(f"  tracking/book_plan.md   (Book Plan v1 / 战略层)")
         print(f"  tracking/volume_plan.md (Volume 1 Plan v1 / ACTIVE)")
+        print(f"  tracking/current_state.md (generated present state)")
         print(f"\n下一步: 人工审阅上述文件（可保存为 *_edited.md 覆盖），")
         print(f"        然后运行: python main.py plan {self.novel_id} --chapter 1")
         return {"world_setting": world_setting, "book_plan": book_plan,

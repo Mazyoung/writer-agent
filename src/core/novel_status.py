@@ -1,6 +1,7 @@
 """Read-only novel status reporting."""
 
 from src.config.settings import get_settings
+from src.storage.current_state_store import CurrentStateStore
 from src.storage.document_formats import VolumePlan
 from src.storage.file_store import FileStore
 from src.storage.sqlite_store import SQLiteStore
@@ -36,18 +37,19 @@ class NovelStatusService:
             list(chapters_dir.glob("chapter_*_styled*.md"))
         )
 
-        for doc in [
-            "character_relationships",
-            "items_equipment",
-            "cultivation_system",
-        ]:
-            status[f"has_{doc}"] = self.file_store.has_tracking_doc(doc)
+        status["has_current_state"] = self.file_store.has_tracking_doc(
+            "current_state")
 
         sqlite = SQLiteStore(self.sqlite_path)
         try:
-            status["sqlite_chapter_count"] = sqlite.get_chapter_count(self.novel_id)
+            CurrentStateStore(
+                self.novel_id, self.file_store, sqlite
+            ).ensure_initialized()
+            current_meta = sqlite.get_current_chapter_meta(self.novel_id) or {}
+            status["sqlite_chapter_count"] = int(
+                current_meta.get("chapter_index", 0))
             status["pending_foreshadows"] = len(
-                sqlite.get_pending_foreshadows(self.novel_id)
+                sqlite.get_current_pending_foreshadows(self.novel_id)
             )
         finally:
             sqlite.close()
@@ -69,8 +71,6 @@ class NovelStatusService:
                 f"全书规划: {'有' if status.get('has_book_plan') else '无'}"
             )
         print(f"已完成章节: {status['completed_chapters']}")
-        relationships = "Y" if status.get("has_character_relationships") else "N"
-        items = "Y" if status.get("has_items_equipment") else "N"
-        cultivation = "Y" if status.get("has_cultivation_system") else "N"
-        print(f"追踪文档: 角色关系{relationships} 物品装备{items} 修炼体系{cultivation}")
+        current_state = "Y" if status.get("has_current_state") else "N"
+        print(f"当前状态报告: {current_state}")
         print(f"未回收伏笔: {status['pending_foreshadows']}")

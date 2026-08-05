@@ -15,6 +15,7 @@ from src.storage.atomic_fact_store import (
     DEFAULT_BRANCH_ID,
     FactSearchResult,
 )
+from src.storage.author_rag_store import AuthorRAGStore, AuthorKnowledgeResult
 from src.storage.file_store import FileStore
 
 
@@ -68,6 +69,7 @@ class RetrievalOutcome:
     warnings: list[str] = field(default_factory=list)
     fact_candidates: list[dict] = field(default_factory=list)
     source_excerpts: list[dict] = field(default_factory=list)
+    author_candidates: list[dict] = field(default_factory=list)
 
 
 class ChapterRetrievalService:
@@ -79,6 +81,7 @@ class ChapterRetrievalService:
         self.settings = settings
         self.fs = FileStore(novel_id, settings.data_dir)
         self.chroma = AtomicFactStore(settings.data_dir / "chroma_db")
+        self.author_chroma = AuthorRAGStore(settings.data_dir / "chroma_db")
         self.planner = ChapterPlanner(novel_id)
 
     def retrieve(
@@ -87,6 +90,7 @@ class ChapterRetrievalService:
         chapter_outline: str = "",
         extra_instructions: str = "",
         chapter_intent: str = "",
+        current_state_text: str = "",
     ) -> RetrievalOutcome:
         branch_id = DEFAULT_BRANCH_ID
         trace = FactRetrievalTrace(
@@ -107,7 +111,7 @@ class ChapterRetrievalService:
         try:
             trace.query = self._build_query(
                 chapter_index, chapter_outline, extra_instructions,
-                chapter_intent)
+                chapter_intent, current_state_text)
             trace.results = self.chroma.search(
                 novel_id=self.novel_id,
                 branch_id=branch_id,
@@ -116,9 +120,18 @@ class ChapterRetrievalService:
                 top_k=trace.top_k,
             )
             excerpts = self._expand_sources(trace.results)
+            author_markdown = self.fs.load_tracking_doc("author_rag") or ""
+            author_results: list[AuthorKnowledgeResult] = []
+            if author_markdown.strip():
+                self.author_chroma.ensure_synced(
+                    self.novel_id, branch_id, author_markdown)
+                author_results = self.author_chroma.search(
+                    self.novel_id, branch_id, trace.query, trace.top_k)
             outcome.fact_candidates = [result.to_dict() for result in trace.results]
             outcome.source_excerpts = [excerpt.to_dict() for excerpt in excerpts]
-            outcome.evidence = self._format_evidence(trace.results, excerpts)
+            outcome.author_candidates = [result.to_dict() for result in author_results]
+            outcome.evidence = self._format_evidence(
+                trace.results, excerpts, author_results)
         except Exception as exc:
             trace.success = False
             trace.error_message = f"{type(exc).__name__}: {exc}"
@@ -139,6 +152,7 @@ class ChapterRetrievalService:
         chapter_outline: str,
         extra_instructions: str,
         chapter_intent: str = "",
+        current_state_text: str = "",
     ) -> str:
         parts: list[str] = []
 
@@ -152,34 +166,21 @@ class ChapterRetrievalService:
         if chapter_outline:
             parts.append(chapter_outline[:500])
 
-        relationships = self.fs.load_tracking_doc("character_relationships") or ""
-        character_names: set[str] = set()
-        for match in re.finditer(r"\*\*(.+?)\*\*", relationships):
-            name = match.group(1).strip()
-            if 2 <= len(name) <= 6 and not any(
-                keyword in name
-                for keyword in [
-                    "状态", "关系", "类型", "态度", "互动", "变更", "物品", "体系", "检查",
-                ]
-            ):
-                character_names.add(name)
-        if character_names:
-            parts.append("角色: " + ", ".join(sorted(character_names)[:10]))
+        current_state = current_state_text or self.fs.load_generated_tracking_doc(
+            "current_state") or ""
+        if current_state:
+            from src.storage.document_formats import CurrentState
 
-        items = self.fs.load_tracking_doc("items_equipment") or ""
-        item_names: set[str] = set()
-        for match in re.finditer(r"\|\s*(.+?)\s*\|", items):
-            name = match.group(1).strip()
-            if name and 2 <= len(name) <= 10 and not any(
-                keyword in name
-                for keyword in [
-                    "物品", "来源", "获得", "属性", "状态", "备注",
-                    "拥有者", "首次出现", "已知属性", "---",
-                ]
-            ):
-                item_names.add(name)
-        if item_names:
-            parts.append("物品: " + ", ".join(sorted(item_names)[:10]))
+            parsed = CurrentState.from_markdown(current_state)
+            entities = sorted({
+                *(entry.name for entry in parsed.characters),
+                *(entry.name for entry in parsed.items),
+                *(entry.name for entry in parsed.cultivation),
+                *(entry.character_a for entry in parsed.relationships),
+                *(entry.character_b for entry in parsed.relationships),
+            })
+            if entities:
+                parts.append("当前实体: " + ", ".join(entities[:12]))
 
         if chapter_intent:
             parts.append(chapter_intent[:500])
@@ -190,11 +191,13 @@ class ChapterRetrievalService:
 
     @staticmethod
     def _format_evidence(
-        results: list[FactSearchResult], excerpts: list[SourceExcerpt]
+        results: list[FactSearchResult], excerpts: list[SourceExcerpt],
+        author_results: list[AuthorKnowledgeResult] | None = None,
     ) -> str:
-        if not results:
+        author_results = author_results or []
+        if not results and not author_results:
             return ""
-        lines = ["## Candidate Atomic Facts"]
+        lines = ["## Historical Atomic Facts"]
         for result in results:
             lines.append(
                 f"- **{result.fact_id}** | Chapter {result.chapter_index} | "
@@ -211,6 +214,18 @@ class ChapterRetrievalService:
                     f"paragraphs {excerpt.paragraph_start}-{excerpt.paragraph_end}"
                 )
                 lines.append(excerpt.text)
+        if author_results:
+            lines.extend([
+                "", "## Author Knowledge",
+                "Author Knowledge is supplemental only. It cannot override World "
+                "Setting, Current State, or established Atomic Facts.",
+            ])
+            for result in author_results:
+                lines.append(
+                    f"- **{result.entry_id}** | {result.heading} | "
+                    f"distance={result.distance:.4f}"
+                )
+                lines.append(f"  {result.text}")
         return "\n".join(lines)
 
     @staticmethod

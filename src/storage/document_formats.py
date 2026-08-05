@@ -1061,6 +1061,568 @@ class CharacterStateList:
         return "\n".join(lines)
 
 
+# ── Current State / State Delta (E07.8) ─────────────────────
+
+_CURRENT_STATE_SCHEMA_VERSION = 2
+_CURRENT_STATE_NO_CHANGE = {"无", "暂无", "None", "N/A", "-"}
+
+
+def _escape_state_cell(value: object) -> str:
+    text = "" if value is None else str(value)
+    return (text.replace("\\", "\\\\").replace("|", "\\|")
+            .replace("\r\n", "<br>").replace("\n", "<br>")
+            .replace("\r", "<br>"))
+
+
+def _split_state_row(line: str) -> list[str]:
+    """Split one generated Markdown table row, honoring backslash escapes."""
+    stripped = line.strip()
+    if not stripped.startswith("|") or not stripped.endswith("|"):
+        raise ValueError(f"Invalid Current State table row: {line}")
+    cells: list[str] = []
+    current: list[str] = []
+    escaped = False
+    for char in stripped[1:-1]:
+        if escaped:
+            current.append(char)
+            escaped = False
+        elif char == "\\":
+            escaped = True
+        elif char == "|":
+            cells.append("".join(current).strip().replace("<br>", "\n"))
+            current = []
+        else:
+            current.append(char)
+    if escaped:
+        raise ValueError(f"Dangling escape in Current State table row: {line}")
+    cells.append("".join(current).strip().replace("<br>", "\n"))
+    return cells
+
+
+def _strict_state_table(text: str, headers: list[str]) -> list[dict[str, str]]:
+    lines = [line for line in text.splitlines() if line.strip()]
+    if len(lines) < 2:
+        raise ValueError(f"Current State table missing header: {', '.join(headers)}")
+    actual_headers = _split_state_row(lines[0])
+    if actual_headers != headers:
+        raise ValueError(
+            f"Current State table header mismatch: {actual_headers!r} != {headers!r}")
+    separator = _split_state_row(lines[1])
+    if len(separator) != len(headers) or any(
+        not re.fullmatch(r":?-{3,}:?", cell) for cell in separator
+    ):
+        raise ValueError("Invalid Current State table separator")
+    rows: list[dict[str, str]] = []
+    for line in lines[2:]:
+        cells = _split_state_row(line)
+        if len(cells) != len(headers):
+            raise ValueError(f"Current State row has {len(cells)} cells: {line}")
+        rows.append(dict(zip(headers, cells)))
+    return rows
+
+
+def _state_chapter(value: str, field_name: str, allow_empty: bool = True) -> int:
+    value = str(value or "").strip()
+    if not value and allow_empty:
+        return 0
+    numbers = re.findall(r"\d+", value)
+    if len(numbers) != 1:
+        raise ValueError(f"Invalid {field_name}: {value!r}")
+    return int(numbers[0])
+
+
+def _normalize_relationship_pair(character_a: str, character_b: str) -> tuple[str, str]:
+    a, b = character_a.strip(), character_b.strip()
+    if not a or not b or a == b:
+        raise ValueError(f"Invalid relationship pair: {character_a!r}, {character_b!r}")
+    return tuple(sorted((a, b)))
+
+
+@dataclass
+class CurrentCharacterState:
+    name: str = ""
+    alive_status: str = ""
+    location: str = ""
+    physical_state: str = ""
+    identity_status: str = ""
+    updated_chapter: int = 0
+
+
+@dataclass
+class CurrentRelationshipState:
+    character_a: str = ""
+    character_b: str = ""
+    relation_type: str = ""
+    current_state: str = ""
+    attitude: str = ""
+    last_interaction_chapter: int = 0
+
+    def normalized_key(self) -> tuple[str, str]:
+        return _normalize_relationship_pair(self.character_a, self.character_b)
+
+
+@dataclass
+class CurrentItemState:
+    name: str = ""
+    holder: str = ""
+    status: str = ""
+    source: str = ""
+    acquired_chapter: int = 0
+    attributes: str = ""
+    notes: str = ""
+    updated_chapter: int = 0
+
+
+@dataclass
+class CurrentCultivationState:
+    name: str = ""
+    current_stage: str = ""
+    distance_to_next: str = ""
+    special_ability: str = ""
+    limitation: str = ""
+    updated_chapter: int = 0
+
+
+@dataclass
+class CurrentForeshadowState:
+    foreshadow_id: str = ""
+    description: str = ""
+    status: str = "OPEN"
+    planted_chapter: int = 0
+    expected_resolve: str = ""
+    last_progress_chapter: int = 0
+    resolved_chapter: int = 0
+
+
+@dataclass
+class CurrentChapterMeta:
+    chapter_index: int = 0
+    title: str = ""
+    word_count: int = 0
+    styled_source_path: str = ""
+
+
+@dataclass
+class CurrentState:
+    """Complete generated report for what is true now."""
+
+    schema_version: int = _CURRENT_STATE_SCHEMA_VERSION
+    through_chapter: int = 0
+    characters: list[CurrentCharacterState] = field(default_factory=list)
+    relationships: list[CurrentRelationshipState] = field(default_factory=list)
+    items: list[CurrentItemState] = field(default_factory=list)
+    cultivation: list[CurrentCultivationState] = field(default_factory=list)
+    foreshadows: list[CurrentForeshadowState] = field(default_factory=list)
+    chapter: CurrentChapterMeta = field(default_factory=CurrentChapterMeta)
+
+    def validate(self) -> None:
+        if self.schema_version != _CURRENT_STATE_SCHEMA_VERSION:
+            raise ValueError(
+                f"Unsupported Current State schema version: {self.schema_version}")
+        if self.through_chapter < 0:
+            raise ValueError("Current State through_chapter cannot be negative")
+        if self.chapter.chapter_index < 0 or self.chapter.word_count < 0:
+            raise ValueError("Current chapter metadata cannot be negative")
+
+        def unique(values: list[str], label: str) -> None:
+            if any(not value.strip() for value in values):
+                raise ValueError(f"Current State {label} contains an empty key")
+            if len(values) != len(set(values)):
+                raise ValueError(f"Current State {label} contains duplicate keys")
+
+        unique([entry.name for entry in self.characters], "characters")
+        unique([entry.name for entry in self.items], "items")
+        unique([entry.name for entry in self.cultivation], "cultivation")
+        relation_keys = [entry.normalized_key() for entry in self.relationships]
+        if len(relation_keys) != len(set(relation_keys)):
+            raise ValueError("Current State relationships contain duplicate pairs")
+        unique([entry.foreshadow_id for entry in self.foreshadows], "foreshadows")
+        descriptions = [entry.description for entry in self.foreshadows]
+        unique(descriptions, "foreshadow descriptions")
+        for entry in self.foreshadows:
+            if not re.fullmatch(r"F\d{4,}", entry.foreshadow_id):
+                raise ValueError(f"Invalid foreshadow ID: {entry.foreshadow_id}")
+            if entry.status not in {"OPEN", "RESOLVED", "ABANDONED"}:
+                raise ValueError(f"Invalid foreshadow status: {entry.status}")
+        update_chapters = [
+            *(entry.updated_chapter for entry in self.characters),
+            *(entry.last_interaction_chapter for entry in self.relationships),
+            *(entry.updated_chapter for entry in self.items),
+            *(entry.updated_chapter for entry in self.cultivation),
+            *(entry.last_progress_chapter for entry in self.foreshadows),
+            self.chapter.chapter_index,
+        ]
+        if any(value < 0 for value in update_chapters):
+            raise ValueError("Current State chapter fields cannot be negative")
+        if any(value > self.through_chapter for value in update_chapters):
+            raise ValueError("Current State entry is newer than Through Chapter")
+
+    @staticmethod
+    def _table(headers: list[str], rows: list[list[object]]) -> list[str]:
+        return [
+            "| " + " | ".join(headers) + " |",
+            "| " + " | ".join("---" for _ in headers) + " |",
+            *("| " + " | ".join(_escape_state_cell(value) for value in row) + " |"
+              for row in rows),
+        ]
+
+    def to_markdown(self) -> str:
+        self.validate()
+        lines = [
+            "# Current State", "",
+            "> 自动生成的当前状态报告。请修改生产来源并重新派生，不要直接编辑本文件。", "",
+            f"- **Schema Version**: {self.schema_version}",
+            f"- **Through Chapter**: {self.through_chapter}", "",
+            "## Characters", "",
+        ]
+        lines.extend(self._table(
+            ["Character", "Alive", "Location", "Physical State", "Identity", "Updated Chapter"],
+            [[entry.name, entry.alive_status, entry.location, entry.physical_state,
+              entry.identity_status, entry.updated_chapter]
+             for entry in sorted(self.characters, key=lambda value: value.name)],
+        ))
+        lines.extend(["", "## Relationships", ""])
+        relationships = sorted(self.relationships, key=lambda value: value.normalized_key())
+        lines.extend(self._table(
+            ["Character A", "Character B", "Type", "Current State", "Attitude", "Last Interaction Chapter"],
+            [[*entry.normalized_key(), entry.relation_type, entry.current_state,
+              entry.attitude, entry.last_interaction_chapter]
+             for entry in relationships],
+        ))
+        lines.extend(["", "## Items", ""])
+        lines.extend(self._table(
+            ["Item", "Holder", "Status", "Source", "Acquired Chapter", "Attributes", "Notes", "Updated Chapter"],
+            [[entry.name, entry.holder, entry.status, entry.source,
+              entry.acquired_chapter, entry.attributes, entry.notes,
+              entry.updated_chapter]
+             for entry in sorted(self.items, key=lambda value: value.name)],
+        ))
+        lines.extend(["", "## Cultivation", ""])
+        lines.extend(self._table(
+            ["Character", "Stage", "Distance to Next", "Special Ability", "Limitation", "Updated Chapter"],
+            [[entry.name, entry.current_stage, entry.distance_to_next,
+              entry.special_ability, entry.limitation, entry.updated_chapter]
+             for entry in sorted(self.cultivation, key=lambda value: value.name)],
+        ))
+        lines.extend(["", "## Foreshadowing", ""])
+        lines.extend(self._table(
+            ["Foreshadow ID", "Description", "Status", "Planted Chapter", "Expected Resolve", "Last Progress Chapter", "Resolved Chapter"],
+            [[entry.foreshadow_id, entry.description, entry.status,
+              entry.planted_chapter, entry.expected_resolve,
+              entry.last_progress_chapter, entry.resolved_chapter]
+             for entry in sorted(
+                 self.foreshadows,
+                 key=lambda value: int(re.search(r"\d+", value.foreshadow_id).group()),
+             )],
+        ))
+        lines.extend(["", "## Current Chapter", ""])
+        lines.extend(self._table(
+            ["Chapter Index", "Title", "Word Count", "Styled Source"],
+            [[self.chapter.chapter_index, self.chapter.title,
+              self.chapter.word_count, self.chapter.styled_source_path]],
+        ))
+        return "\n".join(lines) + "\n"
+
+    @classmethod
+    def from_markdown(cls, text: str) -> "CurrentState":
+        if not re.search(r"^# Current State\s*$", text, re.MULTILINE):
+            raise ValueError("Current State title is missing")
+        metadata = _parse_key_value(text)
+        if "Schema Version" not in metadata or "Through Chapter" not in metadata:
+            raise ValueError("Current State metadata is incomplete")
+        try:
+            state = cls(
+                schema_version=int(metadata["Schema Version"]),
+                through_chapter=int(metadata["Through Chapter"]),
+            )
+        except ValueError as exc:
+            raise ValueError("Current State metadata is invalid") from exc
+
+        required = [
+            "## Characters", "## Relationships", "## Items", "## Cultivation",
+            "## Foreshadowing", "## Current Chapter",
+        ]
+        for header in required:
+            if not re.search(rf"^{re.escape(header)}\s*$", text, re.MULTILINE):
+                raise ValueError(f"Current State section missing: {header}")
+
+        for row in _strict_state_table(_extract_section(text, "## Characters"), [
+            "Character", "Alive", "Location", "Physical State", "Identity", "Updated Chapter",
+        ]):
+            state.characters.append(CurrentCharacterState(
+                name=row["Character"], alive_status=row["Alive"],
+                location=row["Location"], physical_state=row["Physical State"],
+                identity_status=row["Identity"],
+                updated_chapter=_state_chapter(row["Updated Chapter"], "Updated Chapter"),
+            ))
+        for row in _strict_state_table(_extract_section(text, "## Relationships"), [
+            "Character A", "Character B", "Type", "Current State", "Attitude", "Last Interaction Chapter",
+        ]):
+            state.relationships.append(CurrentRelationshipState(
+                character_a=row["Character A"], character_b=row["Character B"],
+                relation_type=row["Type"], current_state=row["Current State"],
+                attitude=row["Attitude"],
+                last_interaction_chapter=_state_chapter(
+                    row["Last Interaction Chapter"], "Last Interaction Chapter"),
+            ))
+        for row in _strict_state_table(_extract_section(text, "## Items"), [
+            "Item", "Holder", "Status", "Source", "Acquired Chapter", "Attributes", "Notes", "Updated Chapter",
+        ]):
+            state.items.append(CurrentItemState(
+                name=row["Item"], holder=row["Holder"], status=row["Status"],
+                source=row["Source"],
+                acquired_chapter=_state_chapter(row["Acquired Chapter"], "Acquired Chapter"),
+                attributes=row["Attributes"], notes=row["Notes"],
+                updated_chapter=_state_chapter(row["Updated Chapter"], "Updated Chapter"),
+            ))
+        for row in _strict_state_table(_extract_section(text, "## Cultivation"), [
+            "Character", "Stage", "Distance to Next", "Special Ability", "Limitation", "Updated Chapter",
+        ]):
+            state.cultivation.append(CurrentCultivationState(
+                name=row["Character"], current_stage=row["Stage"],
+                distance_to_next=row["Distance to Next"],
+                special_ability=row["Special Ability"], limitation=row["Limitation"],
+                updated_chapter=_state_chapter(row["Updated Chapter"], "Updated Chapter"),
+            ))
+        for row in _strict_state_table(_extract_section(text, "## Foreshadowing"), [
+            "Foreshadow ID", "Description", "Status", "Planted Chapter", "Expected Resolve", "Last Progress Chapter", "Resolved Chapter",
+        ]):
+            state.foreshadows.append(CurrentForeshadowState(
+                foreshadow_id=row["Foreshadow ID"], description=row["Description"],
+                status=row["Status"],
+                planted_chapter=_state_chapter(row["Planted Chapter"], "Planted Chapter"),
+                expected_resolve=row["Expected Resolve"],
+                last_progress_chapter=_state_chapter(row["Last Progress Chapter"], "Last Progress Chapter"),
+                resolved_chapter=_state_chapter(row["Resolved Chapter"], "Resolved Chapter"),
+            ))
+        chapter_rows = _strict_state_table(_extract_section(text, "## Current Chapter"), [
+            "Chapter Index", "Title", "Word Count", "Styled Source",
+        ])
+        if len(chapter_rows) != 1:
+            raise ValueError("Current State must contain exactly one Current Chapter row")
+        chapter = chapter_rows[0]
+        try:
+            chapter_index = int(chapter["Chapter Index"])
+            word_count = int(chapter["Word Count"])
+        except ValueError as exc:
+            raise ValueError("Current Chapter numeric metadata is invalid") from exc
+        state.chapter = CurrentChapterMeta(
+            chapter_index=chapter_index, title=chapter["Title"],
+            word_count=word_count, styled_source_path=chapter["Styled Source"],
+        )
+        state.validate()
+        return state
+
+
+@dataclass(frozen=True)
+class RelationshipDelta:
+    character_a: str
+    character_b: str
+    relation_type: str = ""
+    current_state: str = ""
+    attitude: str = ""
+
+
+@dataclass(frozen=True)
+class ItemDelta:
+    action: str
+    name: str
+    holder: str = ""
+    old_holder: str = ""
+    source: str = ""
+    status: str = ""
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class CultivationDelta:
+    name: str
+    current_stage: str = ""
+    distance_to_next: str = ""
+    special_ability: str = ""
+    limitation: str = ""
+
+
+@dataclass(frozen=True)
+class CharacterDelta:
+    name: str
+    alive_status: str = ""
+    location: str = ""
+    physical_state: str = ""
+    identity_status: str = ""
+
+
+@dataclass(frozen=True)
+class ForeshadowDelta:
+    reference: str
+    description: str = ""
+    status: str = ""
+    expected_resolve: str = ""
+    resolved_chapter: int = 0
+
+
+@dataclass(frozen=True)
+class StateDelta:
+    relationships: tuple[RelationshipDelta, ...] = ()
+    items: tuple[ItemDelta, ...] = ()
+    cultivation: tuple[CultivationDelta, ...] = ()
+    characters: tuple[CharacterDelta, ...] = ()
+    foreshadows: tuple[ForeshadowDelta, ...] = ()
+
+    @staticmethod
+    def _section_present(text: str, header: str) -> bool:
+        return bool(re.search(rf"^{re.escape(header)}\s*$", text, re.MULTILINE))
+
+    @staticmethod
+    def _changed_lines(text: str, label: str) -> list[str]:
+        meaningful: list[str] = []
+        for raw in text.splitlines():
+            line = raw.strip()
+            if not line or line.startswith("<!--"):
+                continue
+            if not line.startswith("- "):
+                raise ValueError(f"Malformed {label} State Delta line: {line}")
+            value = line[2:].strip()
+            without_evidence = re.sub(
+                r"\s*\[依据\s*[:：].*?\]\s*$", "", value).strip()
+            if without_evidence in _CURRENT_STATE_NO_CHANGE:
+                continue
+            meaningful.append(value)
+        return meaningful
+
+    @staticmethod
+    def _split_record(line: str, label: str) -> tuple[str, str]:
+        line = re.sub(r"\s*\[依据\s*[:：].*?\]\s*$", "", line).strip()
+        match = re.match(r"^(.+?)\s*[:：]\s*(.+)$", line)
+        if not match:
+            raise ValueError(f"Malformed {label} State Delta record: {line}")
+        return match.group(1).strip(), match.group(2).strip()
+
+    @staticmethod
+    def _state_kv(text: str, allowed: set[str], label: str) -> dict[str, str]:
+        parsed: dict[str, str] = {}
+        for part in re.split(r"[,，]", text):
+            part = part.strip()
+            if not part:
+                continue
+            match = re.match(r"^(.+?)\s*=\s*(.*)$", part)
+            if not match:
+                raise ValueError(f"Malformed {label} key/value: {part}")
+            key, value = match.group(1).strip(), match.group(2).strip()
+            if key not in allowed:
+                raise ValueError(f"Unknown {label} field: {key}")
+            if key in parsed:
+                raise ValueError(f"Duplicate {label} field: {key}")
+            parsed[key] = value
+        if not parsed:
+            raise ValueError(f"Empty {label} State Delta record")
+        return parsed
+
+    @classmethod
+    def from_analysis(cls, analysis_text: str) -> "StateDelta":
+        header = "## 状态变更（State Delta）"
+        delta_text = _extract_section(analysis_text, header)
+        if not delta_text.strip():
+            raise ValueError("Reviewer output missing State Delta section")
+        required = [
+            "### 角色关系当前状态", "### 角色物品状态", "### 角色修炼状态",
+            "### 角色当前状态", "### 伏笔状态",
+        ]
+        for section in required:
+            if not cls._section_present(delta_text, section):
+                raise ValueError(f"State Delta subsection missing: {section}")
+
+        relationships: list[RelationshipDelta] = []
+        seen_relationships: set[tuple[str, str]] = set()
+        rel_text = _extract_section(delta_text, "### 角色关系当前状态")
+        for line in cls._changed_lines(rel_text, "relationship"):
+            pair, values = cls._split_record(line, "relationship")
+            names = [name.strip() for name in re.split(r"\s*(?:↔|<->)\s*", pair)]
+            if len(names) != 2:
+                raise ValueError(f"Invalid relationship pair: {pair}")
+            key = _normalize_relationship_pair(*names)
+            if key in seen_relationships:
+                raise ValueError(f"Duplicate relationship State Delta: {pair}")
+            seen_relationships.add(key)
+            kv = cls._state_kv(values, {"关系类型", "当前状态", "态度"}, "relationship")
+            relationships.append(RelationshipDelta(
+                *key, kv.get("关系类型", ""), kv.get("当前状态", ""), kv.get("态度", "")))
+
+        item_text = _extract_section(delta_text, "### 角色物品状态")
+        items: list[ItemDelta] = []
+        seen_items: set[str] = set()
+        for section, action, fields in (
+            ("#### 获得", "GAIN", {"持有者", "来源", "状态"}),
+            ("#### 消耗", "CONSUME", {"旧持有者", "原因"}),
+            ("#### 失去", "LOSE", {"旧持有者", "原因"}),
+        ):
+            if not cls._section_present(item_text, section):
+                raise ValueError(f"State Delta subsection missing: {section}")
+            for line in cls._changed_lines(_extract_section(item_text, section), f"item {action}"):
+                name, values = cls._split_record(line, f"item {action}")
+                if name in seen_items:
+                    raise ValueError(f"Duplicate item State Delta: {name}")
+                seen_items.add(name)
+                kv = cls._state_kv(values, fields, f"item {action}")
+                if action == "GAIN" and not kv.get("持有者"):
+                    raise ValueError(f"Item gain missing holder: {name}")
+                items.append(ItemDelta(
+                    action=action, name=name, holder=kv.get("持有者", ""),
+                    old_holder=kv.get("旧持有者", ""), source=kv.get("来源", ""),
+                    status=kv.get("状态", ""), reason=kv.get("原因", "")))
+
+        cultivation: list[CultivationDelta] = []
+        seen_cultivation: set[str] = set()
+        for line in cls._changed_lines(
+            _extract_section(delta_text, "### 角色修炼状态"), "cultivation"
+        ):
+            name, values = cls._split_record(line, "cultivation")
+            if name in seen_cultivation:
+                raise ValueError(f"Duplicate cultivation State Delta: {name}")
+            seen_cultivation.add(name)
+            kv = cls._state_kv(values, {"当前境界", "距下一阶", "特殊能力", "限制"}, "cultivation")
+            cultivation.append(CultivationDelta(
+                name, kv.get("当前境界", ""), kv.get("距下一阶", ""),
+                kv.get("特殊能力", ""), kv.get("限制", "")))
+
+        characters: list[CharacterDelta] = []
+        seen_characters: set[str] = set()
+        for line in cls._changed_lines(
+            _extract_section(delta_text, "### 角色当前状态"), "character"
+        ):
+            name, values = cls._split_record(line, "character")
+            if name in seen_characters:
+                raise ValueError(f"Duplicate character State Delta: {name}")
+            seen_characters.add(name)
+            kv = cls._state_kv(values, {"存活", "位置", "身体状态", "身份"}, "character")
+            characters.append(CharacterDelta(
+                name, kv.get("存活", ""), kv.get("位置", ""),
+                kv.get("身体状态", ""), kv.get("身份", "")))
+
+        foreshadows: list[ForeshadowDelta] = []
+        seen_foreshadows: set[str] = set()
+        for line in cls._changed_lines(
+            _extract_section(delta_text, "### 伏笔状态"), "foreshadow"
+        ):
+            reference, values = cls._split_record(line, "foreshadow")
+            kv = cls._state_kv(
+                values, {"描述", "状态", "预计回收", "回收章节"}, "foreshadow")
+            status = kv.get("状态", "").upper()
+            if status not in {"OPEN", "RESOLVED", "ABANDONED"}:
+                raise ValueError(f"Invalid foreshadow status: {status or '<missing>'}")
+            if reference in seen_foreshadows:
+                raise ValueError(f"Duplicate foreshadow State Delta: {reference}")
+            seen_foreshadows.add(reference)
+            foreshadows.append(ForeshadowDelta(
+                reference=reference, description=kv.get("描述", ""), status=status,
+                expected_resolve=kv.get("预计回收", ""),
+                resolved_chapter=_state_chapter(kv.get("回收章节", ""), "回收章节"),
+            ))
+
+        return cls(tuple(relationships), tuple(items), tuple(cultivation),
+                   tuple(characters), tuple(foreshadows))
+
+
 # ── ReviewDecision (E06) ────────────────────────────────────
 
 from enum import Enum

@@ -32,6 +32,8 @@ class ChapterWorkflowState(TypedDict, total=False):
 
     chapter_plan_text: str
     historical_evidence: str
+    current_state_text: str
+    current_state_sha256: str
     draft_text: str
     styled_text: str
     styled_source_path: str
@@ -133,6 +135,26 @@ def preflight(state: ChapterWorkflowState) -> dict[str, Any]:
 
 
 @_guard_node
+def load_current_state(state: ChapterWorkflowState) -> dict[str, Any]:
+    """Checkpoint one validated present-state snapshot for this execution."""
+    from src.storage.current_state_store import CurrentStateStore
+
+    fs = FileStore(state["novel_id"], get_settings().data_dir)
+    sqlite = SQLiteStore(fs.root / "state.db")
+    try:
+        _current, text, digest = CurrentStateStore(
+            state["novel_id"], fs, sqlite
+        ).ensure_initialized()
+    finally:
+        sqlite.close()
+    return {
+        "current_state_text": text,
+        "current_state_sha256": digest,
+        "workflow_status": "CURRENT_STATE_LOADED",
+    }
+
+
+@_guard_node
 def load_chapter_intent(state: ChapterWorkflowState) -> dict[str, Any]:
     """Persist a supplied intent or load the existing human/canonical intent."""
     fs = FileStore(state["novel_id"], get_settings().data_dir)
@@ -163,6 +185,7 @@ def plan_chapter(state: ChapterWorkflowState) -> dict[str, Any]:
         outline,
         instructions,
         chapter_intent=intent,
+        current_state_text=state.get("current_state_text", ""),
     )
     if not retrieval.trace.success:
         return _error_result(
@@ -178,6 +201,7 @@ def plan_chapter(state: ChapterWorkflowState) -> dict[str, Any]:
         instructions,
         rag_evidence=retrieval.evidence,
         chapter_intent=intent,
+        current_state_text=state.get("current_state_text", ""),
     )
     fs = FileStore(novel_id, get_settings().data_dir)
     plan_text = fs.load_canonical(
@@ -201,20 +225,6 @@ def plan_chapter(state: ChapterWorkflowState) -> dict[str, Any]:
     }
 
 
-def _load_current_state(fs: FileStore) -> str:
-    parts = []
-    for name in (
-        "character_relationships",
-        "items_equipment",
-        "cultivation_system",
-        "character_states",
-    ):
-        text = fs.load_tracking_doc(name) or ""
-        if text:
-            parts.append(f"### {name}.md\n{text}")
-    return "\n\n".join(parts)
-
-
 @_guard_node
 def review_plan(state: ChapterWorkflowState) -> dict[str, Any]:
     """Review every generated or human-edited plan before Writer can run."""
@@ -233,7 +243,7 @@ def review_plan(state: ChapterWorkflowState) -> dict[str, Any]:
         world_setting=fs.load_canonical("settings", "world_setting") or "",
         book_plan=fs.load_tracking_doc("book_plan") or "",
         volume_plan=fs.load_tracking_doc("volume_plan") or "",
-        current_state=_load_current_state(fs),
+        current_state=state.get("current_state_text", ""),
         historical_evidence=state.get("historical_evidence", ""),
         review_attempt=attempt,
     )
@@ -478,13 +488,10 @@ def review_chapter(state: ChapterWorkflowState) -> dict[str, Any]:
             styled,
             state["chapter_index"],
             state.get("chapter_plan_text", ""),
-            fs.load_tracking_doc("character_relationships") or "",
-            fs.load_tracking_doc("items_equipment") or "",
-            fs.load_tracking_doc("cultivation_system") or "",
-            current_character_states=fs.load_tracking_doc("character_states") or "",
             world_setting=fs.load_canonical("settings", "world_setting") or "",
             book_plan_text=fs.load_tracking_doc("book_plan") or "",
             volume_plan_text=fs.load_tracking_doc("volume_plan") or "",
+            current_state_text=state.get("current_state_text", ""),
         )
     finally:
         sqlite.close()
@@ -658,8 +665,15 @@ def commit_state(state: ChapterWorkflowState) -> dict[str, Any]:
     fs = FileStore(state["novel_id"], get_settings().data_dir)
     sqlite = SQLiteStore(fs.root / "state.db")
     try:
+        from src.storage.document_formats import ChapterPlan
+
+        chapter_plan = ChapterPlan.from_markdown(
+            state.get("chapter_plan_text", ""))
         changes = StateManager(state["novel_id"], sqlite).update_tracking_docs(
-            state["chapter_index"], styled, raw
+            state["chapter_index"], styled, raw,
+            expected_state_sha256=state.get("current_state_sha256", ""),
+            chapter_title=chapter_plan.title,
+            styled_source_path=state.get("styled_source_path", ""),
         )
     finally:
         sqlite.close()
@@ -827,6 +841,7 @@ def build_chapter_workflow(checkpointer: Any = None) -> Any:
     graph = StateGraph(ChapterWorkflowState)
     for name, node in (
         ("preflight", preflight),
+        ("load_current_state", load_current_state),
         ("load_chapter_intent", load_chapter_intent),
         ("plan_chapter", plan_chapter),
         ("review_plan", review_plan),
@@ -848,7 +863,8 @@ def build_chapter_workflow(checkpointer: Any = None) -> Any:
 
     graph.add_edge(START, "preflight")
     for node, target in (
-        ("preflight", "load_chapter_intent"),
+        ("preflight", "load_current_state"),
+        ("load_current_state", "load_chapter_intent"),
         ("load_chapter_intent", "plan_chapter"),
         ("plan_chapter", "review_plan"),
         ("review_plan", "parse_plan_decision"),
