@@ -67,33 +67,39 @@ outlines/chapter_plan_chNNNN.md
 ## 4. Full chapter workflow
 
 ```text
-START
-  → preflight
-  → plan_chapter
-  → write_draft
-  → style_edit
-  → save_styled
-  → review_chapter
-  → parse_decision
-      PASS                 → commit_state
-      NEEDS_REVISION/HALT  → await_human_review → interrupt()
-                              → Command(resume=...) → STOPPED_NON_PASS → END
-      UNKNOWN/error        → END
+START → preflight → load_chapter_intent → plan_chapter
+  → review_plan → parse_plan_decision
+      PASS → write_draft → style_edit → save_styled
+        → review_chapter #1 → parse_chapter_decision
+            PASS → commit_state
+            NEEDS_REVISION (L1, allowance available)
+              → auto_revise_chapter → save_styled
+              → review_chapter #2 → parse_chapter_decision
+                  PASS → commit_state
+                  non-PASS → await_human_chapter → interrupt()
+                      human prose edit → review_chapter #1
+      non-PASS → await_human_plan → interrupt()
+          human plan edit → review_plan
   → commit success → save_fact_digest → rag_index → END
-  → commit/digest error                         → END
+  → UNKNOWN/runtime/commit/digest error → END
 ```
 
 Node ownership:
 
 | Node | Existing business owner |
 |---|---|
+| `load_chapter_intent` | `FileStore`; optional canonical/human intent |
 | `plan_chapter` | `ChapterRetrievalService` + `ChapterPlanner` |
-| `write_draft` | `DeepSeekWriter` |
+| `review_plan` | `PlanReviewer` |
+| `parse_plan_decision` | `ReviewDecision.from_analysis` |
+| `await_human_plan` | LangGraph `interrupt()`; edited plan returns to Plan Review |
+| `write_draft` | `DeepSeekWriter`; approved Chapter Plan boundary |
 | `style_edit` | `ClaudeStylist` |
+| `auto_revise_chapter` | `DeepSeekWriter.revise_chapter`; deterministic ×1 allowance |
 | `save_styled` | `FileStore` + `StyleChecker` |
 | `review_chapter` | `StateManager.review_chapter` |
-| `parse_decision` | `ReviewDecision.from_analysis` |
-| `await_human_review` | LangGraph `interrupt()`; E07.5 acknowledgment only |
+| `parse_chapter_decision` | `ReviewDecision.from_analysis` |
+| `await_human_chapter` | LangGraph `interrupt()`; edited prose starts Review #1 |
 | `commit_state` | `StateManager.update_tracking_docs` |
 | `save_fact_digest` | `StateManager.extract_fact_digest_from_analysis` |
 | `rag_index` | `ChromaStore.index_chapter` |

@@ -198,21 +198,24 @@ def cmd_write(args):
 
     resume_feedback = getattr(args, "resume", None)
     try:
-        if resume_feedback is not None:
+        if getattr(args, "stop", False):
             result = resume_chapter_workflow(
                 args.name,
                 args.chapter,
-                {
-                    "action": "acknowledge",
-                    "feedback": resume_feedback,
-                },
+                {"action": "stop", "feedback": resume_feedback or ""},
+            )
+        elif resume_feedback is not None:
+            result = resume_chapter_workflow(
+                args.name,
+                args.chapter,
+                {"action": "edit", "feedback": resume_feedback},
             )
         else:
             result = run_chapter_workflow(
                 args.name,
                 args.chapter,
                 chapter_outline=getattr(args, "outline", "") or "",
-                extra_instructions=getattr(args, "instructions", "") or "",
+                chapter_intent=getattr(args, "chapter_intent", "") or "",
             )
     except ValueError as exc:
         print(f"\n  Chapter workflow resume rejected: {exc}")
@@ -228,12 +231,18 @@ def cmd_write(args):
         for pending in result.get("interrupts", []):
             payload = pending.get("value", {})
             print(f"  Interrupt ID: {pending.get('id', '')}")
+            print(f"  Type: {payload.get('type', 'unknown')}")
             print(f"  Planning level: {payload.get('planning_level', 'L1')}")
+            print(f"  Edit file: {payload.get('edit_path', '')}")
             for reason in payload.get("reasons", [])[:5]:
                 print(f"    - {reason}")
         print(
-            "  Resume with: python main.py write "
+            "  Save the human edit above, then resume with: python main.py write "
             f"{args.name} --chapter {args.chapter} --resume \"<人工反馈>\""
+        )
+        print(
+            "  Or stop this execution with: python main.py write "
+            f"{args.name} --chapter {args.chapter} --stop"
         )
         return
     if status == "STOPPED_NON_PASS":
@@ -298,7 +307,13 @@ def main():
     # write
     p = subparsers.add_parser("write", help="运行或恢复完整章节 LangGraph workflow")
     p.add_argument("name"); p.add_argument("--chapter", type=int, required=True)
-    p.add_argument("--resume", help="确认 NEEDS_REVISION/HALT，并记录人工反馈")
+    p.add_argument("--outline", help="兼容入口：指定本章事件概要")
+    p.add_argument(
+        "--intent", "--instructions", dest="chapter_intent",
+        help="可选 Chapter Intent（--instructions 为兼容别名）",
+    )
+    p.add_argument("--resume", help="提交人工编辑并记录反馈")
+    p.add_argument("--stop", action="store_true", help="停止当前等待人工处理的执行")
 
     # style
     p = subparsers.add_parser("style", help="Claude风格编辑")

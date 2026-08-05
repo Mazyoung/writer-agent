@@ -55,21 +55,23 @@ Completed volumes can be archived under `tracking/volumes/` by the explicit `new
 ### Chapter execution
 
 ```text
-START
-  → preflight
-  → plan_chapter
-  → write_draft
-  → style_edit
-  → save_styled
-  → review_chapter
-  → parse_decision
-      PASS                 → commit_state → save_fact_digest → rag_index → END
-      NEEDS_REVISION/HALT  → await_human_review → interrupt()
-                              → Command(resume=...) → STOPPED_NON_PASS → END
-      UNKNOWN/error        → END
+START → preflight → load_chapter_intent → plan_chapter
+  → review_plan → parse_plan_decision
+      PASS → write_draft → style_edit → save_styled
+        → review_chapter #1 → parse_chapter_decision
+            PASS → commit_state → save_fact_digest → rag_index → END
+            NEEDS_REVISION (L1) → auto_revise_chapter (once)
+              → save_styled → review_chapter #2
+                  PASS → commit path
+                  non-PASS → await_human_chapter → interrupt()
+                      human prose edit → review_chapter #1
+      non-PASS → await_human_plan → interrupt()
+          human plan edit → review_plan again
+
+UNKNOWN/malformed decisions and runtime/API/database/disk errors → error → END
 ```
 
-`ChapterWorkflowRunner` maps each novel/chapter pair to a deterministic LangGraph `thread_id` and persists execution checkpoints in `workflow_checkpoints.sqlite`. Checkpoints recover workflow execution position and pending human interrupts; they do not replace canonical story state or implement story rollback. E07.5 resume records the human response and stops the non-PASS chapter. Automatic revision remains E07.6 work.
+`ChapterWorkflowRunner` maps each novel/chapter pair to a deterministic LangGraph `thread_id` and persists execution checkpoints in `workflow_checkpoints.sqlite`. Human resume stays on that thread: a plan edit is reviewed again before Writer, while a prose edit starts a fresh Review #1 cycle with one renewed automatic revision allowance. Checkpoints recover workflow execution position and pending interrupts; they do not replace canonical story state or implement story rollback.
 
 ### Review and memory
 
@@ -113,11 +115,16 @@ python main.py init my_novel --confirm
 # Optional standalone planning; write also plans inside the full workflow
 python main.py plan my_novel --chapter 1
 
-# Full checkpointed chapter workflow
-python main.py write my_novel --chapter 1
+# Full checkpointed chapter workflow, optionally with Chapter Intent
+python main.py write my_novel --chapter 1 --intent "推进人物和解，但不能揭露终局"
 
-# If review pauses on NEEDS_REVISION/HALT, acknowledge it with human feedback
-python main.py write my_novel --chapter 1 --resume "需要调整人物动机后重写"
+# If Plan Review pauses, edit outlines/chapter_plan_ch0001_edited.md.
+# If Chapter Review pauses, edit chapters/chapter_0001_styled_edited.md.
+# Then resume the same checkpoint with optional feedback:
+python main.py write my_novel --chapter 1 --resume "已按审阅意见修改"
+
+# Or explicitly terminate the paused non-PASS execution
+python main.py write my_novel --chapter 1 --stop
 
 python main.py status my_novel
 ```

@@ -24,6 +24,7 @@ AGENT_MODEL_MAP = {
     "deepseek_writer":    AgentModelConfig(model="pro", thinking=False, temperature=0.9),
 
     # 质量层
+    "plan_reviewer":      AgentModelConfig(model="flash", thinking=True, temperature=0.3),
     "state_manager":      AgentModelConfig(model="flash", thinking=True, temperature=0.3),
 }
 

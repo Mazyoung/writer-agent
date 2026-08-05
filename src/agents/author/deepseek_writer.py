@@ -36,6 +36,32 @@ class DeepSeekWriter(BaseAgent):
         )
         return result.content
 
+    def revise_chapter(self, chapter_plan: ChapterPlan, chapter_text: str,
+                       review_reasons: list[str],
+                       t1_issues: list[str]) -> str:
+        """Apply one L1 prose revision without loading future plans."""
+        issues = [*t1_issues, *review_reasons]
+        issue_text = "\n".join(f"- {issue}" for issue in issues if issue.strip())
+        prompt = f"""## 已通过审阅的 Chapter Plan
+{chapter_plan.to_markdown()}
+
+## 待修订正文
+{chapter_text}
+
+## 必须修复的问题
+{issue_text or '- 修复审阅指出的正文问题'}
+
+---
+只修订当前正文以解决以上 L1 问题。不得修改 Chapter Plan，不得新增规划外事件，
+不得推测或引入 Book Plan / Volume Plan 中未出现在 Chapter Plan 的未来剧情。
+直接输出完整修订正文，不写说明。"""
+        result = self.run(
+            user_message=prompt,
+            save_category="chapters",
+            save_prefix=f"chapter_{chapter_plan.chapter_index:04d}_revision",
+        )
+        return result.content
+
     def write_scene(self, scene: SceneSpec, chapter_plan: ChapterPlan,
                     prev_scene_end: str = "",
                     completed_scenes: list[str] | None = None) -> str:

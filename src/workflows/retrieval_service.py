@@ -45,6 +45,7 @@ class ChapterRetrievalService:
         chapter_index: int,
         chapter_outline: str = "",
         extra_instructions: str = "",
+        chapter_intent: str = "",
     ) -> RetrievalOutcome:
         branch_id = DEFAULT_BRANCH_ID
         trace = RetrievalTrace(
@@ -64,7 +65,8 @@ class ChapterRetrievalService:
 
         try:
             trace.query = self._build_query(
-                chapter_index, chapter_outline, extra_instructions)
+                chapter_index, chapter_outline, extra_instructions,
+                chapter_intent)
             trace.results = self.chroma.search(
                 novel_id=self.novel_id,
                 branch_id=branch_id,
@@ -92,6 +94,7 @@ class ChapterRetrievalService:
         chapter_index: int,
         chapter_outline: str,
         extra_instructions: str,
+        chapter_intent: str = "",
     ) -> str:
         parts: list[str] = []
 
@@ -134,6 +137,8 @@ class ChapterRetrievalService:
         if item_names:
             parts.append("物品: " + ", ".join(sorted(item_names)[:10]))
 
+        if chapter_intent:
+            parts.append(chapter_intent[:500])
         if extra_instructions:
             parts.append(extra_instructions[:500])
 

@@ -54,7 +54,8 @@ class ChapterPlanner(BaseAgent):
     def plan_chapter(self, chapter_index: int,
                      chapter_outline: str = "",
                      extra_instructions: str = "",
-                     rag_evidence: str = "") -> ChapterPlan:
+                     rag_evidence: str = "",
+                     chapter_intent: str = "") -> ChapterPlan:
         """生成完整章规划（Part A + Part B）。
 
         消费链：Book Plan + Active Volume Plan + Memory（追踪文档/事实摘要）。
@@ -62,6 +63,7 @@ class ChapterPlanner(BaseAgent):
         → Actual Memory/Facts → Recent Chapter Context → 本章任务。
 
         E04: rag_evidence 来自 ChromaDB 历史检索结果，注入【历史检索证据（RAG）】区域。
+        E07.6: chapter_intent 是可选的人类本章创作意图，独立于兼容参数。
         """
         # 硬性依赖：长期规划（缺失即明确报错）
         book_plan, volume_plan = self._require_long_term_plans()
@@ -119,6 +121,8 @@ class ChapterPlanner(BaseAgent):
             parts.append(f"### [必读] 上一章结尾\n{prev_chapter_end[-800:]}")
 
         # 6. 本章任务层
+        if chapter_intent:
+            parts.append(f"## Chapter Intent（作者本章创作意图）\n{chapter_intent}")
         if extra_instructions:
             parts.append(f"## 作者额外指示\n{extra_instructions}")
 
