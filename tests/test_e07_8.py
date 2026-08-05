@@ -325,9 +325,10 @@ class TestWorkflowContext(E078Case):
         self.fs.save_tracking_doc("volume_plan", "VOLUME")
         marker = "CURRENT_STATE_MARKER_7812"
         with patch(
-            "src.agents.author.plan_reviewer.PlanReviewer.review_plan",
-            return_value="## 审阅决策\n- **决策**: PASS",
-        ) as review:
+            "src.agents.author.plan_reviewer.PlanReviewer",
+        ) as reviewer_class:
+            review = reviewer_class.return_value.review_plan
+            review.return_value = "## 审阅决策\n- **决策**: PASS"
             review_plan({
                 "novel_id": self.novel_id, "chapter_index": 1,
                 "chapter_plan_text": "PLAN", "current_state_text": marker,
