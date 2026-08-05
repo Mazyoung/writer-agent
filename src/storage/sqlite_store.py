@@ -197,7 +197,7 @@ class SQLiteStore:
         self.conn.execute(
             "INSERT INTO current_chapter_meta VALUES (?,?,?,?,?)",
             (novel_id, state.chapter.chapter_index, state.chapter.title,
-             state.chapter.word_count, state.chapter.styled_source_path),
+             state.chapter.word_count, state.chapter.canonical_source_path),
         )
         self.conn.execute(
             "INSERT INTO current_state_meta VALUES (?,?,?,?,?)",

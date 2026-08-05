@@ -160,10 +160,7 @@ class ChapterRetrievalService:
 
         volume_plan = self.fs.load_tracking_doc("volume_plan") or ""
         if volume_plan:
-            volume_context = self.planner._extract_chapter_from_volume(
-                volume_plan, chapter_index)
-            if volume_context:
-                parts.append(volume_context[:1000])
+            parts.append(volume_plan[:1000])
 
         if chapter_outline:
             parts.append(chapter_outline[:500])

@@ -210,6 +210,45 @@ class ChapterWorkflowRunner:
             connection.close()
 
 
+    def repair_derivation(self) -> dict[str, Any]:
+        """Resume only the first incomplete post-canonical derivation stage."""
+        connection, _checkpointer, graph = self._open_graph()
+        try:
+            snapshot = graph.get_state(self.config)
+            values = dict(snapshot.values)
+            if not self.file_store.canonical_chapter_path(self.chapter_index).exists():
+                raise ValueError("Repair Derivation requires canonical prose")
+            if not values or values.get("commit_success") is not True:
+                raise ValueError("No canonical chapter checkpoint is available for repair")
+            if values.get("workflow_status") == "DERIVED_READY":
+                return values
+            if values.get("workflow_status") != "DERIVATION_ERROR":
+                raise ValueError("Chapter checkpoint is not in DERIVATION_ERROR")
+
+            if not values.get("derivation_raw_analysis"):
+                as_node, status = "commit_canonical_prose", "CANONICAL_COMMITTED"
+            elif values.get("current_state_persisted") is not True:
+                as_node, status = "derive_semantics", "SEMANTICS_DERIVED"
+            elif values.get("fact_digest_generated") is not True:
+                as_node, status = "persist_current_state", "CURRENT_STATE_PERSISTED"
+            elif values.get("volume_progress_updated") is not True:
+                as_node, status = "persist_fact_digest", "FACT_DIGEST_PERSISTED"
+            elif not values.get("chapter_sources_path"):
+                as_node, status = "persist_volume_progress", "VOLUME_PROGRESS_PERSISTED"
+            else:
+                as_node, status = "persist_chapter_sources", "CHAPTER_SOURCES_PERSISTED"
+
+            graph.update_state(
+                self.config,
+                {"workflow_status": status, "error": None},
+                as_node=as_node,
+            )
+            print(f"  [LangGraph] Repairing derivation after: {as_node}")
+            return self._result_or_interrupt(
+                graph, graph.invoke(None, config=self.config)
+            )
+        finally:
+            connection.close()
 def run_chapter_workflow(
     novel_id: str,
     chapter_index: int,
@@ -230,3 +269,7 @@ def resume_chapter_workflow(
     resume_value: dict[str, Any],
 ) -> dict[str, Any]:
     return ChapterWorkflowRunner(novel_id, chapter_index).resume(resume_value)
+
+
+def repair_chapter_derivation(novel_id: str, chapter_index: int) -> dict[str, Any]:
+    return ChapterWorkflowRunner(novel_id, chapter_index).repair_derivation()

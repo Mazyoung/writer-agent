@@ -85,7 +85,7 @@ class ClosureCase(unittest.TestCase):
 
 class TestRoutingInvariants(ClosureCase):
     def test_pass_and_fail_both_require_human_decision(self):
-        for verdict in ("PASS", "NEEDS_REVISION", "HALT"):
+        for verdict in ("PASS", "NEEDS_REVISION"):
             self.assertEqual(_route_after_chapter_decision({
                 "workflow_status": f"DECISION_{verdict}",
                 "verdict": verdict,

@@ -11,7 +11,7 @@
     python main.py plan <小说名> --chapter N --instructions "..."  # 额外指示
 
     # 新卷（Rolling Horizon）
-    python main.py new-volume <小说名>              # 当前卷归档 COMPLETED → 生成下一卷 ACTIVE 规划
+    python main.py new-volume <小说名>              # 人工 close 后生成下一卷 DRAFT，直接编辑后 approve
     python main.py new-volume <小说名> --volume 3 --notes "..."  # 指定卷号 + 补充指示
 
     # 写作
@@ -42,6 +42,7 @@ from src.storage.file_store import FileStore
 from src.storage.rag_maintenance_v2 import RAGMaintenanceService
 from src.workflows.chapter_editing import ChapterEditingService
 from src.workflows.chapter_runner import (
+    repair_chapter_derivation,
     resume_chapter_workflow,
     run_chapter_workflow,
 )
@@ -148,7 +149,7 @@ def _cmd_plan_interactive(planning, args):
     print(f"  交互式章规划 — 第 {args.chapter} 章")
     print(f"{'='*60}")
     print(f"\n  已加载:")
-    has_vp = bool(ctx.get('volume_event') and not ctx['volume_event'].startswith('（'))
+    has_vp = bool(ctx.get('volume_plan') and not ctx['volume_plan'].startswith('（'))
     has_rels = bool(ctx.get('character_relations') and ctx['character_relations'] != '暂无')
     has_items = bool(ctx.get('items_tracking') and ctx['items_tracking'] != '暂无')
     print(f"    卷规划: {'Y' if has_vp else 'N'}  角色关系: {'Y' if has_rels else 'N'}  物品: {'Y' if has_items else 'N'}")
@@ -276,6 +277,34 @@ def cmd_style(args):
     print(f"\n风格修改完成。如需继续调整: python main.py style {args.name} --chapter {args.chapter} --feedback \"...\"")
 
 
+def cmd_repair_derivation(args):
+    if not _get_novel_dir(args.name):
+        return
+    try:
+        result = repair_chapter_derivation(args.name, args.chapter)
+    except ValueError as exc:
+        print(f"Repair Derivation rejected: {exc}")
+        return
+    print(f"Derivation repair result: {result.get('workflow_status', 'error')}")
+
+
+def cmd_close_volume(args):
+    if not _get_novel_dir(args.name):
+        return
+    try:
+        NovelLifecycleService(args.name).close_volume()
+    except (FileNotFoundError, ValueError) as exc:
+        print(str(exc))
+
+
+def cmd_approve_volume(args):
+    if not _get_novel_dir(args.name):
+        return
+    try:
+        NovelLifecycleService(args.name).approve_volume()
+    except (FileNotFoundError, ValueError) as exc:
+        print(str(exc))
+
 def cmd_new_volume(args):
     if not _get_novel_dir(args.name):
         return
@@ -342,8 +371,17 @@ def main():
     p.add_argument("name"); p.add_argument("--chapter", type=int, required=True)
     p.add_argument("--feedback", help="人工风格反馈")
 
+    # repair-derivation
+    p = subparsers.add_parser("repair-derivation", help="恢复 canonical 后未完成的 derivation")
+    p.add_argument("name"); p.add_argument("--chapter", type=int, required=True)
+
+    # close/approve volume
+    p = subparsers.add_parser("close-volume", help="人工关闭当前 ACTIVE 卷")
+    p.add_argument("name")
+    p = subparsers.add_parser("approve-volume", help="批准直接编辑后的 DRAFT volume_plan.md")
+    p.add_argument("name")
     # new-volume
-    p = subparsers.add_parser("new-volume", help="当前卷完成后生成下一卷规划 (Rolling Horizon)")
+    p = subparsers.add_parser("new-volume", help="已人工关闭当前卷后生成下一卷 DRAFT")
     p.add_argument("name")
     p.add_argument("--volume", type=int, help="新卷号（默认当前卷+1）")
     p.add_argument("--notes", help="给情节设计师的补充指示")
@@ -368,6 +406,9 @@ def main():
         "plan": cmd_plan, "write": cmd_write,
         "style": cmd_style,
         "new-volume": cmd_new_volume,
+        "close-volume": cmd_close_volume,
+        "approve-volume": cmd_approve_volume,
+        "repair-derivation": cmd_repair_derivation,
         "rag-index": cmd_rag_index,
     }
     if args.command in cmds:

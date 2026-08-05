@@ -262,7 +262,7 @@ class TestProposalOverridePriority(_TmpNovelCase):
 class TestLoadCanonicalGeneric(_TmpNovelCase):
     """验证 load_canonical 的通用 _edited 优先行为。"""
 
-    def test_load_canonical_prefers_edited(self):
+    def test_top_level_source_ignores_edited_shadow(self):
         """load_canonical 默认优先读取 _edited 版本。"""
         novel_dir = self.tmp / "novels" / "generic_edited"
         tracking_dir = novel_dir / "tracking"
@@ -274,7 +274,7 @@ class TestLoadCanonicalGeneric(_TmpNovelCase):
 
         orch = Orchestrator("generic_edited")
         content = orch.file_store.load_canonical("tracking", "book_plan")
-        self.assertEqual(content, "人工修改版")
+        self.assertEqual(content, "AI 生成版")
 
     def test_load_canonical_falls_back_to_plain(self):
         """只有 .md 无 _edited 时返回 .md 内容。"""

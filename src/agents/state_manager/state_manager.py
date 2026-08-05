@@ -134,7 +134,7 @@ class StateManager(BaseAgent):
             f"{numbered_text}\n\n---\n\n"
             "## Previous Current State\n\n"
             f"{previous_current_state or '暂无'}\n\n---\n"
-            "只从 canonical prose 派生 State Delta 与 Fact Digest / Atomic Facts。"
+            "只从 canonical prose 派生 State Delta、Fact Digest / Atomic Facts 与 Volume Progress 建议。"
         )
         self.system_prompt = self.load_prompt("chapter_deriver.txt")
         result = self.run(
@@ -216,7 +216,7 @@ class StateManager(BaseAgent):
     def update_tracking_docs(self, chapter_index: int, chapter_text: str,
                              analysis_text: str, expected_state_sha256: str = "",
                              chapter_title: str = "",
-                             styled_source_path: str = "") -> dict:
+                             canonical_source_path: str = "") -> dict:
         """Apply one derived State Delta to Markdown and SQLite deterministically."""
         if self.sqlite is None:
             return {"_commit_result": StateCommitResult(
@@ -224,6 +224,17 @@ class StateManager(BaseAgent):
         try:
             store = CurrentStateStore(self.novel_id, self.fs, self.sqlite)
             base, _text, actual_sha256 = store.ensure_initialized()
+            if base.through_chapter == chapter_index:
+                if base.chapter.canonical_source_path != canonical_source_path:
+                    return {"_commit_result": StateCommitResult(
+                        success=False,
+                        error_message="Chapter already derived from another canonical source",
+                    )}
+                return {
+                    "updated_current_state": True,
+                    "change_log": f"Chapter {chapter_index} Current State already applied",
+                    "_commit_result": StateCommitResult(success=True),
+                }
             if expected_state_sha256 and actual_sha256 != expected_state_sha256:
                 return {"_commit_result": StateCommitResult(
                     success=False,
@@ -233,7 +244,7 @@ class StateManager(BaseAgent):
             delta = StateDelta.from_analysis(analysis_text)
             candidate = store.apply_delta(
                 base, delta, chapter_index, chapter_title,
-                len(re.sub(r"\s+", "", chapter_text)), styled_source_path,
+                len(re.sub(r"\s+", "", chapter_text)), canonical_source_path,
             )
             commit_result = store.commit(
                 expected_state_sha256 or actual_sha256, candidate)

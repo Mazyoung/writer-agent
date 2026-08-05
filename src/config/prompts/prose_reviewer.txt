@@ -7,7 +7,6 @@
 决策规则：
 - PASS：没有 T1 硬错误，正文质量可进入最终作者审批。
 - NEEDS_REVISION：存在可通过修改正文解决的问题。
-- HALT：存在不能靠单章修改解决的 L2/L3 战略问题，需要人工决策。
 - 无法可靠判断或格式错误时不要猜测 PASS。
 
 严格输出：
@@ -27,7 +26,7 @@
 - **角色塑造**: PASS / MINOR / MAJOR — 说明
 
 ## 审阅决策
-- **决策**: PASS / NEEDS_REVISION / HALT
+- **决策**: PASS / NEEDS_REVISION
 - **严重性**: PASS / MINOR / MAJOR
 - **主要问题**: 无或可执行 feedback（分号分隔）
 - **规划级别**: L1 / L2 / L3

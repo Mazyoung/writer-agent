@@ -1,5 +1,7 @@
 """Novel initialization and rolling-horizon lifecycle operations."""
 
+import re
+
 from src.agents.architect.plot_designer import PlotDesigner
 from src.agents.architect.world_builder import WorldBuilder
 from src.config.settings import get_settings
@@ -109,7 +111,7 @@ class NovelLifecycleService:
 
         E03 起 PlotDesigner 直接产出 canonical 长期规划：
         - tracking/book_plan.md   （战略层，初始化一次、默认稳定）
-        - tracking/volume_plan.md （战术层，ACTIVE 当前卷）
+        - tracking/volume_plan.md （卷级路径，DRAFT 经人工确认后 ACTIVE）
         不再生成 plot_structure.md（旧中间产物，运行时无消费者）。
         """
         print(f"\n{'='*60}")
@@ -192,73 +194,37 @@ Book Plan 是整本书的长期战略，只写长期有效的内容：
         volume_prompt = f"""## 已确认的创作提案
 {proposal}
 
-## 世界观设定（节选）
-{ws[:3000]}
+## World Setting
+{ws[:4000]}
 
-## 【全书战略规划 Book Plan】
-{bp.to_markdown()[:4000]}
-
-服从性约束（必须遵守）：
-- Volume Plan 必须服从 Book Plan 的战略方向；
-- 只能细化当前卷（第 1 卷），不得展开后续卷细节；
-- 不得重新定义 Book Plan 的故事终局、核心矛盾或战略约束。
+## Book Plan
+{bp.to_markdown()[:5000]}
 
 ---
-请生成第一卷的战术卷规划（Volume Plan）。本次输出格式以本消息为准。
-
-要求（Rolling Horizon：只详细规划第一卷，不要写后续卷细节）：
-- 事件链覆盖第一卷章节范围，每个事件必须标注「对应章节」
-- 里程碑标注大致章节位置
-- 所有命名严格沿用世界观设定与 Book Plan
-
-严格按以下 Markdown 格式输出：
+生成第一卷的卷级大故事路径。不要规定章节范围，不要把事件分配到具体章节，
+不要输出逐章事件链。严格输出：
 
 # 第1卷规划：《卷名》
 - **版本**: v1
-- **状态**: ACTIVE
-- **章节范围**: 第1章-第N章
+- **状态**: DRAFT
 
-## 卷概述
-- **核心冲突**: ...
-- **角色目标**: ...
-- **障碍**: ...
-
-## 关键里程碑
-- ...
-
-## 事件链
-### 事件1：事件名
-- **触发条件**: ...
-- **核心内容**: ...
-- **涉及角色**: ...
-- **情感基调**: ...
-- **结果与影响**: ...
-- **衔接**: ...
-- **对应章节**: 第1章
-（每事件一节）
-
-## 卷内角色档案
-### 角色名
-- **当前状态**: ...
-- **本卷弧光**: ...
-- **关键关系**: ...
-- **携带物品**: ...
-
-## 卷内伏笔表
-| 伏笔描述 | 埋伏章节 | 预计回收位置 | 状态 |
-|---------|---------|------------|------|
-
-## 节奏约束
-...
-
-## 已完成章节摘要
-（留空）"""
+## 起始状态
+## 本卷目标
+## 主要冲突
+## 故事阶段/路径
+- 阶段级路径，不绑定章节
+## 关键转折
+- 卷级转折，不绑定章节
+## 限制条件
+## 目标结束状态
+"""
         volume_plan = self.plot_designer.run(
             user_message=volume_prompt,
             save_category="tracking",
             save_prefix="volume_plan",
             use_canonical=True,
         ).content
+        self._validate_volume_candidate(volume_plan, 1, expected_status="DRAFT")
 
         sqlite = SQLiteStore(self.file_store.root / "state.db")
         try:
@@ -271,216 +237,150 @@ Book Plan 是整本书的长期战略，只写长期有效的内容：
         print(f"\n初始化完成！")
         print(f"  settings/world_setting.md")
         print(f"  tracking/book_plan.md   (Book Plan v1 / 战略层)")
-        print(f"  tracking/volume_plan.md (Volume 1 Plan v1 / ACTIVE)")
+        print(f"  tracking/volume_plan.md (Volume 1 Plan v1 / DRAFT)")
         print(f"  tracking/current_state.md (generated present state)")
-        print(f"\n下一步: 人工审阅上述文件（可保存为 *_edited.md 覆盖），")
-        print(f"        然后运行: python main.py plan {self.novel_id} --chapter 1")
+        print(f"\n下一步: 直接审阅并编辑上述原文件，然后 approve-volume，")
+        print(f"        确认 ACTIVE 后运行: python main.py plan {self.novel_id} --chapter 1")
         return {"world_setting": world_setting, "book_plan": book_plan,
                 "volume_plan": volume_plan}
 
+    @staticmethod
+    def _with_volume_status(text: str, status: str) -> str:
+        pattern = r'(\*\*状态\*\*\s*[:：]\s*)\S+'
+        if not re.search(pattern, text):
+            raise ValueError("volume_plan.md is missing its status metadata")
+        return re.sub(pattern, rf'\g<1>{status}', text, count=1)
+
+    def close_volume(self) -> str:
+        """Explicitly close the ACTIVE volume; progress advice is irrelevant."""
+        text = self.file_store.load_tracking_doc("volume_plan") or ""
+        if not text:
+            raise FileNotFoundError("tracking/volume_plan.md does not exist")
+        plan = VolumePlan.from_markdown(text)
+        if plan.status.upper() == "COMPLETED":
+            return text
+        if plan.status.upper() != "ACTIVE":
+            raise ValueError(f"Only an ACTIVE volume can close; current status is {plan.status}")
+        completed = self._with_volume_status(text, "COMPLETED")
+        archive = (
+            self.file_store.root / "tracking" / "volumes" /
+            f"volume_{plan.volume_number:02d}.md"
+        )
+        archive.parent.mkdir(parents=True, exist_ok=True)
+        archive.write_text(completed, encoding="utf-8")
+        (self.file_store.root / "tracking" / "volume_plan.md").write_text(
+            completed, encoding="utf-8")
+        print(f"  [Close Volume] 第{plan.volume_number}卷已由人工命令关闭。")
+        return completed
+
     def start_new_volume(self, volume_number: int | None = None,
                          notes: str = "") -> str:
-        """当前卷完成后，生成下一卷规划（显式 Rolling Horizon 接口）。
-
-        事务式切换语义：Generate → Validate → Commit。
-        在新 Volume 完成生成、解析与全部校验之前，不修改当前 ACTIVE
-        Volume 的 canonical 状态；Commit 阶段失败会回滚，
-        任何失败路径下当前卷都保持 ACTIVE，不产生半提交状态。
-        """
-        # ── 0. 读取当前状态（只读，不修改） ──
-        old_text = self.file_store.load_tracking_doc("volume_plan")
-        book_plan = self.file_store.load_tracking_doc("book_plan")
-        missing = []
-        if not old_text:
-            missing.append("tracking/volume_plan.md")
-        if not book_plan:
-            missing.append("tracking/book_plan.md")
-        if missing:
+        """Generate the next volume into the sole volume_plan.md as DRAFT."""
+        previous_text = self.file_store.load_tracking_doc("volume_plan") or ""
+        book_plan = self.file_store.load_tracking_doc("book_plan") or ""
+        world_setting = self.file_store.load_canonical("settings", "world_setting") or ""
+        current_state = self.file_store.load_generated_tracking_doc("current_state") or ""
+        if not all([previous_text, book_plan, world_setting, current_state]):
             raise FileNotFoundError(
-                "缺少长期规划文件: " + ", ".join(missing) +
-                "\n新小说: 先运行 python main.py init <小说名> --confirm 生成。"
-                "\n旧数据: 运行 python scripts/migrate_legacy_data.py <小说名> "
-                "从 plot_structure.md 迁移。")
+                "Next-volume planning requires World Setting, Book Plan, Previous "
+                "Volume Plan, and Current State")
+        previous = VolumePlan.from_markdown(previous_text)
+        if previous.status.upper() != "COMPLETED":
+            raise ValueError("Close the current volume before planning the next volume")
+        new_index = volume_number or previous.volume_number + 1
+        if new_index <= previous.volume_number:
+            raise ValueError("Next volume number must be greater than the closed volume")
 
-        old_vp = VolumePlan.from_markdown(old_text)
-        new_index = volume_number if volume_number else old_vp.volume_number + 1
-        if new_index <= old_vp.volume_number:
-            raise ValueError(
-                f"新卷号必须大于当前卷（当前第{old_vp.volume_number}卷，请求第{new_index}卷）")
+        prompt = f"""## World Setting
+{world_setting[:5000]}
 
-        print(f"\n{'='*60}")
-        print(f"新卷规划: 第{old_vp.volume_number}卷 → 第{new_index}卷（事务式切换）")
-        print(f"{'='*60}\n")
+## Book Plan
+{book_plan[:5000]}
 
-        # ── 1. Generate：产出候选（写入时间戳候选文件，不触碰 canonical） ──
-        memory = self._recent_fact_digests()
-        prompt = f"""## 【全书战略规划 Book Plan】
-{book_plan[:4000]}
+## Previous Volume Plan (COMPLETED)
+{previous_text[:5000]}
 
-服从性约束（必须遵守）：
-- Volume Plan 必须服从 Book Plan 的战略方向；
-- 只能细化当前卷（第 {new_index} 卷）；
-- 不得重新定义 Book Plan 的故事终局、核心矛盾或战略约束。
+## Current State after Previous Volume
+{current_state[:5000]}
 
-## 已完成卷历史（第{old_vp.volume_number}卷，已锁定，不得修改）
-{old_text[:4000]}
-
-## 近期实际事实摘要（Memory — 已发生的事情，优先级高于计划）
-{memory[:3000] if memory else "（暂无）"}
-
-## 作者补充指示
+## Optional User Next-Volume Intent
 {notes or "（无）"}
 
 ---
-请生成第{new_index}卷的战术卷规划（Volume Plan）。本次输出格式以本消息为准。
-
-要求（Rolling Horizon）:
-- 只详细规划第{new_index}卷，承接已完成卷的真实结局，不要重复或改写历史
-- 若 Book Plan 与已完成事实存在冲突，以事实为准，并在「节奏约束」中标注 [PLANNING CONFLICT] 说明
-- 事件链每个事件必须标注「对应章节」，章节号接续已完成卷
-
-严格按以下 Markdown 格式输出：
+Generate Volume {new_index} as a volume-level big story path. Do not assign
+specific events to chapters, do not write chapter ranges, and do not create a
+per-chapter outline. Output exactly this Markdown structure:
 
 # 第{new_index}卷规划：《卷名》
 - **版本**: v1
-- **状态**: ACTIVE
-- **章节范围**: 第X章-第Y章
+- **状态**: DRAFT
 
-## 卷概述
-- **核心冲突**: ...
-- **角色目标**: ...
-- **障碍**: ...
-
-## 关键里程碑
-- ...
-
-## 事件链
-### 事件1：事件名
-- **触发条件**: ...
-- **核心内容**: ...
-- **涉及角色**: ...
-- **情感基调**: ...
-- **结果与影响**: ...
-- **衔接**: ...
-- **对应章节**: 第X章
-
-## 卷内角色档案
-### 角色名
-- **当前状态**: ...
-- **本卷弧光**: ...
-- **关键关系**: ...
-- **携带物品**: ...
-
-## 卷内伏笔表
-| 伏笔描述 | 埋伏章节 | 预计回收位置 | 状态 |
-|---------|---------|------------|------|
-
-## 节奏约束
-...
-
-## 已完成章节摘要
-（留空）"""
-        print(f"  [Generate] 情节设计师生成第{new_index}卷候选...")
-        candidate_text = self.plot_designer.run(
+## 起始状态
+## 本卷目标
+## 主要冲突
+## 故事阶段/路径
+- 阶段级路径，不绑定章节
+## 关键转折
+- 卷级转折，不绑定章节
+## 限制条件
+## 目标结束状态
+"""
+        candidate = self.plot_designer.run(
             user_message=prompt,
             save_category="tracking",
             save_prefix=f"candidate_volume_{new_index:02d}",
-            use_canonical=False,   # 时间戳候选文件，绝不触碰 canonical
+            use_canonical=False,
         ).content
+        self._validate_volume_candidate(candidate, new_index, expected_status="DRAFT")
+        self.file_store.save_canonical("tracking", "volume_plan", candidate)
+        print("  [Next Volume] tracking/volume_plan.md 已生成，状态 DRAFT；请直接编辑原文件后 approve-volume。")
+        return candidate
 
-        # ── 2. Parse + Validate（失败即中止，当前卷不受影响） ──
-        new_vp = self._validate_volume_candidate(candidate_text, new_index)
-        print(f"  [Validate] 候选通过: 《{new_vp.title}》第{new_vp.volume_number}卷，"
-              f"{len(new_vp.events)} 个事件，{new_vp.chapter_range}")
-
-        # ── 3. Commit（归档旧卷 → 新卷 ACTIVE → PlanRevision；失败回滚） ──
-        old_vp.status = "COMPLETED"
-        vol_dir = self.file_store.root / "tracking" / "volumes"
-        vol_dir.mkdir(parents=True, exist_ok=True)
-        archive_path = vol_dir / f"volume_{old_vp.volume_number:02d}.md"
-        archive_written = False
-        canonical_attempted = False
-        try:
-            archive_path.write_text(old_vp.to_markdown(), encoding="utf-8")
-            archive_written = True
-            canonical_attempted = True
-            self.file_store.save_canonical("tracking", "volume_plan", candidate_text)
-
-            rev = PlanRevision(
-                plan_type=PlanType.VOLUME_PLAN,
-                base_version=old_vp.version,
-                new_version=new_vp.version,
-                trigger_chapter=f"第{self._completed_chapters()}章后",
-                reason=f"{ReplanTrigger.USER_REQUEST}: new-volume 命令，"
-                       f"第{old_vp.volume_number}卷 COMPLETED → 第{new_index}卷 ACTIVE"
-                       + (f"；作者指示: {notes}" if notes else ""),
-                old_content_ref=f"tracking/volumes/volume_{old_vp.volume_number:02d}.md",
-                new_content_ref="tracking/volume_plan.md",
-                affected_nodes=[f"volume_{old_vp.volume_number:02d}",
-                                f"volume_{new_index:02d}"],
-                status=RevisionStatus.APPLIED,
-                approved_by="human",
-                decision="显式 new-volume 命令",
-            )
-            PlanningStore(self.file_store.root).save_revision(rev)
-        except Exception as e:
-            # E06.2.1: 回滚时保护原始异常——rollback 失败不得掩盖根因。
-            rollback_errors: list[str] = []
-            if canonical_attempted:
-                try:
-                    self.file_store.rollback_canonical("tracking", "volume_plan")
-                except Exception as re:
-                    rollback_errors.append(
-                        f"rollback_canonical 也失败: {type(re).__name__}: {re}")
-            if archive_written and archive_path.exists():
-                try:
-                    archive_path.unlink()
-                except Exception as ue:
-                    rollback_errors.append(
-                        f"删除归档也失败: {type(ue).__name__}: {ue}")
-            detail = (f"新卷提交失败，已回滚: 第{old_vp.volume_number}卷仍为 ACTIVE。"
-                      f"\n根因: {type(e).__name__}: {e}")
-            if rollback_errors:
-                detail += "\n回滚错误: " + "; ".join(rollback_errors)
-            raise RuntimeError(detail) from e
-
-        print(f"  [Commit] 第{old_vp.volume_number}卷 COMPLETED → "
-              f"tracking/volumes/volume_{old_vp.volume_number:02d}.md")
-        print(f"  [Commit] 第{new_index}卷 ACTIVE → tracking/volume_plan.md")
-        print(f"  [Commit] PlanRevision 已记录: {rev.revision_id}")
-
-        if self.file_store.has_human_edit("tracking", "volume_plan"):
-            print(f"  [!] 注意: 存在 volume_plan_edited.md，它会覆盖新卷内容。"
-                  f"如不再需要请人工处理。")
-
-        print(f"\n下一步: python main.py plan {self.novel_id} --chapter <接续章号>")
-        return candidate_text
+    def approve_volume(self) -> str:
+        """Validate the directly edited DRAFT and change only its status token."""
+        path = self.file_store.root / "tracking" / "volume_plan.md"
+        if not path.exists():
+            raise FileNotFoundError("tracking/volume_plan.md does not exist")
+        text = path.read_text(encoding="utf-8")
+        plan = VolumePlan.from_markdown(text)
+        if plan.status.upper() == "ACTIVE":
+            return text
+        self._validate_volume_candidate(text, plan.volume_number, expected_status="DRAFT")
+        active = self._with_volume_status(text, "ACTIVE")
+        path.write_text(active, encoding="utf-8")
+        print(f"  [Approve Volume] 第{plan.volume_number}卷已切换为 ACTIVE。")
+        return active
 
     @staticmethod
-    def _validate_volume_candidate(text: str, expected_index: int) -> VolumePlan:
-        """解析并校验新卷候选。任何一项失败都抛异常，调用方保证不提交。"""
+    def _validate_volume_candidate(text: str, expected_index: int,
+                                   expected_status: str = "DRAFT") -> VolumePlan:
         if not text or not text.strip():
-            raise ValueError(
-                "新卷候选生成失败：LLM 输出为空。当前卷保持 ACTIVE，未做任何修改。")
-        vp = VolumePlan.from_markdown(text)
+            raise ValueError("Volume Planner returned empty content")
+        plan = VolumePlan.from_markdown(text)
         problems = []
-        if not vp.title.strip():
-            problems.append("缺少卷标题（Markdown 无法解析）")
-        if vp.volume_number != expected_index:
-            problems.append(f"卷号错误：期望第{expected_index}卷，实际第{vp.volume_number}卷")
-        if vp.status.upper() != "ACTIVE":
-            problems.append(f"状态必须为 ACTIVE，实际为 {vp.status}")
-        if not vp.chapter_range.strip():
-            problems.append("缺少章节范围")
-        if not vp.core_conflict.strip():
-            problems.append("缺少卷概述（核心冲突）")
-        if not vp.events:
-            problems.append("事件链为空")
+        if plan.volume_number != expected_index:
+            problems.append(f"expected volume {expected_index}, got {plan.volume_number}")
+        if plan.status.upper() != expected_status:
+            problems.append(f"status must be {expected_status}, got {plan.status}")
+        if not plan.title.strip():
+            problems.append("missing title")
+        if not plan.starting_state.strip():
+            problems.append("missing starting state")
+        if not plan.volume_goal.strip():
+            problems.append("missing volume goal")
+        if not plan.core_conflict.strip():
+            problems.append("missing primary conflict")
+        if not plan.story_path:
+            problems.append("missing story path")
+        if not plan.target_end_state.strip():
+            problems.append("missing target end state")
+        forbidden = ["章节范围", "事件链", "对应章节", "逐章"]
+        found = [term for term in forbidden if term in text]
+        if found:
+            problems.append("chapterized fields are forbidden: " + ", ".join(found))
         if problems:
-            raise ValueError(
-                "新卷候选校验失败:\n  - " + "\n  - ".join(problems) +
-                "\n当前卷保持 ACTIVE，未做任何修改。")
-        return vp
+            raise ValueError("Invalid Volume Plan:\n  - " + "\n  - ".join(problems))
+        return plan
 
     def _recent_fact_digests(self, count: int = 3) -> str:
         """扫描 states/ 取最近 N 个事实摘要（按文件名排序即按章号+时间排序）。"""

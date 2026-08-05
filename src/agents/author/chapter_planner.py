@@ -49,6 +49,12 @@ class ChapterPlanner(BaseAgent):
                 "\n新小说: 先运行 python main.py init <小说名> --confirm 生成。"
                 "\n旧数据: 运行 python scripts/migrate_legacy_data.py <小说名> "
                 "从 plot_structure.md 迁移。")
+        active = VolumePlan.from_markdown(volume_plan)
+        if active.status.upper() != "ACTIVE":
+            raise ValueError(
+                "Chapter planning requires an ACTIVE volume_plan.md; "
+                f"current status is {active.status}"
+            )
         return book_plan, volume_plan
 
     def plan_chapter(self, chapter_index: int,
@@ -71,8 +77,7 @@ class ChapterPlanner(BaseAgent):
 
         # 加载上下文
         active_vp = VolumePlan.from_markdown(volume_plan)
-        print(f"  [ChapterPlanner] 活跃卷: 第{active_vp.volume_number}卷"
-              f"（{active_vp.status}，{active_vp.chapter_range or '章节范围未定'}）")
+        print(f"  [ChapterPlanner] 活跃卷: 第{active_vp.volume_number}卷（{active_vp.status}）")
         world_setting = self.fs.load_canonical("settings", "world_setting") or ""
         prev_chapter_end = self._load_prev_chapter_end(chapter_index)
         fact_context = ""  # E07.7: global history enters only through retrieved FACTs.
@@ -108,13 +113,10 @@ class ChapterPlanner(BaseAgent):
         # 2. Book Strategic Constraints
         parts.append(f"### 全书战略规划 Book Plan（战略约束层，方向性参考）\n{book_plan[:2000]}")
 
-        # 3. Current Volume Plan（本章所属的战术层事件）
+        # 3. Volume-level path. The Planner chooses this chapter's events.
+        parts.append(f"### 当前卷大故事路径（Volume Plan）\n{volume_plan[:3000]}")
         if chapter_outline:
-            parts.append(f"### 章大纲（来自卷规划）\n{chapter_outline}")
-        else:
-            vol_context = self._extract_chapter_from_volume(volume_plan, chapter_index)
-            if vol_context:
-                parts.append(f"### 当前卷规划中本章对应的事件（Volume Plan）\n{vol_context}")
+            parts.append(f"### 作者提供的本章补充意图\n{chapter_outline}")
 
         # 4. Actual present state — one generated snapshot (Part B material)
         parts.append("## 当前状态（tracking/current_state.md；Part B 原材料）")
@@ -184,8 +186,8 @@ class ChapterPlanner(BaseAgent):
             parts.append(f"### character_relationships.md\n{context['character_relations'][:3000]}")
         if context.get("items_tracking"):
             parts.append(f"### items_equipment.md\n{context['items_tracking'][:2000]}")
-        if context.get("volume_event"):
-            parts.append(f"### 卷规划对应事件\n{context['volume_event']}")
+        if context.get("volume_plan"):
+            parts.append(f"### 当前卷大故事路径\n{context['volume_plan']}")
 
         parts.append("\n---\n请根据以上所有信息（特别是作者的指示），按输出格式生成完整的章规划（Part A + Part B）。作者指示中的内容优先于追踪文档。")
 
@@ -320,20 +322,3 @@ class ChapterPlanner(BaseAgent):
             if fd:
                 parts.append(f"## 第{ch}章事实摘要\n{fd[:1500]}")
         return "\n\n".join(parts)
-
-    def _extract_chapter_from_volume(self, volume_plan: str,
-                                     chapter_index: int) -> str:
-        """从卷规划中提取本章对应的事件概要。"""
-        if not volume_plan:
-            return ""
-        # 查找"对应章节: 第N章"的事件（容忍 ** 加粗标记）
-        pattern = rf'(### 事件\d+[：:].*?\n.*?对应章节\**\s*[：:]\s*第{chapter_index}章.*?)(?=### 事件|\Z)'
-        m = re.search(pattern, volume_plan, re.DOTALL)
-        if m:
-            return m.group(1)[:1500]
-        # 回退：返回事件链中第 chapter_index 个事件
-        events = re.findall(r'### 事件\d+[：:].*?\n.*?(?=### 事件|\Z)',
-                            volume_plan, re.DOTALL)
-        if chapter_index <= len(events):
-            return events[chapter_index - 1][:1500]
-        return volume_plan[:2000]

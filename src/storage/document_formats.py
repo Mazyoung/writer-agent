@@ -196,198 +196,69 @@ class BookPlan:
 # ── VolumePlan ─────────────────────────────────────────────
 
 @dataclass
-class VolumeEvent:
-    name: str = ""
-    trigger: str = ""
-    content: str = ""
-    characters: str = ""
-    emotion: str = ""
-    result: str = ""
-    transition: str = ""
-    chapter: str = ""
-
-
-@dataclass
-class VolumeCharacter:
-    name: str = ""
-    current_state: str = ""
-    arc: str = ""
-    key_relations: str = ""
-    items: str = ""
-
-
-@dataclass
-class VolumeForeshadow:
-    description: str = ""
-    planted_chapter: str = ""
-    expected_resolve: str = ""
-    status: str = "pending"
-
-
-@dataclass
-class ChapterSummary:
-    chapter_index: int = 0
-    title: str = ""
-    actual_content: str = ""
-    deviation: str = ""
-    new_introduced: str = ""
-
-
-@dataclass
 class VolumePlan:
-    """Volume Plan — 战术规划层（E03），Rolling Horizon。
+    """One volume-level story path, intentionally not a chapter outline."""
 
-    只描述当前卷：核心目标/冲突、章节范围、关键里程碑、
-    必须发生的事件链、伏笔布置与回收、角色阶段性成长、节奏约束。
-    不复制 Book Plan 内容。status 取值：PLANNED / ACTIVE / COMPLETED。
-    """
     volume_number: int = 1
-    version: str = "v1"                # 规划版本
-    status: str = "ACTIVE"             # PLANNED / ACTIVE / COMPLETED
-    chapter_range: str = ""            # 如 "第1章-第14章"
+    version: str = "v1"
+    status: str = "DRAFT"  # DRAFT / ACTIVE / COMPLETED
     title: str = ""
+    starting_state: str = ""
+    volume_goal: str = ""
     core_conflict: str = ""
-    character_goal: str = ""
-    obstacle: str = ""
-    milestones: list[str] = field(default_factory=list)      # 关键里程碑
-    pacing_constraints: str = ""                              # 节奏与事件顺序约束
-    events: list[VolumeEvent] = field(default_factory=list)
-    characters: list[VolumeCharacter] = field(default_factory=list)
-    foreshadows: list[VolumeForeshadow] = field(default_factory=list)
-    completed_chapters: list[ChapterSummary] = field(default_factory=list)
+    story_path: list[str] = field(default_factory=list)
+    turning_points: list[str] = field(default_factory=list)
+    constraints: str = ""
+    target_end_state: str = ""
 
     @classmethod
     def from_markdown(cls, text: str) -> "VolumePlan":
         vp = cls()
         raw_title = _extract_title(text)
-        # 从标题行恢复卷号：'# 第N卷规划：...'（与 chapter_index 同类 round-trip 修复）
-        m = re.search(r'第\s*(\d+)\s*卷', raw_title)
-        if m:
-            vp.volume_number = int(m.group(1))
-        # 解包 '第N卷规划：《标题》'，避免 round-trip 嵌套
-        m = re.search(r'第\s*\d+\s*卷规划\s*[：:]\s*《(.+?)》', raw_title)
-        vp.title = m.group(1) if m else raw_title
+        match = re.search(r'第\s*(\d+)\s*卷', raw_title)
+        if match:
+            vp.volume_number = int(match.group(1))
+        match = re.search(r'第\s*\d+\s*卷规划\s*[：:]\s*《(.+?)》', raw_title)
+        vp.title = match.group(1) if match else raw_title
         vp.version = _extract_version(text)
-        m = re.search(r'\*\*状态\*\*\s*[:：]\s*(\S+)', text)
-        if m:
-            vp.status = m.group(1)
-        m = re.search(r'\*\*章节范围\*\*\s*[:：]\s*(.+)', text)
-        if m:
-            vp.chapter_range = m.group(1).strip()
+        match = re.search(r'\*\*状态\*\*\s*[:：]\s*(\S+)', text)
+        if match:
+            vp.status = match.group(1).upper()
+        vp.starting_state = _extract_section(text, "## 起始状态").strip()
+        vp.volume_goal = _extract_section(text, "## 本卷目标").strip()
+        vp.core_conflict = _extract_section(text, "## 主要冲突").strip()
+        vp.story_path = _parse_bullet_list(_extract_section(text, "## 故事阶段/路径"))
+        vp.turning_points = _parse_bullet_list(_extract_section(text, "## 关键转折"))
+        vp.constraints = _extract_section(text, "## 限制条件").strip()
+        vp.target_end_state = _extract_section(text, "## 目标结束状态").strip()
 
-        overview = _extract_section(text, "## 卷概述")
-        kv = _parse_key_value(overview)
-        vp.core_conflict = kv.get("核心冲突", "")
-        vp.character_goal = kv.get("角色目标", "")
-        vp.obstacle = kv.get("障碍", "")
-
-        vp.milestones = _parse_bullet_list(_extract_section(text, "## 关键里程碑"))
-        vp.pacing_constraints = _extract_section(text, "## 节奏约束")
-
-        events_text = _extract_section(text, "## 事件链")
-        for m in re.finditer(r'###\s+(.+?)\n(.*?)(?=###|\Z)', events_text, re.DOTALL):
-            # 剥去 '事件N：' 前缀，避免 to_markdown 重新添加后嵌套
-            ev_name = re.sub(r'^事件\s*\d+\s*[：:]\s*', '', m.group(1).strip())
-            ev = VolumeEvent(name=ev_name)
-            ekv = _parse_key_value(m.group(2))
-            ev.trigger = ekv.get("触发条件", "")
-            ev.content = ekv.get("核心内容", "")
-            ev.characters = ekv.get("涉及角色", "")
-            ev.emotion = ekv.get("情感基调", "")
-            ev.result = ekv.get("结果与影响", "")
-            ev.transition = ekv.get("衔接", "")
-            ev.chapter = ekv.get("对应章节", "")
-            vp.events.append(ev)
-
-        chars_text = _extract_section(text, "## 卷内角色档案")
-        for m in re.finditer(r'###\s+(.+?)\n(.*?)(?=###|\Z)', chars_text, re.DOTALL):
-            vc = VolumeCharacter(name=m.group(1).strip())
-            ckv = _parse_key_value(m.group(2))
-            vc.current_state = ckv.get("当前状态", "")
-            vc.arc = ckv.get("本卷弧光", "")
-            vc.key_relations = ckv.get("关键关系", "")
-            vc.items = ckv.get("携带物品", "")
-            vp.characters.append(vc)
-
-        for row in _parse_table(_extract_section(text, "## 卷内伏笔表")):
-            vp.foreshadows.append(VolumeForeshadow(
-                description=row.get("伏笔描述", ""),
-                planted_chapter=row.get("埋伏章节", ""),
-                expected_resolve=row.get("预计回收位置", ""),
-                status=row.get("状态", "pending"),
-            ))
-
-        completed = _extract_section(text, "## 已完成章节摘要")
-        for m in re.finditer(r'###\s+(.+?)\[已完.*?\n(.*?)(?=###|\Z)', completed, re.DOTALL):
-            cs = ChapterSummary()
-            # 标题行格式 '第N章 标题'：拆出章号与标题，避免 round-trip 嵌套
-            m2 = re.match(r'第\s*(\d+)\s*章\s*(.*)', m.group(1).strip())
-            if m2:
-                cs.chapter_index = int(m2.group(1))
-                cs.title = m2.group(2).strip()
-            else:
-                cs.title = m.group(1).strip()
-            ckv = _parse_key_value(m.group(2))
-            cs.actual_content = ckv.get("实际写了", "")
-            cs.deviation = ckv.get("偏离原计划", "")
-            cs.new_introduced = ckv.get("新引入", "")
-            vp.completed_chapters.append(cs)
-
+        # Read-only migration compatibility. New output never writes chapter
+        # ranges, event chains, or per-chapter assignments.
+        legacy = _parse_key_value(_extract_section(text, "## 卷概述"))
+        if not vp.volume_goal:
+            vp.volume_goal = legacy.get("角色目标", "")
+        if not vp.core_conflict:
+            vp.core_conflict = legacy.get("核心冲突", "")
+        if not vp.story_path:
+            vp.story_path = _parse_bullet_list(_extract_section(text, "## 关键里程碑"))
         return vp
 
     def to_markdown(self) -> str:
-        lines = [f"# 第{self.volume_number}卷规划：《{self.title}》", ""]
-        lines.append(f"- **版本**: {self.version}")
-        lines.append(f"- **状态**: {self.status}")
-        lines.append(f"- **章节范围**: {self.chapter_range or '待定'}")
-        lines.append("")
-        lines.append("## 卷概述")
-        lines.append(f"- **核心冲突**: {self.core_conflict}")
-        lines.append(f"- **角色目标**: {self.character_goal}")
-        lines.append(f"- **障碍**: {self.obstacle}")
-        lines.append("")
-        lines.append("## 关键里程碑")
-        for ms in self.milestones:
-            lines.append(f"- {ms}")
-        if not self.milestones:
-            lines.append("- 待规划")
-        lines.append("")
-        lines.append("## 事件链")
-        for i, ev in enumerate(self.events, 1):
-            lines.append(f"### 事件{i}：{ev.name}")
-            lines.append(f"- **触发条件**: {ev.trigger}")
-            lines.append(f"- **核心内容**: {ev.content}")
-            lines.append(f"- **涉及角色**: {ev.characters}")
-            lines.append(f"- **情感基调**: {ev.emotion}")
-            lines.append(f"- **结果与影响**: {ev.result}")
-            lines.append(f"- **衔接**: {ev.transition}")
-            lines.append(f"- **对应章节**: {ev.chapter}")
-            lines.append("")
-        lines.append("## 卷内角色档案")
-        for vc in self.characters:
-            lines.append(f"### {vc.name}")
-            lines.append(f"- **当前状态**: {vc.current_state}")
-            lines.append(f"- **本卷弧光**: {vc.arc}")
-            lines.append(f"- **关键关系**: {vc.key_relations}")
-            lines.append(f"- **携带物品**: {vc.items}")
-            lines.append("")
-        lines.append("## 卷内伏笔表")
-        if self.foreshadows:
-            lines.append("| 伏笔描述 | 埋伏章节 | 预计回收位置 | 状态 |")
-            lines.append("|---------|---------|------------|------|")
-            for f in self.foreshadows:
-                lines.append(f"| {f.description} | {f.planted_chapter} | {f.expected_resolve} | {f.status} |")
-        lines.append("")
-        lines.append("## 节奏约束")
-        lines.append(self.pacing_constraints or "无特殊约束")
-        lines.append("")
-        lines.append("## 已完成章节摘要")
-        for cs in self.completed_chapters:
-            lines.append(f"### 第{cs.chapter_index}章 {cs.title} [已完成]")
-            lines.append(f"- **实际写了**: {cs.actual_content}")
-            lines.append(f"- **偏离原计划**: {cs.deviation}")
-            lines.append(f"- **新引入**: {cs.new_introduced}")
-            lines.append("")
+        lines = [
+            f"# 第{self.volume_number}卷规划：《{self.title}》", "",
+            f"- **版本**: {self.version}", f"- **状态**: {self.status}", "",
+            "## 起始状态", self.starting_state or "待规划", "",
+            "## 本卷目标", self.volume_goal or "待规划", "",
+            "## 主要冲突", self.core_conflict or "待规划", "",
+            "## 故事阶段/路径",
+        ]
+        lines.extend(f"- {item}" for item in self.story_path or ["待规划"])
+        lines.extend(["", "## 关键转折"])
+        lines.extend(f"- {item}" for item in self.turning_points or ["待规划"])
+        lines.extend([
+            "", "## 限制条件", self.constraints or "无", "",
+            "## 目标结束状态", self.target_end_state or "待规划", "",
+        ])
         return "\n".join(lines)
 
 
@@ -1199,7 +1070,7 @@ class CurrentChapterMeta:
     chapter_index: int = 0
     title: str = ""
     word_count: int = 0
-    styled_source_path: str = ""
+    canonical_source_path: str = ""
 
 
 @dataclass
@@ -1317,9 +1188,9 @@ class CurrentState:
         ))
         lines.extend(["", "## Current Chapter", ""])
         lines.extend(self._table(
-            ["Chapter Index", "Title", "Word Count", "Styled Source"],
+            ["Chapter Index", "Title", "Word Count", "Canonical Source"],
             [[self.chapter.chapter_index, self.chapter.title,
-              self.chapter.word_count, self.chapter.styled_source_path]],
+              self.chapter.word_count, self.chapter.canonical_source_path]],
         ))
         return "\n".join(lines) + "\n"
 
@@ -1396,7 +1267,7 @@ class CurrentState:
                 resolved_chapter=_state_chapter(row["Resolved Chapter"], "Resolved Chapter"),
             ))
         chapter_rows = _strict_state_table(_extract_section(text, "## Current Chapter"), [
-            "Chapter Index", "Title", "Word Count", "Styled Source",
+            "Chapter Index", "Title", "Word Count", "Canonical Source",
         ])
         if len(chapter_rows) != 1:
             raise ValueError("Current State must contain exactly one Current Chapter row")
@@ -1408,7 +1279,7 @@ class CurrentState:
             raise ValueError("Current Chapter numeric metadata is invalid") from exc
         state.chapter = CurrentChapterMeta(
             chapter_index=chapter_index, title=chapter["Title"],
-            word_count=word_count, styled_source_path=chapter["Styled Source"],
+            word_count=word_count, canonical_source_path=chapter["Canonical Source"],
         )
         state.validate()
         return state

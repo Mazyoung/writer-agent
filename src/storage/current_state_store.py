@@ -200,7 +200,7 @@ class CurrentStateStore:
 
     def apply_delta(self, base: CurrentState, delta: StateDelta,
                     chapter_index: int, title: str, word_count: int,
-                    styled_source_path: str) -> CurrentState:
+                    canonical_source_path: str) -> CurrentState:
         if chapter_index <= base.through_chapter:
             raise ValueError(
                 f"Chapter {chapter_index} cannot advance Current State through "
@@ -320,7 +320,7 @@ class CurrentStateStore:
         candidate.through_chapter = chapter_index
         candidate.chapter = CurrentChapterMeta(
             chapter_index=chapter_index, title=title, word_count=word_count,
-            styled_source_path=styled_source_path,
+            canonical_source_path=canonical_source_path,
         )
         candidate.validate()
         return candidate

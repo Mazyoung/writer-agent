@@ -7,6 +7,13 @@ import re
 class FileStore:
     """管理 data/novels/<novel_id>/ 下的文件读写"""
 
+    EDITABLE_SOURCE_FILES = {
+        ("settings", "world_setting"),
+        ("tracking", "book_plan"),
+        ("tracking", "volume_plan"),
+        ("tracking", "author_rag"),
+    }
+
     def __init__(self, novel_id: str, data_dir: Path):
         self.novel_id = novel_id
         self.root = data_dir / "novels" / novel_id
@@ -29,9 +36,10 @@ class FileStore:
 
     def load_latest(self, category: str, prefix: str) -> Optional[str]:
         """读取最新版本的文本文件"""
-        edited = self._find_edited(category, prefix)
-        if edited:
-            return edited.read_text(encoding="utf-8")
+        if (category, prefix) not in self.EDITABLE_SOURCE_FILES:
+            edited = self._find_edited(category, prefix)
+            if edited:
+                return edited.read_text(encoding="utf-8")
 
         files = sorted(self.root.glob(f"{category}/{prefix}_*.md"), reverse=True)
         if not files:
@@ -62,10 +70,11 @@ class FileStore:
         return filepath
 
     def load_canonical(self, category: str, filename: str) -> Optional[str]:
-        """读取 canonical 文件。优先 _edited.md，其次 .md"""
-        edited = self.root / category / f"{filename}_edited.md"
-        if edited.exists():
-            return edited.read_text(encoding="utf-8")
+        """Read a canonical file; top-level editable sources never use shadow overrides"""
+        if (category, filename) not in self.EDITABLE_SOURCE_FILES:
+            edited = self.root / category / f"{filename}_edited.md"
+            if edited.exists():
+                return edited.read_text(encoding="utf-8")
         plain = self.root / category / f"{filename}.md"
         if plain.exists():
             return plain.read_text(encoding="utf-8")
@@ -175,7 +184,7 @@ class FileStore:
     # ── 新系统追踪文档 ──────────────────────────────────
 
     def load_tracking_doc(self, name: str) -> Optional[str]:
-        """加载 tracking 目录下的文档（优先 _edited，其次 .md）。"""
+        """Load a tracking document using canonical source semantics."""
         return self.load_canonical("tracking", name)
 
     def save_tracking_doc(self, name: str, content: str) -> Path:

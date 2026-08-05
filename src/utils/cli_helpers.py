@@ -14,9 +14,9 @@ INTERACTIVE_QUESTIONS = [
     {
         "id": "chapter_core",
         "title": "第 1/6 轮：章核心确认",
-        "template": """## 卷规划中本章对应的事件
+        "template": """## 当前卷大故事路径
 
-{volume_event}
+{volume_plan}
 
 ## 上一章结尾
 
@@ -131,7 +131,7 @@ class InteractivePlanEngine:
 
         # 卷规划
         vp = self.fs.load_tracking_doc("volume_plan") or ""
-        ctx["volume_event"] = self._extract_chapter_event(vp) or "（卷规划未找到本章对应事件）"
+        ctx["volume_plan"] = vp or "（尚无 Volume Plan）"
 
         # 上一章结尾
         prev = self._load_prev_end()
@@ -156,12 +156,12 @@ class InteractivePlanEngine:
         ctx["suspense"] = self._load_suspense()
 
         # 从卷规划推断默认值
-        ctx["chapter_goal"] = self._guess_chapter_goal(ctx["volume_event"])
+        ctx["chapter_goal"] = self._guess_chapter_goal(ctx["volume_plan"])
         ctx["chapter_type"] = "延续型"
         ctx["suggested_characters"] = self._extract_characters_from_rels(ctx["character_relations"])
         ctx["suggested_tone"] = "从压抑生存转向试探性行动"
         ctx["suggested_scene_count"] = "3"
-        ctx["suggested_scenes"] = self._guess_scenes(ctx["volume_event"])
+        ctx["suggested_scenes"] = self._guess_scenes(ctx["volume_plan"])
 
         self.context = ctx
         return ctx
@@ -198,7 +198,7 @@ class InteractivePlanEngine:
         # 附上追踪文档
         parts.append(f"## 角色关系文档\n{self.context.get('character_relations', '')[:2000]}")
         parts.append(f"## 物品装备文档\n{self.context.get('items_tracking', '')[:1500]}")
-        parts.append(f"## 卷规划事件\n{self.context.get('volume_event', '')}")
+        parts.append(f"## 当前卷大故事路径\n{self.context.get('volume_plan', '')}")
 
         parts.append("\n---\n请根据以上所有信息，按输出格式生成完整的章规划（Part A + Part B）。")
         return "\n\n".join(parts)
@@ -245,18 +245,6 @@ class InteractivePlanEngine:
                     parts.append(f"第{ch}章: {m.group(1).strip()[:200]}")
         return "\n".join(parts) if parts else "暂无"
 
-    def _extract_chapter_event(self, volume_plan: str) -> str:
-        if not volume_plan:
-            return ""
-        pattern = rf'(### 事件\d+[：:].*?\n.*?对应章节[：:]\s*第{self.chapter_index}章.*?)(?=### 事件|\Z)'
-        m = re.search(pattern, volume_plan, re.DOTALL)
-        if m:
-            return m.group(1)[:1500]
-        events = re.findall(r'### 事件\d+[：:].*?\n.*?(?=### 事件|\Z)',
-                            volume_plan, re.DOTALL)
-        if self.chapter_index <= len(events):
-            return events[self.chapter_index - 1][:1500]
-        return volume_plan[:1500]
 
     def _guess_chapter_goal(self, vol_event: str) -> str:
         if not vol_event or vol_event.startswith("（"):

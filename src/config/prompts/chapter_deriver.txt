@@ -46,3 +46,11 @@
 - NEW: 描述=XX, 状态=OPEN, 预计回收=第N卷 [依据: Pxxxx]
 
 每个 State Delta 子节都必须出现；没有变化写“- 无”。物品三个子节也必须分别出现。已有伏笔只按 previous Current State 的稳定 ID 引用。不要输出完整 Current State；程序会确定性应用并持久化。
+
+
+Finally output exactly one advisory recommendation:
+
+## Volume Progress
+- **Recommendation**: CONTINUE / READY_TO_CLOSE / UNKNOWN
+
+This is advisory only and never closes or creates a volume.
