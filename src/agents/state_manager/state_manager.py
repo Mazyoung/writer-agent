@@ -124,7 +124,8 @@ class StateManager(BaseAgent):
         return {"raw_analysis": result.content, "filepath": result.filepath}
 
     def derive_chapter(self, canonical_prose: str, chapter_index: int,
-                       previous_current_state: str) -> dict:
+                       previous_current_state: str,
+                       current_volume_plan: str = "") -> dict:
         """Derive StateDelta and Fact Digest only after canonical commit."""
         if not canonical_prose.strip():
             raise ValueError("Canonical prose is required for Derivation")
@@ -134,7 +135,11 @@ class StateManager(BaseAgent):
             f"{numbered_text}\n\n---\n\n"
             "## Previous Current State\n\n"
             f"{previous_current_state or '暂无'}\n\n---\n"
-            "只从 canonical prose 派生 State Delta、Fact Digest / Atomic Facts 与 Volume Progress 建议。"
+            "## Current ACTIVE Volume Plan\n\n"
+            f"{current_volume_plan or '暂无'}\n\n---\n\n"
+            "Canonical Prose 是 State Delta、Fact Digest / Atomic Facts 和 Current State "
+            "的唯一事实来源。Volume Plan 仅用于判断 Volume Progress；其中尚未在 "
+            "Canonical Prose 发生的未来剧情，严禁写入任何派生事实或状态。"
         )
         self.system_prompt = self.load_prompt("chapter_deriver.txt")
         result = self.run(

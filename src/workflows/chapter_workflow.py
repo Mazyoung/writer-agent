@@ -726,10 +726,21 @@ def derive_semantics(state: ChapterWorkflowState) -> dict[str, Any]:
     canonical = fs.load_canonical_chapter(state["chapter_index"]) or ""
     if not canonical:
         return _derived_failure(state, "Canonical prose missing after commit")
+    volume_plan = fs.load_tracking_doc("volume_plan") or ""
+    if volume_plan:
+        from src.storage.document_formats import VolumePlan
+        try:
+            if VolumePlan.from_markdown(volume_plan).status.upper() != "ACTIVE":
+                volume_plan = ""
+        except ValueError:
+            volume_plan = ""
     sqlite = SQLiteStore(fs.root / "state.db")
     try:
         raw = StateManager(state["novel_id"], sqlite).derive_chapter(
-            canonical, state["chapter_index"], state.get("current_state_text", "")
+            canonical,
+            state["chapter_index"],
+            state.get("current_state_text", ""),
+            current_volume_plan=volume_plan,
         ).get("raw_analysis", "")
         if not raw.strip():
             raise ValueError("Deriver returned empty analysis")

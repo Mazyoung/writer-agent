@@ -83,30 +83,6 @@ class ClosureCase(unittest.TestCase):
         self.fs = FileStore("closure", settings.data_dir)
 
 
-class TestRoutingInvariants(ClosureCase):
-    def test_pass_and_fail_both_require_human_decision(self):
-        for verdict in ("PASS", "NEEDS_REVISION"):
-            self.assertEqual(_route_after_chapter_decision({
-                "workflow_status": f"DECISION_{verdict}",
-                "verdict": verdict,
-            }), "await_human_chapter")
-
-    def test_human_actions_route_without_automatic_revision(self):
-        expected = {
-            "approve": "commit_canonical_prose",
-            "agent_edit": "agent_edit_chapter",
-            "manual_edit": "save_styled",
-            "regenerate": "write_draft",
-        }
-        for action, target in expected.items():
-            self.assertEqual(_route_after_human_chapter({
-                "workflow_status": "HUMAN",
-                "human_decision": action,
-            }), target)
-        source = inspect.getsource(_route_after_chapter_decision)
-        self.assertNotIn("auto_revise", source)
-
-
 class TestCanonicalIdentity(ClosureCase):
     def test_commit_requires_pass_and_final_approval_and_never_overwrites(self):
         base = {

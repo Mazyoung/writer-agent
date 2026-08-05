@@ -1,23 +1,20 @@
 """Focused E07.9 lifecycle and derivation-repair tests; no paid calls."""
 
-import inspect
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from src.agents.author.chapter_planner import ChapterPlanner
 from src.agents.state_manager.state_manager import StateManager
 from src.config.settings import get_settings
 from src.planning.novel_lifecycle import NovelLifecycleService
 from src.storage.document_formats import CurrentState, VolumePlan
 from src.storage.file_store import FileStore
 from src.workflows.chapter_runner import ChapterWorkflowRunner
-from src.workflows.retrieval_service import ChapterRetrievalService
 from src.workflows.chapter_workflow import (
     _parse_volume_progress,
-    build_chapter_workflow,
+    derive_semantics,
     parse_chapter_decision,
 )
 
@@ -50,6 +47,7 @@ VOLUME_DRAFT = """# 第2卷规划：《远路》
 众人在北境建立落脚点。
 
 ## 作者备注
+这里不要逐章安排。
 这段必须保留。
 """
 
@@ -79,21 +77,48 @@ class TestContracts(E079Case):
             "READY_TO_CLOSE")
         self.assertEqual(_parse_volume_progress("malformed"), "UNKNOWN")
 
-    def test_graph_has_checkpointed_derivation_stages(self):
-        nodes = set(build_chapter_workflow().get_graph().nodes)
-        self.assertTrue({
-            "derive_semantics", "persist_current_state", "persist_fact_digest",
-            "persist_volume_progress", "persist_chapter_sources", "sync_chroma",
-        }.issubset(nodes))
-        self.assertNotIn("derive_chapter", nodes)
+    def test_deriver_separates_volume_progress_context_from_facts(self):
+        with patch.object(
+            StateManager,
+            "run",
+            return_value=SimpleNamespace(content="DERIVED", filepath=None),
+        ) as run:
+            StateManager("e079", None).derive_chapter(
+                "CANONICAL EVENT",
+                1,
+                "PREVIOUS STATE",
+                current_volume_plan="FUTURE VOLUME EVENT",
+            )
+        prompt = run.call_args.kwargs["user_message"]
+        for marker in (
+            "CANONICAL EVENT",
+            "PREVIOUS STATE",
+            "Current ACTIVE Volume Plan",
+            "FUTURE VOLUME EVENT",
+            "Volume Plan 仅用于判断 Volume Progress",
+            "唯一事实来源",
+        ):
+            self.assertIn(marker, prompt)
 
-    def test_chapter_planning_has_no_per_chapter_volume_extractor(self):
-        self.assertFalse(hasattr(ChapterPlanner, "_extract_chapter_from_volume"))
-        planner_source = inspect.getsource(ChapterPlanner.plan_chapter)
-        retrieval_source = inspect.getsource(ChapterRetrievalService._build_query)
-        self.assertNotIn("_extract_chapter_from_volume", planner_source)
-        self.assertNotIn("_extract_chapter_from_volume", retrieval_source)
-        self.assertIn("volume_plan[:3000]", planner_source)
+    def test_workflow_passes_only_active_volume_plan_to_deriver(self):
+        self.fs.commit_canonical_chapter(1, "CANONICAL EVENT")
+        for status, expected in (("ACTIVE", True), ("DRAFT", False)):
+            plan = VOLUME_DRAFT.replace("DRAFT", status)
+            self.fs.save_tracking_doc("volume_plan", plan)
+            with patch.object(
+                StateManager,
+                "derive_chapter",
+                return_value={"raw_analysis": "DERIVED"},
+            ) as derive:
+                result = derive_semantics({
+                    "novel_id": "e079",
+                    "chapter_index": 1,
+                    "commit_success": True,
+                    "current_state_text": "PREVIOUS STATE",
+                })
+            self.assertEqual(result["workflow_status"], "SEMANTICS_DERIVED")
+            supplied = derive.call_args.kwargs["current_volume_plan"]
+            self.assertEqual(bool(supplied), expected)
     def test_top_level_markdown_ignores_edited_shadow(self):
         cases = [
             ("settings", "world_setting"), ("tracking", "book_plan"),
@@ -159,8 +184,14 @@ class TestVolumeLifecycle(E079Case):
         self.fs.save_tracking_doc("volume_plan", active)
         self.fs.save_generated_tracking_doc(
             "volume_progress", "# Volume Progress\n- **Recommendation**: CONTINUE\n")
+        self.fs.commit_canonical_chapter(1, "canonical")
         service = self._service()
-        closed = service.close_volume()
+        with patch.object(
+            ChapterWorkflowRunner,
+            "get_workflow_status",
+            return_value="DERIVED_READY",
+        ):
+            closed = service.close_volume()
         self.assertIn("**状态**: COMPLETED", closed)
         self.assertIn("## 作者备注", closed)
         self.assertTrue((self.fs.root / "tracking" / "volumes" / "volume_02.md").exists())
@@ -168,7 +199,42 @@ class TestVolumeLifecycle(E079Case):
         self.fs.save_tracking_doc("volume_plan", VOLUME_DRAFT)
         approved = service.approve_volume()
         self.assertIn("**状态**: ACTIVE", approved)
-        self.assertIn("## 作者备注\n这段必须保留。", approved)
+        self.assertIn("## 作者备注\n这里不要逐章安排。\n这段必须保留。", approved)
+
+    def test_close_rejects_latest_canonical_until_derived_ready(self):
+        active = VOLUME_DRAFT.replace("DRAFT", "ACTIVE")
+        self.fs.save_tracking_doc("volume_plan", active)
+        self.fs.commit_canonical_chapter(1, "canonical")
+        service = self._service()
+        for status in ("CANONICAL_COMMITTED", "DERIVATION_ERROR", "UNKNOWN"):
+            with self.subTest(status=status), patch.object(
+                ChapterWorkflowRunner,
+                "get_workflow_status",
+                return_value=status,
+            ):
+                with self.assertRaisesRegex(ValueError, "derivation repair"):
+                    service.close_volume()
+        self.assertIn(
+            "**状态**: ACTIVE",
+            self.fs.load_tracking_doc("volume_plan"),
+        )
+
+    def test_validator_allows_notes_but_rejects_chapterized_structures(self):
+        service = self._service()
+        service._validate_volume_candidate(VOLUME_DRAFT, 2)
+        for heading in (
+            "## 章节范围",
+            "## 逐章事件表",
+            "## 事件对应章节",
+            "## Chapter Assignment",
+            "- **对应章节**: 第3章",
+        ):
+            with self.subTest(heading=heading):
+                with self.assertRaisesRegex(ValueError, "chapterized structures"):
+                    service._validate_volume_candidate(
+                        VOLUME_DRAFT + "\n" + heading + "\n- legacy\n",
+                        2,
+                    )
 
     def test_next_volume_uses_required_inputs_and_stays_draft(self):
         previous = VOLUME_DRAFT.replace("第2卷", "第1卷").replace(

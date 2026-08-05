@@ -261,6 +261,24 @@ Book Plan 是整本书的长期战略，只写长期有效的内容：
             return text
         if plan.status.upper() != "ACTIVE":
             raise ValueError(f"Only an ACTIVE volume can close; current status is {plan.status}")
+        chapters = self.file_store.list_chapters()
+        if not chapters:
+            raise ValueError(
+                "close-volume requires a canonical chapter whose derivation is DERIVED_READY"
+            )
+        match = re.fullmatch(r"chapter_(\d{4})\.md", chapters[-1].name)
+        if match is None:
+            raise ValueError("Cannot determine the latest canonical chapter")
+        latest_chapter = int(match.group(1))
+        from src.workflows.chapter_runner import ChapterWorkflowRunner
+        status = ChapterWorkflowRunner(
+            self.novel_id, latest_chapter
+        ).get_workflow_status()
+        if status != "DERIVED_READY":
+            raise ValueError(
+                f"Latest canonical chapter {latest_chapter} is {status or 'UNKNOWN'}, "
+                "not DERIVED_READY; run derivation repair before close-volume"
+            )
         completed = self._with_volume_status(text, "COMPLETED")
         archive = (
             self.file_store.root / "tracking" / "volumes" /
@@ -374,10 +392,49 @@ per-chapter outline. Output exactly this Markdown structure:
             problems.append("missing story path")
         if not plan.target_end_state.strip():
             problems.append("missing target end state")
-        forbidden = ["章节范围", "事件链", "对应章节", "逐章"]
-        found = [term for term in forbidden if term in text]
+        structural_patterns = {
+            "章节范围": (
+                r"(?:^|\n)\s*(?:#{1,6}\s*章节范围\s*|"
+                r"(?:[-*]\s*)?(?:\*\*)?章节范围(?:\*\*)?\s*[:：])"
+            ),
+            "逐章事件表": (
+                r"(?:^|\n)\s*(?:#{1,6}\s*逐章事件表\s*|"
+                r"(?:[-*]\s*)?(?:\*\*)?逐章事件表(?:\*\*)?\s*[:：])"
+            ),
+            "事件对应章节": (
+                r"(?:^|\n)\s*(?:#{1,6}\s*(?:事件对应章节|对应章节)\s*|"
+                r"(?:[-*]\s*)?(?:\*\*)?(?:事件对应章节|对应章节)"
+                r"(?:\*\*)?\s*[:：])"
+            ),
+            "chapter assignment": (
+                r"(?:^|\n)\s*(?:#{1,6}\s*chapter assignments?\s*|"
+                r"(?:[-*]\s*)?(?:\*\*)?chapter assignments?"
+                r"(?:\*\*)?\s*[:：])"
+            ),
+        }
+        found = [
+            label for label, pattern in structural_patterns.items()
+            if re.search(pattern, text, re.IGNORECASE)
+        ]
+        table_rows = [
+            line for line in text.splitlines()
+            if line.lstrip().startswith("|")
+        ]
+        if any(
+            re.search(r"\|\s*(?:章节|chapter)\s*\|", row, re.IGNORECASE)
+            or re.search(
+                r"\|\s*(?:对应章节|chapter assignment)\s*\|",
+                row,
+                re.IGNORECASE,
+            )
+            for row in table_rows
+        ):
+            found.append("chapter assignment table")
         if found:
-            problems.append("chapterized fields are forbidden: " + ", ".join(found))
+            problems.append(
+                "chapterized structures are forbidden: "
+                + ", ".join(dict.fromkeys(found))
+            )
         if problems:
             raise ValueError("Invalid Volume Plan:\n  - " + "\n  - ".join(problems))
         return plan

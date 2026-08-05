@@ -58,6 +58,15 @@ class ChapterWorkflowRunner:
             return self._waiting_result(snapshot)
         return dict(result)
 
+    def get_workflow_status(self) -> str:
+        """Return this chapter's durable terminal/checkpoint status."""
+        connection, _checkpointer, graph = self._open_graph()
+        try:
+            snapshot = graph.get_state(self.config)
+            return str(snapshot.values.get("workflow_status", "")).upper()
+        finally:
+            connection.close()
+
     def run(
         self,
         chapter_outline: str = "",

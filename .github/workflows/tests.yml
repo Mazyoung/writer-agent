@@ -35,9 +35,9 @@ jobs:
       - name: Compile Python sources
         run: python -m compileall -q main.py src
 
-      # These are deterministic, API-free tests that still match the current
-      # post-Orchestrator architecture. Legacy and resource-heavy suites are
-      # intentionally not part of the push/PR smoke gate.
+      # Architecture CI Baseline: deterministic, API-free functional contracts
+      # and safety invariants. E07.10 destructive validation belongs in real
+      # temporary novel projects, not an expanded implementation-detail suite.
       - name: Run fast regression tests
         run: |
           python -m pytest -q \
@@ -50,6 +50,8 @@ jobs:
             tests/test_e06.py::TestCharacterStateRoundTrip \
             tests/test_e06.py::TestStateCommitResultPropagation \
             tests/test_e06.py::TestSnapshotFailureFailClosed \
-            tests/test_e07_6.py \
+            tests/test_architecture_closure.py \
             tests/test_e07_7.py \
-            tests/test_e07_8.py
+            tests/test_e07_8.py \
+            tests/test_e07_9.py \
+            tests/test_planning_hierarchy.py

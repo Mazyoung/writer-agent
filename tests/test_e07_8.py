@@ -128,7 +128,7 @@ class TestStateDeltaParsing(E078Case):
         delta = StateDelta.from_analysis(FULL_DELTA_ANALYSIS)
         candidate = self.store.apply_delta(
             base, delta, 1, "旧城追踪", 1234,
-            "chapters/chapter_0001_styled_x.md")
+            "chapters/chapter_0001.md")
         self.assertEqual(candidate.characters[0].location, "旧城区")
         self.assertEqual(candidate.items[0].holder, "赵诚")
         self.assertEqual(candidate.relationships[0].normalized_key(), ("林默", "赵诚"))

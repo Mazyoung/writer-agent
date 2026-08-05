@@ -149,7 +149,7 @@ class TestFactOnlyChroma(E077Case):
         digest = FactDigest.from_markdown(ATOMIC_MD)
         count = store.index_facts(
             "e077", "main", 72, digest.atomic_facts,
-            "chapters/chapter_0072_styled_x.md",
+            "chapters/chapter_0072.md",
             "states/fact_digest_ch0072_x.md",
         )
         self.assertEqual(count, 2)
