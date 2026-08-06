@@ -29,6 +29,7 @@ class ChapterWorkflowState(TypedDict, total=False):
     chapter_outline: str
     extra_instructions: str
     chapter_intent: str
+    chapter_mode: str
 
     chapter_plan_text: str
     historical_evidence: str
@@ -71,6 +72,7 @@ class ChapterWorkflowState(TypedDict, total=False):
     retrieval_trace_path: str
     retrieved_facts: list[dict]
     expanded_sources: list[dict]
+    writing_context_path: str
     chapter_sources_path: str
     fact_digest_path: str
     atomic_fact_count: int
@@ -131,6 +133,12 @@ def preflight(state: ChapterWorkflowState) -> dict[str, Any]:
             f"Unsupported branch_id '{branch_id}': E07 currently supports only 'main'"
         )
 
+    chapter_mode = state.get("chapter_mode", "agent")
+    if chapter_mode not in {"agent", "human"}:
+        return _error_result(
+            f"Invalid chapter_mode {chapter_mode!r}: expected 'agent' or 'human'"
+        )
+
     fs = FileStore(novel_id, get_settings().data_dir)
     if fs.canonical_chapter_path(chapter_index).exists():
         return _error_result(
@@ -171,6 +179,109 @@ def load_chapter_intent(state: ChapterWorkflowState) -> dict[str, Any]:
     else:
         intent = fs.load_canonical("briefs", prefix) or ""
     return {"chapter_intent": intent, "workflow_status": "INTENT_LOADED"}
+
+
+def _route_after_intent(state: ChapterWorkflowState) -> str:
+    """Old checkpoints have Agent semantics; new modes were validated at start."""
+    if state.get("workflow_status") == "error":
+        return END
+    if state.get("chapter_mode", "agent") == "human":
+        return "prepare_human_context"
+    return "plan_chapter"
+
+
+def _evidence_section(evidence: str, heading: str) -> str:
+    match = re.search(
+        rf"^## {re.escape(heading)}\s*\n(.*?)(?=^## |\Z)",
+        evidence,
+        re.MULTILINE | re.DOTALL,
+    )
+    return match.group(1).strip() if match else "- None retrieved"
+
+
+@_guard_node
+def prepare_human_context(state: ChapterWorkflowState) -> dict[str, Any]:
+    """Retrieve bounded history and persist an author-readable generated report."""
+    from src.workflows.retrieval_service import ChapterRetrievalService
+
+    intent = state.get("chapter_intent", "").strip()
+    if not intent:
+        return _error_result(
+            "Human Mode requires a non-empty Chapter Intent for historical retrieval."
+        )
+    retrieval = ChapterRetrievalService(state["novel_id"]).retrieve(
+        state["chapter_index"],
+        chapter_intent=intent,
+        current_state_text=state.get("current_state_text", ""),
+        query_mode="human",
+    )
+    if not retrieval.trace.success:
+        return _error_result(
+            "Historical retrieval failed: " + retrieval.trace.error_message
+        )
+    if retrieval.warnings:
+        return _error_result("; ".join(retrieval.warnings))
+
+    evidence = retrieval.evidence.replace(
+        "## Historical Atomic Facts", "## Relevant Historical Facts"
+    ).replace(
+        "## On-demand Historical Source Excerpts", "## Relevant Historical Prose"
+    )
+    chapter_index = state["chapter_index"]
+    context = "\n".join([
+        f"# Chapter {chapter_index} Writing Context",
+        "",
+        "> Automatically generated retrieval report; not a canonical production source.",
+        "",
+        "## Chapter Intent",
+        intent,
+        "",
+        "## Current State",
+        state.get("current_state_text", "").strip() or "No current state content.",
+        "",
+        "## Relevant Historical Facts",
+        _evidence_section(evidence, "Relevant Historical Facts"),
+        "",
+        "## Relevant Historical Prose",
+        _evidence_section(evidence, "Relevant Historical Prose"),
+        "",
+        "## Author Knowledge",
+        _evidence_section(evidence, "Author Knowledge"),
+        "",
+    ])
+    fs = FileStore(state["novel_id"], get_settings().data_dir)
+    path = fs.save_generated_tracking_doc(
+        f"writing_context_ch{chapter_index:04d}", context
+    )
+    return {
+        "historical_evidence": retrieval.evidence,
+        "retrieval_success": True,
+        "retrieval_result_count": len(retrieval.trace.results),
+        "retrieval_trace_path": retrieval.trace_path,
+        "retrieved_facts": retrieval.fact_candidates,
+        "expanded_sources": retrieval.source_excerpts,
+        "writing_context_path": str(path.relative_to(fs.root)).replace("\\", "/"),
+        "warnings": retrieval.warnings,
+        "workflow_status": "HUMAN_CONTEXT_READY",
+    }
+
+
+def await_human_writing(state: ChapterWorkflowState) -> dict[str, Any]:
+    """Stop after context preparation; candidate submission is a later stage."""
+    interrupt({
+        "type": "human_writing",
+        "novel_id": state.get("novel_id", ""),
+        "chapter_index": state.get("chapter_index", 0),
+        "writing_context_path": state.get("writing_context_path", ""),
+        "message": (
+            "Relevant writing context is ready. Waiting for the human author "
+            "to write this chapter."
+        ),
+        "allowed_actions": [],
+    })
+    return _error_result(
+        "Human Candidate submission is not implemented in E07.9.1-A"
+    )
 
 
 @_guard_node
@@ -932,6 +1043,8 @@ def build_chapter_workflow(checkpointer: Any = None) -> Any:
         ("preflight", preflight),
         ("load_current_state", load_current_state),
         ("load_chapter_intent", load_chapter_intent),
+        ("prepare_human_context", prepare_human_context),
+        ("await_human_writing", await_human_writing),
         ("plan_chapter", plan_chapter),
         ("review_plan", review_plan),
         ("parse_plan_decision", parse_plan_decision),
@@ -957,7 +1070,6 @@ def build_chapter_workflow(checkpointer: Any = None) -> Any:
     for node, target in (
         ("preflight", "load_current_state"),
         ("load_current_state", "load_chapter_intent"),
-        ("load_chapter_intent", "plan_chapter"),
         ("plan_chapter", "review_plan"),
         ("review_plan", "parse_plan_decision"),
         ("write_draft", "style_edit"),
@@ -971,6 +1083,21 @@ def build_chapter_workflow(checkpointer: Any = None) -> Any:
             lambda state, next_node=target: _route_after_node(state, next_node),
             {target: target, END: END},
         )
+
+    graph.add_conditional_edges(
+        "load_chapter_intent", _route_after_intent,
+        {
+            "plan_chapter": "plan_chapter",
+            "prepare_human_context": "prepare_human_context",
+            END: END,
+        },
+    )
+    graph.add_conditional_edges(
+        "prepare_human_context",
+        lambda state: _route_after_node(state, "await_human_writing"),
+        {"await_human_writing": "await_human_writing", END: END},
+    )
+    graph.add_edge("await_human_writing", END)
 
     graph.add_conditional_edges(
         "parse_plan_decision", _route_after_plan_decision,

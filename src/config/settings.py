@@ -47,10 +47,28 @@ class Settings:
         self.data_dir = self.project_root / "data"
         self.prompts_dir = Path(__file__).parent / "prompts"
 
+        # ── 章节创作模式 ───────────────────────────────────
+        self.chapter_mode = os.getenv("CHAPTER_MODE", "agent").strip().lower()
+        if self.chapter_mode not in {"agent", "human"}:
+            raise ValueError(
+                "CHAPTER_MODE must be one of: agent, human "
+                f"(got {self.chapter_mode!r})"
+            )
+
         # ── E04 RAG 配置 ──────────────────────────────────
         self.rag_chunk_size: int = 800
         self.rag_chunk_overlap: int = 100
-        self.rag_top_k: int = 5
+        raw_rag_top_k = os.getenv("RAG_TOP_K", "5").strip()
+        try:
+            self.rag_top_k = int(raw_rag_top_k)
+        except ValueError as exc:
+            raise ValueError(
+                f"RAG_TOP_K must be a positive integer (got {raw_rag_top_k!r})"
+            ) from exc
+        if self.rag_top_k <= 0:
+            raise ValueError(
+                f"RAG_TOP_K must be a positive integer (got {raw_rag_top_k!r})"
+            )
 
         # 模型名称映射
         self.model_names = {

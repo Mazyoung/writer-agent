@@ -117,6 +117,9 @@ class ChapterWorkflowRunner:
                 "chapter_outline": chapter_outline,
                 "extra_instructions": extra_instructions,
                 "chapter_intent": chapter_intent,
+                # Freeze the resolved mode into the first checkpoint. Resume never
+                # consults later environment/config changes for this execution.
+                "chapter_mode": get_settings().chapter_mode,
                 "workflow_status": "running",
                 "warnings": [],
             }

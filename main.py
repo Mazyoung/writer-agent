@@ -246,14 +246,22 @@ def cmd_write(args):
         return
     if status == "WAITING_HUMAN":
         print(f"\n  Chapter workflow waiting for human input: review={verdict}")
+        human_writing = False
         for pending in result.get("interrupts", []):
             payload = pending.get("value", {})
             print(f"  Interrupt ID: {pending.get('id', '')}")
             print(f"  Type: {payload.get('type', 'unknown')}")
             print(f"  Planning level: {payload.get('planning_level', 'L1')}")
             print(f"  Edit file: {payload.get('edit_path', '')}")
+            if payload.get("type") == "human_writing":
+                human_writing = True
+                print(f"  Writing context: {payload.get('writing_context_path', '')}")
+                print(f"  {payload.get('message', '')}")
             for reason in payload.get("reasons", [])[:5]:
                 print(f"    - {reason}")
+        if human_writing:
+            print("  Candidate submission will be added in E07.9.1-B.")
+            return
         print(
             "  Resume with --action approve|agent_edit|manual_edit|regenerate|"
             "pause|discard (manual_edit reads the Edit file shown above)."

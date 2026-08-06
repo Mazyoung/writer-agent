@@ -91,6 +91,7 @@ class ChapterRetrievalService:
         extra_instructions: str = "",
         chapter_intent: str = "",
         current_state_text: str = "",
+        query_mode: str = "agent",
     ) -> RetrievalOutcome:
         branch_id = DEFAULT_BRANCH_ID
         trace = FactRetrievalTrace(
@@ -111,7 +112,7 @@ class ChapterRetrievalService:
         try:
             trace.query = self._build_query(
                 chapter_index, chapter_outline, extra_instructions,
-                chapter_intent, current_state_text)
+                chapter_intent, current_state_text, query_mode=query_mode)
             trace.results = self.chroma.search(
                 novel_id=self.novel_id,
                 branch_id=branch_id,
@@ -155,11 +156,23 @@ class ChapterRetrievalService:
         extra_instructions: str,
         chapter_intent: str = "",
         current_state_text: str = "",
+        query_mode: str = "agent",
     ) -> str:
+        if query_mode not in {"agent", "human"}:
+            raise ValueError(f"Unsupported retrieval query mode: {query_mode}")
+        if query_mode == "human" and not chapter_intent.strip():
+            raise ValueError(
+                "Human Mode requires a non-empty Chapter Intent for historical retrieval."
+            )
+
         parts: list[str] = []
 
         volume_plan = self.fs.load_tracking_doc("volume_plan") or ""
-        if volume_plan:
+        if query_mode == "human":
+            # Intent is deliberately first and largest. Present-state entities and
+            # the active Volume Plan are only retrieval hints/constraints.
+            parts.append("Chapter Intent (primary): " + chapter_intent.strip()[:1000])
+        elif volume_plan:
             parts.append(volume_plan[:1000])
 
         if chapter_outline:
@@ -181,7 +194,10 @@ class ChapterRetrievalService:
             if entities:
                 parts.append("当前实体: " + ", ".join(entities[:12]))
 
-        if chapter_intent:
+        if query_mode == "human" and volume_plan:
+            parts.append("Active Volume Plan (supplemental): " + volume_plan[:500])
+
+        if chapter_intent and query_mode == "agent":
             parts.append(chapter_intent[:500])
         if extra_instructions:
             parts.append(extra_instructions[:500])
