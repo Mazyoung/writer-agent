@@ -41,7 +41,10 @@ MODEL_ENV_KEYS = {
     "ARCHITECT_PROVIDER", "ARCHITECT_API_KEY", "ARCHITECT_BASE_URL",
     "ARCHITECT_MODEL", "ARCHITECT_MAX_TOKENS",
     "PLAN_PROVIDER", "PLAN_API_KEY", "PLAN_BASE_URL", "PLAN_MAX_TOKENS",
-    "PLAN_MODEL", "WRITE_PROVIDER", "WRITE_API_KEY", "WRITE_BASE_URL",
+    "PLAN_MODEL", "QUERY_INTENT_PROVIDER", "QUERY_INTENT_API_KEY",
+    "QUERY_INTENT_BASE_URL", "QUERY_INTENT_MODEL",
+    "QUERY_INTENT_MAX_TOKENS",
+    "WRITE_PROVIDER", "WRITE_API_KEY", "WRITE_BASE_URL",
     "WRITE_MODEL", "WRITE_MAX_TOKENS",
     "DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL",
     "CHAPTER_MODE", "AGENT_EXECUTION", "RAG_TOP_K", "AUTO_SAVEPOINT_EVERY",
@@ -112,6 +115,46 @@ class ModelSlotSettingsTests(unittest.TestCase):
         self.assertEqual("autonomous", settings.agent_execution)
         with self.assertRaisesRegex(ValueError, "AGENT_EXECUTION"):
             self._settings("AGENT_EXECUTION=unbounded\n")
+
+    def test_query_intent_defaults_to_resolved_plan_configuration(self):
+        settings = self._settings(
+            "PLAN_PROVIDER=openai_compatible\n"
+            "PLAN_API_KEY=plan-key\n"
+            "PLAN_BASE_URL=https://plan.example/v1\n"
+            "PLAN_MODEL=plan-model\n"
+            "PLAN_MAX_TOKENS=9000\n"
+        )
+        plan = settings.get_model_slot("plan")
+        query = settings.get_query_intent_slot()
+        self.assertEqual(
+            (plan.provider, plan.api_key, plan.base_url, plan.model, plan.max_tokens),
+            (query.provider, query.api_key, query.base_url, query.model, query.max_tokens),
+        )
+
+    def test_query_intent_fields_override_plan_independently(self):
+        settings = self._settings(
+            "PLAN_PROVIDER=deepseek\n"
+            "PLAN_API_KEY=plan-key\n"
+            "PLAN_BASE_URL=https://plan.example\n"
+            "PLAN_MODEL=plan-model\n"
+            "PLAN_MAX_TOKENS=9000\n"
+            "QUERY_INTENT_PROVIDER=openai_compatible\n"
+            "QUERY_INTENT_API_KEY=query-key\n"
+            "QUERY_INTENT_BASE_URL=https://query.example/v1\n"
+            "QUERY_INTENT_MODEL=query-model\n"
+            "QUERY_INTENT_MAX_TOKENS=4096\n"
+        )
+        query = settings.get_query_intent_slot()
+        self.assertEqual(
+            (
+                "openai_compatible", "query-key", "https://query.example/v1",
+                "query-model", 4096,
+            ),
+            (
+                query.provider, query.api_key, query.base_url,
+                query.model, query.max_tokens,
+            ),
+        )
 
     def test_explicit_provider_uses_own_connection(self):
         settings = self._settings(

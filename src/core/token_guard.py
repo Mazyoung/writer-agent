@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+import re
 from collections.abc import Mapping
 
 from src.config.settings import ModelSlot
@@ -11,8 +13,16 @@ PLANNING_CONTEXT_SAFETY_TOKENS = 100_000
 
 
 def estimate_tokens(text: str) -> int:
-    """Conservative dependency-free estimate; never used to truncate content."""
-    return (len(text) + 3) // 4 if text else 0
+    """Conservative tokenizer-free estimate for mixed Chinese/ASCII content."""
+    if not text:
+        return 0
+    cjk = len(re.findall(
+        r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]",
+        text,
+    ))
+    non_cjk = len(text) - cjk
+    base = cjk + math.ceil(non_cjk / 4)
+    return math.ceil(base * 1.15)
 
 
 def guard_planning_context(

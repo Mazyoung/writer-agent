@@ -223,8 +223,8 @@ class ProgressAndContinuationTests(SmokeClosureCase):
         fs = FileStore("smoke", self.settings.data_dir)
         fs.commit_canonical_chapter(1, "正文")
         with patch(
-            "src.workflows.chapter_progress._status",
-            return_value="DERIVATION_ERROR",
+            "src.workflows.chapter_progress.is_derived_ready",
+            return_value=False,
         ):
             with self.assertRaisesRegex(ValueError, "repair-derivation"):
                 ensure_chapter_can_start("smoke", 2)
@@ -233,8 +233,8 @@ class ProgressAndContinuationTests(SmokeClosureCase):
         fs = FileStore("smoke", self.settings.data_dir)
         fs.commit_canonical_chapter(1, "正文")
         with patch(
-            "src.workflows.chapter_progress._status",
-            return_value="DERIVED_READY",
+            "src.workflows.chapter_progress.is_derived_ready",
+            return_value=True,
         ):
             with self.assertRaisesRegex(ValueError, "下一章：第 2 章"):
                 ensure_chapter_can_start("smoke", 1)
@@ -302,9 +302,10 @@ class ProgressAndContinuationTests(SmokeClosureCase):
              "next": [], "interrupts": []},
             {"values": {}, "next": [], "interrupts": []},
         ]
-        with patch.object(
-            ChapterWorkflowRunner, "inspect", side_effect=inspections
-        ):
+        with patch(
+            "src.workflows.continuation.is_derived_ready",
+            return_value=True,
+        ), patch.object(ChapterWorkflowRunner, "inspect", side_effect=inspections):
             decision = service.route()
         self.assertEqual(
             {"action": "start_chapter", "chapter_index": 2}, decision

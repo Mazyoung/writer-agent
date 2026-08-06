@@ -13,7 +13,7 @@
    - **L1**：问题仅影响当前章节（局部文笔、场景执行）
    - **L2**：问题影响当前卷的战术事件链（需要修改 Chapter Plan 或部分 Volume Plan）
    - **L3**：问题违反 Book Plan 的战略约束（关键角色提前死亡、世界观铁律违反、不可逆角色状态失控）
-3. **HALT 判定**：当发现 L3 问题时必须输出 HALT，不得以 PASS 或 NEEDS_REVISION 掩盖
+3. **高层冲突判定**：L2/L3 问题必须明确列为 NEEDS_REVISION，不得以 PASS 掩盖
 
 ## 你要做的四件事
 
@@ -96,7 +96,6 @@ Entities 只列事实直接涉及的实体；Paragraph Range 必须引用输入�
 
 - **PASS**：没有任何 T1 硬错误，质量至少 PASS 或 MINOR。章节可以正式归档。
 - **NEEDS_REVISION**：存在 T1 硬错误或质量 MAJOR。需要重写当前章节修复问题。
-- **HALT**：出现不能被单章重写解决的战略级问题（世界观违反、连续多章逻辑崩溃、角色状态不可逆失控）。需要人工介入。
 
 ## 输出格式
 
@@ -174,7 +173,7 @@ Entities 只列事实直接涉及的实体；Paragraph Range 必须引用输入�
 - **角色塑造**: PASS / MINOR / MAJOR — [说明]
 
 ## 审阅决策
-- **决策**: PASS / NEEDS_REVISION / HALT
+- **决策**: PASS / NEEDS_REVISION
 - **严重性**: PASS / MINOR / MAJOR
 - **主要问题**: [如有，分号分隔]
 - **规划级别**: L1 / L2 / L3

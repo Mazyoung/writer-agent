@@ -2,9 +2,9 @@
 
 覆盖:
 - A. Current State Update (item, relationship, foreshadowing)
-- B. ReviewDecision parsing (PASS / NEEDS_REVISION / HALT / UNKNOWN)
+- B. ReviewDecision parsing (PASS / NEEDS_REVISION / UNKNOWN)
 - C. World Setting in review context
-- D. Decision routing (PASS→commit, NEEDS_REVISION→no RAG, HALT→no RAG)
+- D. Decision routing (PASS→commit, NEEDS_REVISION/UNKNOWN→no RAG)
 - E. E05 single-pass invariant preserved
 - F. Parse failure → fail-closed (UNKNOWN)
 - G. Prompt/parser contract
@@ -152,54 +152,6 @@ MOCK_RAW_ANALYSIS_NEEDS_REVISION = """# 第2章复盘分析
 - **规划级别**: L1
 """
 
-MOCK_RAW_ANALYSIS_HALT = """# 第5章复盘分析
-
-## 事实摘要
-### 确定的物品
-无
-### 确定的角色状态
-柯林：重伤；王长林：死亡
-### 确定的事件
-王长林在交易站被杀
-### 确定的数字/数据
-无
-### 明确未出现的内容
-无
-### 待解悬念
-凶手身份不明
-
-## 状态变更（State Delta）
-### 角色关系当前状态
-### 角色物品状态
-### 角色修炼状态
-### 伏笔状态
-
-## 追踪文档变更建议
-### 角色关系
-### 物品装备
-### 修炼体系
-
-## 一致性检查
-### T1（硬错误）
-- 王长林在Book Plan中列为第3卷关键角色，第5章即死亡违反全书战略约束
-### T2（软问题）
-无
-### T3（观察项）
-无
-
-## 质量审阅
-- **情节逻辑**: MAJOR — 关键角色提前死亡将导致后续多章节点失效
-- **节奏评估**: PASS
-- **大纲符合度**: MAJOR — 与Book Plan战略冲突
-- **角色塑造**: PASS
-
-## 审阅决策
-- **决策**: HALT
-- **严重性**: MAJOR
-- **主要问题**: 王长林提前死亡违反全书战略约束; 第2卷起角色节点全部失效
-- **规划级别**: L3
-"""
-
 MOCK_RAW_ANALYSIS_NO_DECISION = """# 第3章复盘分析
 
 ## 事实摘要
@@ -326,12 +278,6 @@ class TestReviewDecisionParsing(unittest.TestCase):
         self.assertEqual(rd.severity, "MAJOR")
         self.assertEqual(len(rd.t1_issues), 2)
         self.assertIn("徽章数量", rd.t1_issues[0])
-
-    def test_parse_halt(self):
-        rd = ReviewDecision.from_analysis(MOCK_RAW_ANALYSIS_HALT)
-        self.assertEqual(rd.verdict, "HALT")
-        self.assertEqual(rd.planning_level, "L3")
-        self.assertGreater(len(rd.reasons), 0)
 
     def test_parse_no_explicit_decision_infers_from_t1(self):
         """E06.1: 无显式审阅决策 section → UNKNOWN (fail-closed)，不推断 NEEDS_REVISION"""

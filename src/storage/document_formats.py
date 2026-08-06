@@ -1502,7 +1502,6 @@ from enum import Enum
 class DecisionVerdict(str, Enum):
     PASS = "PASS"
     NEEDS_REVISION = "NEEDS_REVISION"
-    HALT = "HALT"
     UNKNOWN = "UNKNOWN"
 
 
@@ -1519,7 +1518,7 @@ class ReviewDecision:
     Parsed deterministically from raw_analysis (no extra LLM).
     Fail-closed: UNKNOWN on parse failure.
     """
-    verdict: str = "UNKNOWN"        # PASS / NEEDS_REVISION / HALT / UNKNOWN
+    verdict: str = "UNKNOWN"        # PASS / NEEDS_REVISION / UNKNOWN
     severity: str = "PASS"          # PASS / MINOR / MAJOR
     reasons: list[str] = field(default_factory=list)
     t1_issues: list[str] = field(default_factory=list)    # hard errors
@@ -1612,8 +1611,6 @@ class ReviewDecision:
             rd.verdict = "PASS"
         elif raw in ("NEEDS_REVISION", "需修改", "需重写"):
             rd.verdict = "NEEDS_REVISION"
-        elif raw in ("HALT", "暂停", "需要人工"):
-            rd.verdict = "HALT"
         else:
             # Decision section exists but value is invalid/empty → UNKNOWN
             return rd

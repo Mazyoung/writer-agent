@@ -21,7 +21,11 @@ def validate_model_slot(slot: ModelSlot) -> None:
     if slot.provider not in {"deepseek", "openai_compatible", "anthropic"}:
         problems.append(f"provider 无效（{prefix}_PROVIDER）")
     if not slot.api_key:
-        if slot.name == "system":
+        if slot.name == "query_intent":
+            problems.append(
+                "缺少 API key（QUERY_INTENT_API_KEY；留空时继承 PLAN_API_KEY）"
+            )
+        elif slot.name == "system":
             problems.append(f"缺少 API key（{prefix}_API_KEY）")
         else:
             problems.append(
@@ -29,9 +33,17 @@ def validate_model_slot(slot: ModelSlot) -> None:
                 "connection 继承时请配置 SYSTEM_API_KEY）"
             )
     if slot.provider in {"deepseek", "openai_compatible"} and not slot.base_url:
-        problems.append(f"缺少 Base URL（{prefix}_BASE_URL）")
+        suffix = (
+            "；留空时继承 PLAN_BASE_URL"
+            if slot.name == "query_intent" else ""
+        )
+        problems.append(f"缺少 Base URL（{prefix}_BASE_URL{suffix}）")
     if not slot.model:
-        problems.append(f"缺少 model（{prefix}_MODEL）")
+        suffix = (
+            "；留空时继承 PLAN_MODEL"
+            if slot.name == "query_intent" else ""
+        )
+        problems.append(f"缺少 model（{prefix}_MODEL{suffix}）")
     if isinstance(slot.max_tokens, bool) or not isinstance(slot.max_tokens, int):
         problems.append(f"max_tokens 无效（{prefix}_MAX_TOKENS）")
     elif slot.max_tokens <= 0:

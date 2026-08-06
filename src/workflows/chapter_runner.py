@@ -128,7 +128,12 @@ class ChapterWorkflowRunner:
         return dict(result)
 
     def get_workflow_status(self) -> str:
-        """Return this chapter's durable terminal/checkpoint status."""
+        """Return durable completion first, otherwise the execution status."""
+        from src.storage.chapter_completion import is_derived_ready
+
+        if self.file_store.canonical_chapter_path(self.chapter_index).is_file():
+            if is_derived_ready(self.file_store, self.chapter_index):
+                return "DERIVED_READY"
         connection, _checkpointer, graph = self._open_graph()
         try:
             snapshot = graph.get_state(self.config)
@@ -376,18 +381,49 @@ class ChapterWorkflowRunner:
     @_novel_mutation_locked
     def repair_derivation(self) -> dict[str, Any]:
         """Resume only the first incomplete post-canonical derivation stage."""
+        from src.storage.chapter_completion import is_derived_ready
+
         connection, _checkpointer, graph = self._open_graph()
         try:
-            snapshot = graph.get_state(self.config)
-            values = dict(snapshot.values)
             if not self.file_store.canonical_chapter_path(self.chapter_index).exists():
                 raise ValueError("repair-derivation 需要 Canonical 正文")
+            if is_derived_ready(self.file_store, self.chapter_index):
+                return {
+                    "workflow_status": "DERIVED_READY",
+                    "chapter_index": self.chapter_index,
+                }
+
+            snapshot = graph.get_state(self.config)
+            values = dict(snapshot.values)
             if not values or values.get("commit_success") is not True:
-                raise ValueError("没有可用于修复的 Canonical chapter checkpoint")
-            if values.get("workflow_status") == "DERIVED_READY":
-                return values
-            if values.get("workflow_status") != "DERIVATION_ERROR":
-                raise ValueError("Chapter checkpoint 当前不是 DERIVATION_ERROR")
+                raise ValueError(
+                    "Canonical 已存在，但缺少可判断 Derivation 恢复位置的 "
+                    "LangGraph checkpoint；为避免重复或跳过派生阶段，系统已 fail-closed"
+                )
+            status = str(values.get("workflow_status", "")).upper()
+            legal = {
+                "CANONICAL_COMMITTED",
+                "SEMANTICS_DERIVED",
+                "CURRENT_STATE_PERSISTED",
+                "FACT_DIGEST_PERSISTED",
+                "VOLUME_PROGRESS_PERSISTED",
+                "CHAPTER_SOURCES_PERSISTED",
+                "DERIVATION_ERROR",
+            }
+            if status not in legal:
+                raise ValueError(
+                    f"Canonical 已存在，但 checkpoint 状态 {status or 'UNKNOWN'} "
+                    "不是可安全恢复的 Derivation 状态"
+                )
+
+            if status != "DERIVATION_ERROR" and snapshot.next:
+                print(
+                    "  [LangGraph] 正在从合法 Derivation checkpoint 继续："
+                    + ", ".join(snapshot.next)
+                )
+                return self._result_or_interrupt(
+                    graph, graph.invoke(None, config=self.config)
+                )
 
             if not values.get("derivation_raw_analysis"):
                 as_node, status = "commit_canonical_prose", "CANONICAL_COMMITTED"
@@ -407,7 +443,7 @@ class ChapterWorkflowRunner:
                 {"workflow_status": status, "error": None},
                 as_node=as_node,
             )
-            print(f"  [LangGraph] 正在修复以下阶段后的派生：{as_node}")
+            print(f"  [LangGraph] 正在从首个未完成阶段继续：{as_node}")
             return self._result_or_interrupt(
                 graph, graph.invoke(None, config=self.config)
             )

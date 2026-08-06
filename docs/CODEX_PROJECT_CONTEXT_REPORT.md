@@ -76,7 +76,7 @@ START → preflight
   → plan_chapter → write_draft → style_edit → save_styled
   → review_chapter → parse_decision
       PASS                 → commit_state
-      NEEDS_REVISION/HALT  → stop_non_pass → END
+      NEEDS_REVISION/旧停机状态  → stop_non_pass → END
       UNKNOWN/error        → END
   → commit success → save_fact_digest → rag_index → END
   → commit/digest error                         → END
@@ -208,7 +208,7 @@ styled chapter
 - LangGraph persistent checkpoint/resume。
 - HITL interrupt/resume。
 - NEEDS_REVISION 自动 rewrite/re-review loop。
-- HALT 后的自动/协作 replan workflow。
+- 旧停机状态 后的自动/协作 replan workflow。
 - 完整 rollback、branch switching 与 future-state invalidation/rebuild。
 - 自动应用 L2/L3 PlanningModificationReport / StrategicRepairCase。
 - Hybrid Search、BM25、reranker、query rewrite、GraphRAG 等高级检索。
@@ -247,7 +247,7 @@ styled chapter
 
 ## 10. 后续开发注意事项与建议
 
-1. 首先把当前未提交 E07.3 草稿作为独立工作项收口：更新 topology/node contract 测试，补齐 PASS、NEEDS_REVISION、HALT、UNKNOWN、node error、commit failure、digest failure、RAG failure 的 graph-level invoke 验证；全部通过后再更新 README/E07 报告。
+1. 首先把当前未提交 E07.3 草稿作为独立工作项收口：更新 topology/node contract 测试，补齐 PASS、NEEDS_REVISION、旧停机状态、UNKNOWN、node error、commit failure、digest failure、RAG failure 的 graph-level invoke 验证；全部通过后再更新 README/E07 报告。
 2. 在 E07.3 通过前，不切换 `main.py`，不引入 checkpoint/HITL，避免把多阶段问题混在一起。
 3. E07.4 前先定义每个 timestamped side-effect node 的 replay/idempotency contract，并区分 workflow checkpoint 与 canonical state。
 4. 保持 `StateManager.update_tracking_docs()` 为唯一 canonical structured-memory 提交入口，不能在 Graph 中复制 State Delta parser 或多文件事务。

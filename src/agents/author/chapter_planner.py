@@ -9,6 +9,8 @@ ChapterPlanner — 章规划师（重写版）。
 
 import re
 from src.core.agent_base import BaseAgent
+from src.core.text_windows import previous_chapter_end
+from src.core.token_guard import guard_planning_context
 from src.config.settings import get_settings
 from src.storage.file_store import FileStore
 from src.storage.document_formats import ChapterPlan, ContextPackage, VolumePlan
@@ -75,6 +77,7 @@ class ChapterPlanner(BaseAgent):
                      chapter_outline: str = "",
                      extra_instructions: str = "",
                      rag_evidence: str = "",
+                     query_intent: str = "",
                      chapter_intent: str = "",
                      current_state_text: str = "") -> ChapterPlan:
         """生成完整章规划（Part A + Part B）。
@@ -93,7 +96,7 @@ class ChapterPlanner(BaseAgent):
         active_vp = VolumePlan.from_markdown(volume_plan)
         print(f"  [ChapterPlanner] 活跃卷: 第{active_vp.volume_number}卷（{active_vp.status}）")
         world_setting = self.fs.load_canonical("settings", "world_setting") or ""
-        prev_chapter_end = self._load_prev_chapter_end(chapter_index)
+        prev_chapter_end = previous_chapter_end(self.fs, chapter_index)
         fact_context = ""  # E07.7: global history enters only through retrieved FACTs.
         if not current_state_text:
             from src.storage.current_state_store import CurrentStateStore
@@ -113,7 +116,10 @@ class ChapterPlanner(BaseAgent):
 
         # 1. World Setting / Hard Rules
         if world_setting:
-            parts.append(f"### 世界观设定（最高优先级·硬规则）\n{world_setting[:2000]}")
+            parts.append(f"### 世界观设定（最高优先级·硬规则）\n{world_setting}")
+
+        if query_intent:
+            parts.append(f"## Retrieval Query Intent\n{query_intent}")
 
         # 1.5. E07.7 FACT candidates plus narrowly expanded source prose.
         if rag_evidence:
@@ -125,10 +131,10 @@ class ChapterPlanner(BaseAgent):
             )
 
         # 2. Book Strategic Constraints
-        parts.append(f"### 全书战略规划 Book Plan（战略约束层，方向性参考）\n{book_plan[:2000]}")
+        parts.append(f"### 全书战略规划 Book Plan（战略约束层，方向性参考）\n{book_plan}")
 
         # 3. Volume-level path. The Planner chooses this chapter's events.
-        parts.append(f"### 当前卷大故事路径（Volume Plan）\n{volume_plan[:3000]}")
+        parts.append(f"### 当前卷大故事路径（Volume Plan）\n{volume_plan}")
         if chapter_outline:
             parts.append(f"### 作者提供的本章补充意图\n{chapter_outline}")
 
@@ -136,11 +142,11 @@ class ChapterPlanner(BaseAgent):
         parts.append("## 当前状态（tracking/current_state.md；Part B 原材料）")
         parts.append(current_state_text or "暂无")
         if fact_context:
-            parts.append(f"### 前章事实摘要（已发生的实际事实，优先于未来计划）\n{fact_context[:2500]}")
+            parts.append(f"### 前章事实摘要（已发生的实际事实，优先于未来计划）\n{fact_context}")
 
         # 5. Recent Chapter Context
         if prev_chapter_end:
-            parts.append(f"### [必读] 上一章结尾\n{prev_chapter_end[-800:]}")
+            parts.append(f"### [必读] 上一章结尾\n{prev_chapter_end}")
 
         # 6. 本章任务层
         if chapter_intent:
@@ -155,6 +161,16 @@ class ChapterPlanner(BaseAgent):
             "[PLANNING CONFLICT] 标注冲突说明，不要自行重写历史。".format(chapter_index))
 
         user_msg = "\n\n".join(parts)
+        guard_planning_context(self.model_slot, {
+            "world_setting.md": world_setting,
+            "book_plan.md": book_plan,
+            "volume_plan.md": volume_plan,
+            "current_state.md": current_state_text,
+            "human_intent": chapter_intent,
+            "query_intent": query_intent,
+            "rag_evidence": rag_evidence,
+            "recent_chapter_end": prev_chapter_end,
+        })
 
         result = self.run(
             user_message=user_msg,
@@ -197,15 +213,22 @@ class ChapterPlanner(BaseAgent):
         # 追踪文档
         parts.append("## 追踪文档（Part B 原材料）")
         if context.get("character_relations"):
-            parts.append(f"### character_relationships.md\n{context['character_relations'][:3000]}")
+            parts.append(f"### character_relationships.md\n{context['character_relations']}")
         if context.get("items_tracking"):
-            parts.append(f"### items_equipment.md\n{context['items_tracking'][:2000]}")
+            parts.append(f"### items_equipment.md\n{context['items_tracking']}")
         if context.get("volume_plan"):
             parts.append(f"### 当前卷大故事路径\n{context['volume_plan']}")
 
         parts.append("\n---\n请根据以上所有信息（特别是作者的指示），按输出格式生成完整的章规划（Part A + Part B）。作者指示中的内容优先于追踪文档。")
 
         user_msg = "\n\n".join(parts)
+        guard_planning_context(self.model_slot, {
+            **{key: str(value) for key, value in context.items()},
+            **{
+                f"answer_{key}": str(value)
+                for key, value in answers.items()
+            },
+        })
         result = self.run(
             user_message=user_msg,
             save_category="outlines",
@@ -245,6 +268,12 @@ class ChapterPlanner(BaseAgent):
 ---
 保留当前 Plan 中没有问题的部分，只修改 Review 明确指出的问题。
 输出完整修订版 Chapter Plan，不写解释。"""
+        guard_planning_context(self.model_slot, {
+            "current_chapter_plan.md": current_plan,
+            "planning_context": planning_context,
+            "human_intent": chapter_intent,
+            "human_feedback": human_feedback,
+        })
         result = self.run(
             user_message=prompt,
             save_category="outlines",
@@ -309,15 +338,7 @@ class ChapterPlanner(BaseAgent):
         """根据已写内容重新规划剩余场景。保留原有逻辑。"""
         summaries = []
         for i, s in enumerate(written_scenes):
-            if full_texts:
-                summaries.append(f"### 已完成：场景 {i+1}\n{s}")
-            elif len(s) <= 800:
-                summaries.append(f"### 已完成：场景 {i+1}\n{s}")
-            else:
-                summaries.append(
-                    f"### 已完成：场景 {i+1}\n"
-                    f"[开头] {s[:200]}\n...\n[结尾] {s[-500:]}"
-                )
+            summaries.append(f"### 已完成：场景 {i+1}\n{s}")
         written_summary = "\n\n---\n\n".join(summaries)
 
         user_msg = ""
@@ -339,7 +360,7 @@ class ChapterPlanner(BaseAgent):
 {event_context}
 
 ## 世界观设定（参考）
-{world_setting[:1500] if world_setting else ""}
+{world_setting}
 """
         if prev_chapter_end:
             user_msg += f"## 【必读】上一章结尾\n{prev_chapter_end}\n\n"
@@ -347,6 +368,14 @@ class ChapterPlanner(BaseAgent):
         user_msg += """---
 请根据已完成的场景内容，重新规划本章剩余场景。总场景数不超过5个（含已完成场景）。
 输出完整的更新后场景规划。"""
+        guard_planning_context(self.model_slot, {
+            "original_plan.md": original_plan,
+            "written_scenes": "\n\n".join(written_scenes),
+            "event_context": event_context,
+            "world_setting.md": world_setting,
+            "recent_chapter_end": prev_chapter_end,
+            "scene_fact_context": scene_fact_context,
+        })
 
         result = self.run(
             user_message=user_msg,
@@ -359,13 +388,8 @@ class ChapterPlanner(BaseAgent):
     # ── 辅助方法 ─────────────────────────────────────
 
     def _load_prev_chapter_end(self, chapter_index: int) -> str:
-        """加载上一章结尾。"""
-        if chapter_index <= 1:
-            return ""
-        prev = self.fs.load_latest("chapters", f"chapter_{chapter_index - 1:04d}")
-        if prev:
-            return prev[-500:] if len(prev) > 500 else prev
-        return ""
+        """Compatibility wrapper around the shared complete-paragraph window."""
+        return previous_chapter_end(self.fs, chapter_index)
 
     def _load_recent_fact_digests(self, chapter_index: int, count: int = 3) -> str:
         """加载最近 N 章的事实摘要。"""
@@ -373,5 +397,5 @@ class ChapterPlanner(BaseAgent):
         for ch in range(max(1, chapter_index - count), chapter_index):
             fd = self.fs.load_latest("states", f"fact_digest_ch{ch:04d}")
             if fd:
-                parts.append(f"## 第{ch}章事实摘要\n{fd[:1500]}")
+                parts.append(f"## 第{ch}章事实摘要\n{fd}")
         return "\n\n".join(parts)

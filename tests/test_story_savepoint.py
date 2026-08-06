@@ -17,7 +17,9 @@ from langgraph.checkpoint.base import empty_checkpoint
 from langgraph.checkpoint.sqlite import SqliteSaver
 
 import main as cli
+from src.config.settings import get_settings
 from src.storage.document_formats import CurrentChapterMeta, CurrentState
+from src.storage.chapter_completion import mark_derived_ready
 from src.storage.story_savepoint import (
     NovelOperationLock,
     SavepointError,
@@ -27,6 +29,8 @@ from src.storage.story_savepoint import (
     _json_hash,
     _sha256_file,
 )
+from src.workflows.chapter_runner import ChapterWorkflowRunner
+from src.workflows.continuation import NovelContinuationService
 
 
 class IsolatedManager(StorySavepointManager):
@@ -69,12 +73,15 @@ class StorySavepointTests(unittest.TestCase):
         root = self.manager.root
         for path in (root / "chapters").glob("chapter_*.md"):
             path.unlink()
+        for path in (root / "states").glob("chapter_*_derived"):
+            path.unlink()
+        for path in (root / "states").glob("chapter_*_derived_ready.json"):
+            path.unlink()
         for index in range(1, chapter + 1):
             (root / "chapters" / f"chapter_{index:04d}.md").write_text(
                 f"{label}-chapter-{index}", encoding="utf-8"
             )
-        for path in (root / "states").glob("chapter_*_derived"):
-            path.unlink()
+            mark_derived_ready(self.manager.file_store, index)
         (root / "states" / f"chapter_{chapter:04d}_derived").write_text(
             f"derived-{label}", encoding="utf-8"
         )
@@ -92,6 +99,14 @@ class StorySavepointTests(unittest.TestCase):
         )
         (root / "tracking" / "book_plan.md").write_text(
             f"book-plan-{label}", encoding="utf-8"
+        )
+        (root / "tracking" / "volume_plan.md").write_text(
+            "# 第1卷规划：《测试》\n- **版本**: v1\n- **状态**: ACTIVE\n"
+            "\n## 起始状态\n起点\n## 本卷目标\n目标\n"
+            "## 主要冲突\n冲突\n## 故事阶段/路径\n- 路径\n"
+            "## 关键转折\n- 转折\n## 限制条件\n限制\n"
+            "## 目标结束状态\n终点\n",
+            encoding="utf-8",
         )
         (root / "outlines" / f"chapter_plan_ch{chapter:04d}.md").write_text(
             f"plan-{label}", encoding="utf-8"
@@ -294,6 +309,33 @@ class StorySavepointTests(unittest.TestCase):
                 before,
                 (self.manager.savepoints_root / name / "manifest.json").read_bytes(),
             )
+
+    def test_load_s40_then_s80_continues_at_chapter_81_without_checkpoints(self):
+        self._write_world(40, "world-forty")
+        self.manager.create()
+        self._write_world(80, "world-eighty")
+        self.manager.create()
+        self.manager.load("S0040")
+        self.manager.load("S0080")
+
+        settings = get_settings()
+        old_data_dir = settings.data_dir
+        settings.data_dir = self.temp_dir
+        try:
+            with patch.object(
+                ChapterWorkflowRunner,
+                "inspect",
+                return_value={"values": {}, "next": [], "interrupts": []},
+            ):
+                decision = NovelContinuationService(
+                    self.manager.novel_id
+                ).route()
+        finally:
+            settings.data_dir = old_data_dir
+        self.assertEqual(
+            {"action": "start_chapter", "chapter_index": 81},
+            decision,
+        )
 
     def test_corrupt_target_never_modifies_working_state(self):
         self.manager.create()

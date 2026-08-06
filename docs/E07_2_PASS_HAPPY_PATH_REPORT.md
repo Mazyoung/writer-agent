@@ -115,7 +115,7 @@ rag_index      → ChromaStore.index_chapter()
 
 E07.2 使用 `require_pass` 作为常规 node（非 conditional edge）：
 - `PASS` → 返回 `{}`（继续下游）
-- `NEEDS_REVISION` / `HALT` / `UNKNOWN` → 设置 `commit_success=False`, `workflow_status="STOPPED_NON_PASS"`
+- `NEEDS_REVISION` / `旧停机状态` / `UNKNOWN` → 设置 `commit_success=False`, `workflow_status="STOPPED_NON_PASS"`
 - 下游 node（commit_state, save_fact_digest, rag_index）检查 `workflow_status` 和 `commit_success` 决定是否跳过
 
 正式 conditional routing 属于 E07.3。
@@ -161,7 +161,7 @@ commit_state(FAIL)      → save_fact_digest SKIP → rag_index SKIP
 |---|---|---|
 | TestChapterWorkflowState | 3 | State schema (E07.1-A enduring) |
 | TestGraphTopology | 4 | Graph compile, 10 nodes, linear edges, no conditional |
-| TestNodeContracts | 4 | require_pass guard: PASS/NEEDS_REVISION/HALT/UNKNOWN |
+| TestNodeContracts | 4 | require_pass guard: PASS/NEEDS_REVISION/旧停机状态/UNKNOWN |
 | TestNoRuntimeSideEffects | 4 | Import safety, no Orchestrator import, main.py unchanged |
 | TestE07_2_PassHappyPath | **7** | + `test_graph_invoke_pass_happy_path` (real graph.invoke) |
 | TestE07_2_NonPassGuard | 4 | Non-PASS → commit_state/fact_digest/rag_index all skipped |
@@ -207,7 +207,7 @@ No known behavioral parity gaps remain after Closure Patch.
 1. **require_pass 是临时方案**：E07.3 用 `add_conditional_edges()` 替代为正式 conditional routing
 2. **plan_chapter 内联 RAG**：RAG retrieval 在 `plan_chapter` node 内部，未来可作为独立 `retrieve_history` node
 3. **无 checkpoint**：State merge 依赖 LangGraph 默认 reducer（last-write-wins），E07.4 引入 checkpointer
-4. **无 HITL**：NEEDS_REVISION/HALT 仅做 fail-closed 停止，E07.5 引入 interrupt()
+4. **无 HITL**：NEEDS_REVISION/旧停机状态 仅做 fail-closed 停止，E07.5 引入 interrupt()
 5. **生产 runtime 未切换**：`main.py` 仍使用 Orchestrator，Graph 是旁路存在
 
 ---
@@ -218,7 +218,7 @@ No known behavioral parity gaps remain after Closure Patch.
 - ❌ checkpointer (`SqliteSaver` / `InMemorySaver` / `MemorySaver`) — E07.4
 - ❌ `interrupt()` / `Command(resume=...)` — E07.5
 - ❌ NEEDS_REVISION rewrite loop — E07.6
-- ❌ HALT → replan workflow — E07.6
+- ❌ 旧停机状态 → replan workflow — E07.6
 - ❌ branch semantics — Future
 - ❌ Orchestrator 重构 — Forbidden per Guide §5
 

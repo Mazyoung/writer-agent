@@ -55,6 +55,7 @@ class ChapterPlanningService:
             chapter_outline,
             extra_instructions,
             rag_evidence=retrieval.evidence,
+            query_intent=retrieval.trace.query,
         )
 
         print(f"  Part A: {len(plan.scenes)} 个场景")

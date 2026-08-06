@@ -85,6 +85,7 @@ class ChapterWorkflowState(TypedDict, total=False):
     fact_digest_path: str
     atomic_fact_count: int
     rag_facts: int
+    query_intent: str
     derived_state_errors: list[str]
 
     warnings: list[str]
@@ -244,6 +245,9 @@ def prepare_human_context(state: ChapterWorkflowState) -> dict[str, Any]:
         "## Chapter Intent",
         intent,
         "",
+        "## Retrieval Query Intent",
+        retrieval.trace.query,
+        "",
         "## Current State",
         state.get("current_state_text", "").strip() or "No current state content.",
         "",
@@ -263,6 +267,7 @@ def prepare_human_context(state: ChapterWorkflowState) -> dict[str, Any]:
     )
     return {
         "historical_evidence": retrieval.evidence,
+        "query_intent": retrieval.trace.query,
         "retrieval_success": True,
         "retrieval_result_count": len(retrieval.trace.results),
         "retrieval_trace_path": retrieval.trace_path,
@@ -415,6 +420,7 @@ def plan_chapter(state: ChapterWorkflowState) -> dict[str, Any]:
         outline,
         instructions,
         rag_evidence=retrieval.evidence,
+        query_intent=retrieval.trace.query,
         chapter_intent=intent,
         current_state_text=state.get("current_state_text", ""),
     )
@@ -429,6 +435,7 @@ def plan_chapter(state: ChapterWorkflowState) -> dict[str, Any]:
     return {
         "chapter_plan_text": plan_text,
         "historical_evidence": retrieval.evidence,
+        "query_intent": retrieval.trace.query,
         "retrieval_success": retrieval.trace.success,
         "retrieval_result_count": len(retrieval.trace.results),
         "retrieval_trace_path": retrieval.trace_path,
@@ -509,7 +516,7 @@ def _route_after_plan_decision(state: ChapterWorkflowState) -> str:
     supervised = state.get("agent_execution", "supervised") == "supervised"
     if state.get("plan_verdict") == "PASS":
         return "await_human_plan" if supervised else "write_draft"
-    if state.get("plan_verdict") in ("NEEDS_REVISION", "HALT"):
+    if state.get("plan_verdict") == "NEEDS_REVISION":
         if (
             not supervised
             and state.get("plan_revision_count", 0) < 2
@@ -574,6 +581,9 @@ def save_chapter_sources(state: ChapterWorkflowState) -> dict[str, Any]:
             "## Chapter Intent",
             state.get("chapter_intent", "") or "暂无",
             "",
+            "## Retrieval Query Intent",
+            state.get("query_intent", "") or "暂无",
+            "",
             "## Human Writing Context Sources",
             f"- Writing Context: `{state.get('writing_context_path', '')}`",
             f"- Retrieval Trace: `{state.get('retrieval_trace_path', '')}`",
@@ -587,7 +597,7 @@ def save_chapter_sources(state: ChapterWorkflowState) -> dict[str, Any]:
                 or ["  - 无"]
             ),
             "",
-            "## Provided Historical Facts",
+            "## Retrieved Atomic Facts",
         ]
         if facts:
             for fact in facts:
@@ -598,7 +608,7 @@ def save_chapter_sources(state: ChapterWorkflowState) -> dict[str, Any]:
                 )
         else:
             lines.append("- 无")
-        lines.extend(["", "## Provided Canonical Prose Excerpts"])
+        lines.extend(["", "## Expanded Canonical Sources"])
         if excerpts:
             for source in excerpts:
                 lines.append(
@@ -640,23 +650,28 @@ def save_chapter_sources(state: ChapterWorkflowState) -> dict[str, Any]:
         "## Chapter Intent",
         state.get("chapter_intent", "") or "暂无（本章未提供人工 Intent）",
         "",
+        "## Retrieval Query Intent",
+        state.get("query_intent", "") or "暂无",
+        "",
         "## Planning Sources",
         "- Book Plan: `tracking/book_plan.md`",
         "- Volume Plan: `tracking/volume_plan.md`",
         "",
-        "## Adopted Historical Facts",
+        "## Retrieved Atomic Facts",
     ]
-    if candidates:
-        for fact in candidates:
+    all_facts = list(state.get("retrieved_facts", []))
+    if all_facts:
+        for fact in all_facts:
+            usage = "adopted" if fact.get("fact_id") in adopted_ids else "candidate-only"
             lines.append(
                 f"- **{fact['fact_id']}** (Chapter {fact['chapter_index']}, "
-                f"{fact.get('fact_type', 'event')}): {fact.get('text', '')}"
+                f"{fact.get('fact_type', 'event')}, {usage}): {fact.get('text', '')}"
             )
     else:
         lines.append("- 无")
     lines.extend(["", "## Future Planning Constraints"])
     lines.append(plan.context.future_constraints or "暂无")
-    lines.extend(["", "## Expanded Historical Prose"])
+    lines.extend(["", "## Expanded Canonical Sources"])
     if excerpts:
         for source in excerpts:
             usage = (
@@ -870,11 +885,11 @@ def _route_after_chapter_decision(state: ChapterWorkflowState) -> str:
     if state.get("verdict") == "PASS":
         return "commit_canonical_prose"
     if (
-        state.get("verdict") in ("NEEDS_REVISION", "HALT")
+        state.get("verdict") == "NEEDS_REVISION"
         and state.get("review_round", 1) <= 2
     ):
         return "agent_edit_chapter"
-    if state.get("verdict") in ("NEEDS_REVISION", "HALT"):
+    if state.get("verdict") == "NEEDS_REVISION":
         return "await_human_chapter"
     return END
 
@@ -893,7 +908,7 @@ def await_human_plan(state: ChapterWorkflowState) -> dict[str, Any]:
         "t1_issues": state.get("plan_t1_issues", []),
         "edit_path": edit_path,
         "allowed_actions": (
-            ["approve", "human_edit", "restart"]
+            ["approve", "agent_edit", "human_edit", "restart"]
             if state.get("plan_verdict") == "PASS"
             else ["agent_edit", "human_edit", "restart"]
         ),
@@ -907,9 +922,14 @@ def await_human_plan(state: ChapterWorkflowState) -> dict[str, Any]:
             "workflow_status": "PLAN_APPROVED",
         }
     if action == "agent_edit":
+        feedback = str(resume_value.get("feedback", "")).strip()
+        if state.get("plan_verdict") == "PASS" and not feedback:
+            return _error_result(
+                "Plan Review PASS 后使用 agent_edit 必须提供非空 human_feedback"
+            )
         return {
             "human_decision": "agent_edit",
-            "human_feedback": str(resume_value.get("feedback", "")).strip(),
+            "human_feedback": feedback,
             "workflow_status": "PLAN_AGENT_EDIT_REQUESTED",
         }
     edited = str(resume_value.get("edited_text", "")).strip()
@@ -962,7 +982,10 @@ def await_human_chapter(state: ChapterWorkflowState) -> dict[str, Any]:
     else:
         interrupt_type = "final_author_approval" if passed else "chapter_review"
         allowed_actions = (
-            ["approve", "human_edit", "restart"]
+            [
+                "approve", "agent_edit", "human_edit",
+                "regenerate_prose", "restart",
+            ]
             if passed else
             ["agent_edit", "human_edit", "regenerate_prose", "restart"]
         )
@@ -993,6 +1016,10 @@ def await_human_chapter(state: ChapterWorkflowState) -> dict[str, Any]:
             ),
         }
     if action == "agent_edit" and not human_mode:
+        if passed and not feedback:
+            return _error_result(
+                "Prose Review PASS 后使用 agent_edit 必须提供非空 human_feedback"
+            )
         return {
             "human_decision": action,
             "human_feedback": feedback,
@@ -1344,6 +1371,7 @@ def persist_chapter_sources(state: ChapterWorkflowState) -> dict[str, Any]:
 def sync_chroma(state: ChapterWorkflowState) -> dict[str, Any]:
     """Replace this chapter's Atomic Facts so retries cannot append duplicates."""
     from src.storage.atomic_fact_store import AtomicFactStore, DEFAULT_BRANCH_ID
+    from src.storage.chapter_completion import mark_derived_ready
     from src.storage.document_formats import FactDigest
 
     try:
@@ -1359,6 +1387,9 @@ def sync_chroma(state: ChapterWorkflowState) -> dict[str, Any]:
         )
         if count <= 0:
             raise ValueError("Atomic Fact list is empty")
+        completion = mark_derived_ready(
+            fs, state["chapter_index"]
+        )
     except Exception as exc:
         return {
             "rag_facts": 0, "rag_chunks": 0,
@@ -1369,6 +1400,9 @@ def sync_chroma(state: ChapterWorkflowState) -> dict[str, Any]:
     return {
         "rag_facts": count,
         "rag_chunks": 0,
+        "completion_marker_path": str(
+            completion.relative_to(fs.root)
+        ).replace("\\", "/"),
         "workflow_status": "DERIVED_READY",
     }
 

@@ -16,6 +16,7 @@ from src.storage.atomic_fact_store import (
 )
 from src.storage.author_rag_store import AuthorRAGStore, AuthorKnowledgeResult
 from src.storage.file_store import FileStore
+from src.core.text_windows import previous_chapter_end
 
 
 @dataclass
@@ -163,44 +164,18 @@ class ChapterRetrievalService:
                 "Human Mode 执行历史检索前必须提供非空 Chapter Intent。"
             )
 
-        parts: list[str] = []
-
         volume_plan = self.fs.load_tracking_doc("volume_plan") or ""
-        if query_mode == "human":
-            # Intent is deliberately first and largest. Present-state entities and
-            # the active Volume Plan are only retrieval hints/constraints.
-            parts.append("Chapter Intent (primary): " + chapter_intent.strip()[:1000])
-        elif volume_plan:
-            parts.append(volume_plan[:1000])
-
-        if chapter_outline:
-            parts.append(chapter_outline[:500])
-
         current_state = current_state_text or self.fs.load_generated_tracking_doc(
             "current_state") or ""
-        if current_state:
-            from src.storage.document_formats import CurrentState
+        recent_end = previous_chapter_end(self.fs, chapter_index)
+        from src.agents.author.query_intent_builder import QueryIntentBuilder
 
-            parsed = CurrentState.from_markdown(current_state)
-            entities = sorted({
-                *(entry.name for entry in parsed.characters),
-                *(entry.name for entry in parsed.items),
-                *(entry.name for entry in parsed.cultivation),
-                *(entry.character_a for entry in parsed.relationships),
-                *(entry.character_b for entry in parsed.relationships),
-            })
-            if entities:
-                parts.append("当前实体: " + ", ".join(entities[:12]))
-
-        if query_mode == "human" and volume_plan:
-            parts.append("Active Volume Plan (supplemental): " + volume_plan[:500])
-
-        if chapter_intent and query_mode == "agent":
-            parts.append(chapter_intent[:500])
-        if extra_instructions:
-            parts.append(extra_instructions[:500])
-
-        return " ".join(parts) if parts else f"第{chapter_index}章 剧情"
+        return QueryIntentBuilder(self.novel_id).build(
+            volume_plan=volume_plan,
+            recent_chapter_end=recent_end,
+            current_state=current_state,
+            human_intent=chapter_intent,
+        )
 
     @staticmethod
     def _format_evidence(

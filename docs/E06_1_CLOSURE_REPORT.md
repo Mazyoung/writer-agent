@@ -12,7 +12,7 @@
 |---|---|---|
 | `src/storage/document_formats.py` | 修改 | `ReviewDecision.from_analysis()` 真 fail-closed；新增 `CharacterStateEntry`/`CharacterStateList` dataclass |
 | `src/agents/state_manager/state_manager.py` | 修改 | 原子化 commit (LOAD→PARSE ALL→BUILD→COMMIT)；新增 `review_chapter` book_plan/volume_plan/character_states 入参；新增角色当前状态解析 |
-| `src/core/orchestrator.py` | 修改 | REVISION/HALT/UNKNOWN 不保存 fact_digest；加载并传入 book_plan/volume_plan/character_states |
+| `src/core/orchestrator.py` | 修改 | REVISION/旧停机状态/UNKNOWN 不保存 fact_digest；加载并传入 book_plan/volume_plan/character_states |
 | `src/agents/author/chapter_planner.py` | 修改 | Planner 加载 `character_states.md` 进入 Structured Tracking Context |
 | `src/config/prompts/state_manager.txt` | 修改 | 新增角色当前状态 format；新增 Book/Volume strategic context 感知指令 |
 | `tests/test_e06.py` | 修改 | 新增 19 个 E06.1 测试；更新 3 个 E06 测试适配新 contract |
@@ -25,10 +25,10 @@
 
 ### 变更
 
-NEEDS_REVISION、HALT、UNKNOWN 三条路由均不再调用 `extract_fact_digest_from_analysis()`。
+NEEDS_REVISION、旧停机状态、UNKNOWN 三条路由均不再调用 `extract_fact_digest_from_analysis()`。
 
 ```
-REVISION / HALT / UNKNOWN:
+REVISION / 旧停机状态 / UNKNOWN:
   ❌ NO fact_digest_chNNNN.md
   ✅ raw_analysis 仍在 states/review_ch* （诊断记录）
 ```
@@ -43,7 +43,7 @@ REVISION / HALT / UNKNOWN:
 | 测试 | 覆盖 |
 |---|---|
 | `test_needs_revision_no_fact_digest_file` | NEEDS_REVISION → fact_digest_ch0002 不存在 |
-| `test_halt_no_fact_digest_file` | HALT → fact_digest_ch0005 不存在 |
+| `test_halt_no_fact_digest_file` | 旧停机状态 → fact_digest_ch0005 不存在 |
 | `test_rejected_chapter_not_in_recent_fact_digests` | `_recent_fact_digests()` 不包含 rejected 内容 |
 
 ---
@@ -176,7 +176,7 @@ StateManager `review_chapter` prompt 现在包含：
 - **L1**：问题仅影响当前章节（局部文笔、场景执行）
 - **L2**：问题影响当前卷的战术事件链
 - **L3**：问题违反 Book Plan 的战略约束
-- **HALT**：当发现 L3 问题时必须 HALT
+- **旧停机状态**：当发现 L3 问题时必须 旧停机状态
 
 ### 测试
 
@@ -247,7 +247,7 @@ E06 原 report 中标注的未实现项在此轮解决了：
 | E06 标注 | E06.1 状态 |
 |---|---|
 | "L2/L3 自动检测未实现" | ✅ 实现：Book/Volume Plan 进入 StateManager prompt；L1/L2/L3 定义在 prompt 和 code 中 |
-| "NEEDS_REVISION/HALT 也保存 fact_digest（informational）" | ✅ 修复：不再保存 |
+| "NEEDS_REVISION/旧停机状态 也保存 fact_digest（informational）" | ✅ 修复：不再保存 |
 | "ReviewDecision 会从无决策 section 推断 PASS" | ✅ 修复：真 fail-closed |
 | "StateDelta 增量保存" | ✅ 修复：原子化 commit |
 | "缺少 Character Current State tracking" | ✅ 实现：tracking/character_states.md |

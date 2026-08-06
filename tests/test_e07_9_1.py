@@ -132,25 +132,24 @@ class TestRetrieval(E0791Case):
         service.author_chroma = MagicMock()
         return service
 
-    def test_human_query_is_intent_first_and_top_k_is_shared(self):
+    def test_query_intent_is_the_only_query_and_top_k_is_shared(self):
         self.fs.save_tracking_doc("volume_plan", "VOLUME CONSTRAINT " * 100)
         self.settings.rag_top_k = 7
         service = self._service()
 
-        agent = service.retrieve(2, chapter_intent="AGENT INTENT")
-        human = service.retrieve(
-            2, chapter_intent="HUMAN INTENT", query_mode="human"
-        )
+        with patch(
+            "src.agents.author.query_intent_builder.QueryIntentBuilder.build",
+            side_effect=["AGENT QUERY INTENT", "HUMAN QUERY INTENT"],
+        ):
+            agent = service.retrieve(2, chapter_intent="AGENT INTENT")
+            human = service.retrieve(
+                2, chapter_intent="HUMAN INTENT", query_mode="human"
+            )
 
         self.assertTrue(agent.trace.success)
         self.assertTrue(human.trace.success)
-        self.assertTrue(human.trace.query.startswith(
-            "Chapter Intent (primary): HUMAN INTENT"
-        ))
-        self.assertLess(
-            human.trace.query.index("HUMAN INTENT"),
-            human.trace.query.index("VOLUME CONSTRAINT"),
-        )
+        self.assertEqual("AGENT QUERY INTENT", agent.trace.query)
+        self.assertEqual("HUMAN QUERY INTENT", human.trace.query)
         self.assertEqual(
             [call.kwargs["top_k"] for call in service.chroma.search.call_args_list],
             [7, 7],

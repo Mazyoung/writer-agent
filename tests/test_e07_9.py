@@ -11,6 +11,7 @@ from src.config.settings import get_settings
 from src.planning.novel_lifecycle import NovelLifecycleService
 from src.storage.document_formats import CurrentState, VolumePlan
 from src.storage.file_store import FileStore
+from src.storage.chapter_completion import mark_derived_ready
 from src.workflows.chapter_runner import ChapterWorkflowRunner
 from src.workflows.chapter_workflow import (
     _parse_volume_progress,
@@ -64,13 +65,6 @@ class E079Case(unittest.TestCase):
 
 
 class TestContracts(E079Case):
-    def test_prose_halt_is_preserved_for_explicit_author_override(self):
-        result = parse_chapter_decision({
-            "raw_analysis": "## 审阅决策\n- **决策**: HALT\n- **严重性**: MAJOR",
-        })
-        self.assertEqual(result["verdict"], "HALT")
-        self.assertEqual(result["workflow_status"], "DECISION_HALT")
-
     def test_volume_progress_is_advisory_enum(self):
         self.assertEqual(_parse_volume_progress(
             "## Volume Progress\n- **Recommendation**: READY_TO_CLOSE"),
@@ -185,13 +179,9 @@ class TestVolumeLifecycle(E079Case):
         self.fs.save_generated_tracking_doc(
             "volume_progress", "# Volume Progress\n- **Recommendation**: CONTINUE\n")
         self.fs.commit_canonical_chapter(1, "canonical")
+        mark_derived_ready(self.fs, 1)
         service = self._service()
-        with patch.object(
-            ChapterWorkflowRunner,
-            "get_workflow_status",
-            return_value="DERIVED_READY",
-        ):
-            closed = service.close_volume()
+        closed = service.close_volume()
         self.assertIn("**状态**: COMPLETED", closed)
         self.assertIn("## 作者备注", closed)
         self.assertTrue((self.fs.root / "tracking" / "volumes" / "volume_02.md").exists())
@@ -206,14 +196,8 @@ class TestVolumeLifecycle(E079Case):
         self.fs.save_tracking_doc("volume_plan", active)
         self.fs.commit_canonical_chapter(1, "canonical")
         service = self._service()
-        for status in ("CANONICAL_COMMITTED", "DERIVATION_ERROR", "UNKNOWN"):
-            with self.subTest(status=status), patch.object(
-                ChapterWorkflowRunner,
-                "get_workflow_status",
-                return_value=status,
-            ):
-                with self.assertRaisesRegex(ValueError, "repair-derivation"):
-                    service.close_volume()
+        with self.assertRaisesRegex(ValueError, "repair-derivation"):
+            service.close_volume()
         self.assertIn(
             "**状态**: ACTIVE",
             self.fs.load_tracking_doc("volume_plan"),

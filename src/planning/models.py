@@ -9,12 +9,12 @@ L1 — Execution Issue
 L2 — Planning Issue（Human Approval）
     当前 Chapter Plan 无法合理执行，或 Volume Plan 局部节点需调整。
     禁止 Agent 自动静默修改规划。必须生成 PlanningModificationReport，
-    HALT 受影响操作 → Human Review → Accept / Edit+Confirm 后
+    停止受影响操作 → Human Review → Accept / Edit+Confirm 后
     才创建 PlanRevision 并修改 canonical Plan。
 
 L3 — Strategic Planning Issue（Human-Agent Collaborative Repair）
     Volume/Book 战略规划明显失效，影响多个未来章节，无唯一正确修复方案。
-    必须 HALT PIPELINE，禁止 Agent 自动修复，进入 StrategicRepairCase 流程。
+    必须停止 Pipeline，禁止 Agent 自动修复，进入 StrategicRepairCase 流程。
 
 修改权限模型（最小权限）：
     Writer              : 任何 Plan 无修改权，只能报告问题

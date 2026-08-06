@@ -294,13 +294,10 @@ Book Plan 是整本书的长期战略，只写长期有效的内容：
         if match is None:
             raise ValueError("无法确定最新 Canonical 章节")
         latest_chapter = int(match.group(1))
-        from src.workflows.chapter_runner import ChapterWorkflowRunner
-        status = ChapterWorkflowRunner(
-            self.novel_id, latest_chapter
-        ).get_workflow_status()
-        if status != "DERIVED_READY":
+        from src.storage.chapter_completion import is_derived_ready
+        if not is_derived_ready(self.file_store, latest_chapter):
             raise ValueError(
-                f"最新 Canonical Chapter {latest_chapter} 当前为 {status or 'UNKNOWN'}，"
+                f"最新 Canonical Chapter {latest_chapter} "
                 "尚未达到 DERIVED_READY；请先运行 repair-derivation"
             )
         completed = self._with_volume_status(text, "COMPLETED")

@@ -111,7 +111,7 @@ main.cmd_review(args)
     │   └── if failed: return ERROR (no Fact Digest, no RAG)
     │
     ├── if NEEDS_REVISION: return {decision, t1_issues, ...}
-    ├── if HALT:           return {decision, planning_level, ...}
+    ├── if 旧停机状态:           return {decision, planning_level, ...}
     └── if UNKNOWN:        return {decision, ...}
 
     → main.cmd_review 检查 result，输出对应 workflow 状态

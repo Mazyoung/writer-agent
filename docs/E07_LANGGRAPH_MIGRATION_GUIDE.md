@@ -118,7 +118,7 @@ Review 只接受 styled chapter。Review semantic PASS 不等于 commit success�
 ```
 L1: Writer 可自修复，不修改 Plan
 L2: 需要 Human Review → PlanRevision
-L3: HALT PIPELINE，Human-Agent 协同修复
+L3: 旧停机状态 PIPELINE，Human-Agent 协同修复
 ```
 
 ---
@@ -166,7 +166,7 @@ L3: HALT PIPELINE，Human-Agent 协同修复
 - 基于 `ReviewDecision.verdict` 添加 conditional edges：
   - PASS → commit → fact_digest → rag_index → END
   - NEEDS_REVISION → END
-  - HALT → END
+  - 旧停机状态 → END
   - UNKNOWN → END
   - ERROR（commit failure）→ END
 - 五种终态在 Graph 中可区分
@@ -182,7 +182,7 @@ L3: HALT PIPELINE，Human-Agent 协同修复
 ### E07.5 — HITL Interrupt
 
 - NEEDS_REVISION → `interrupt()`（等待人工 feedback）
-- HALT → `interrupt()`（等待人工 decision）
+- 旧停机状态 → `interrupt()`（等待人工 decision）
 - 实现 `Command(resume=...)` 恢复路径
 - 依赖 E07.4 的 checkpoint/persistence 语义
 
@@ -190,7 +190,7 @@ L3: HALT PIPELINE，Human-Agent 协同修复
 
 - NEEDS_REVISION 后的 rewrite + re-review 循环
 - 人工 feedback 注入 style_edit / write_draft Node
-- HALT 后的人工 decision → replan / resume
+- 旧停机状态 后的人工 decision → replan / resume
 
 ### Future Work（不在 E07.1–E07.6 范围内）
 

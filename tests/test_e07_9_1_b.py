@@ -286,7 +286,7 @@ class HumanFlowCase(E0791Case):
         sources = self.fs.root / result["chapter_sources_path"]
         report = sources.read_text(encoding="utf-8")
         self.assertIn("## Human Writing Context Sources", report)
-        self.assertIn("## Provided Historical Facts", report)
+        self.assertIn("## Retrieved Atomic Facts", report)
         self.assertIn("provided-context", report)
         self.assertNotIn("Adopted Historical Facts", report)
 
@@ -356,7 +356,7 @@ class TestConsistencyInfrastructure(E0791Case):
             encoding="utf-8"
         )
         self.assertIn("提供给作者", report)
-        self.assertIn("Provided Historical Facts", report)
+        self.assertIn("Retrieved Atomic Facts", report)
         self.assertIn("chapters/chapter_0001.md", report)
         self.assertNotIn("Adopted Historical Facts", report)
         self.assertFalse(any((self.fs.root / "outlines").glob("chapter_plan*")))

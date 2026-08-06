@@ -12,7 +12,7 @@
 |---|---|---|
 | `src/agents/state_manager/state_manager.py` | 修改 | 新增 `world_setting` 入参；新增 `parse_review_decision()`；重写 `update_tracking_docs()` 双维护模式（State Delta + Change Log）；新增 `_parse_state_kv()`、`_apply_state_deltas()`、`_append_change_logs()` |
 | `src/config/prompts/state_manager.txt` | 修改 | 新增「状态变更（State Delta）」section；新增「审阅决策」section；明确输出格式 |
-| `src/core/orchestrator.py` | 修改 | `review_chapter()` 新增 world_setting 加载 + Decision 三级路由（PASS/NEEDS_REVISION/HALT） |
+| `src/core/orchestrator.py` | 修改 | `review_chapter()` 新增 world_setting 加载 + Decision 三级路由（PASS/NEEDS_REVISION/旧停机状态） |
 | `src/storage/document_formats.py` | 修改 | 新增 `ReviewDecision` dataclass + `DecisionVerdict`/`DecisionSeverity` enum；`ItemsEquipment` 拥有者编码在备注字段（向后兼容） |
 | `src/storage/sqlite_store.py` | 修改 | 新增 `upsert_foreshadow()` 方法 |
 | `tests/test_e06.py` | 新增 | 22 个 E06 focused tests |
@@ -105,7 +105,7 @@ T1 一致性检查（硬错误）现在有真实世界观设定作为对照依�
 ```python
 @dataclass
 class ReviewDecision:
-    verdict: str = "UNKNOWN"        # PASS / NEEDS_REVISION / HALT / UNKNOWN
+    verdict: str = "UNKNOWN"        # PASS / NEEDS_REVISION / 旧停机状态 / UNKNOWN
     severity: str = "PASS"          # PASS / MINOR / MAJOR
     reasons: list[str]              # 主要问题列表
     t1_issues: list[str]            # T1 硬错误
@@ -133,16 +133,16 @@ review_chapter()
        ├─ PASS           → memory commit + fact digest + RAG index
        ├─ NEEDS_REVISION → [SUPERVISOR] + fact digest save (informational)
        │                    + no memory commit + no RAG
-       ├─ HALT           → [SUPERVISOR HALT] + fact digest save
+       ├─ 旧停机状态           → [SUPERVISOR 旧停机状态] + fact digest save
        │                    + no memory commit + no RAG
-       └─ UNKNOWN        → fail-closed (same as HALT)
+       └─ UNKNOWN        → fail-closed (same as 旧停机状态)
 ```
 
 ### 安全原则
 
 - UNKNOWN (fail-closed) 不会自动 PASS
 - 解析失败输出 `[SUPERVISOR WARNING]`，不崩溃
-- NEEDS_REVISION / HALT 不提交 Structured Memory，不索引 RAG
+- NEEDS_REVISION / 旧停机状态 不提交 Structured Memory，不索引 RAG
 
 ---
 
@@ -201,7 +201,7 @@ E06 初版在 `items_equipment.md` 的「主角持有」表中新增了「拥有
 | **C. Foreshadowing State** | `test_foreshadow_resolved_updates_sqlite` | 伏笔 OPEN→RESOLVED → SQLite upsert |
 | **D. ReviewDecision Parsing** | `test_parse_pass` | PASS 解析（无 T1 错误） |
 | | `test_parse_needs_revision` | NEEDS_REVISION 解析（有 T1 + MAJOR） |
-| | `test_parse_halt` | HALT 解析（L3 strategic） |
+| | `test_parse_halt` | 旧停机状态 解析（L3 strategic） |
 | | `test_parse_no_explicit_decision_infers_from_t1` | 无显式审阅决策 section → 从 T1 推断 NEEDS_REVISION |
 | | `test_parse_empty_returns_unknown` | 空输入 → UNKNOWN (fail-closed) |
 | | `test_parse_no_t1_no_decision_section_returns_pass` | 无 T1 + 无显式决策 → 推断 PASS |
@@ -209,7 +209,7 @@ E06 初版在 `items_equipment.md` 的「主角持有」表中新增了「拥有
 | **E. World Setting in Review** | `test_world_setting_in_review_prompt` | world_setting 唯一标记字符串出现在 LLM prompt 中 |
 | **F. Decision Routing** | `test_pass_commits_memory_and_rag` | PASS → RAG index 调用 + 关系文档更新 + Fact Digest 生成 |
 | | `test_needs_revision_no_memory_commit_no_rag` | NEEDS_REVISION → 无 RAG、无 memory commit |
-| | `test_halt_no_rag` | HALT → 无 RAG、包含 planning_level |
+| | `test_halt_no_rag` | 旧停机状态 → 无 RAG、包含 planning_level |
 | **G. E05 Invariant** | `test_review_chapter_exactly_one_llm_call` | 恰好 1 次 LLM 调用 |
 | **H. StateManager.parse_review_decision** | `test_parse_decision_from_pass_analysis` | StateManager 入口 → PASS |
 | | `test_parse_decision_from_needs_revision_analysis` | StateManager 入口 → NEEDS_REVISION + MAJOR |
@@ -257,7 +257,7 @@ Total                         106 tests  ✅  (0 failures)
 
 ### 决策 2：Fail-Closed UNKNOWN
 
-- 解析失败默认 UNKNOWN，行为同 HALT（不提交、不索引）
+- 解析失败默认 UNKNOWN，行为同 旧停机状态（不提交、不索引）
 - LLM 输出格式异常不会导致错误章节被标记为 PASS
 - `[SUPERVISOR WARNING]` 终端输出确保人类可观测
 
@@ -304,7 +304,7 @@ Orchestrator.review_chapter(chapter_index)
   │   │   ├─ NO memory commit (no tracking doc update)
   │   │   └─ NO RAG index
   │   │
-  │   └─ HALT / UNKNOWN:
+  │   └─ 旧停机状态 / UNKNOWN:
   │       ├─ extract_fact_digest_from_analysis() ← informational only
   │       ├─ NO memory commit
   │       └─ NO RAG index
@@ -337,7 +337,7 @@ Orchestrator.review_chapter(chapter_index)
 | 不实现自动重写循环 | ✅ |
 | 不实现 Replanning / Rollback | ✅ |
 | 不引入 LangGraph | ✅ |
-| NEEDS_REVISION / HALT 不提交 memory/RAG | ✅ |
+| NEEDS_REVISION / 旧停机状态 不提交 memory/RAG | ✅ |
 | UNKNOWN fail-closed 不自动 PASS | ✅ |
 
 **E06 Structured Memory & Supervisor Decision Foundation 完成。**

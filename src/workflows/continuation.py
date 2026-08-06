@@ -7,6 +7,7 @@ from typing import Any
 
 from src.config.settings import get_settings
 from src.storage.document_formats import VolumePlan
+from src.storage.chapter_completion import is_derived_ready
 from src.storage.file_store import FileStore
 from src.workflows.chapter_runner import ChapterWorkflowRunner
 
@@ -31,16 +32,16 @@ class NovelContinuationService:
 
     def route(self) -> dict[str, Any]:
         latest = self._latest_canonical()
-        # Fail closed on the first incomplete canonical derivation, even if a
-        # damaged/manual workspace somehow contains later chapter files.
+        # Creative-state completion is durable and Savepoint-restored. LangGraph
+        # is consulted only to resume an incomplete execution.
         for canonical_index in self._canonical_indexes():
-            canonical_state = ChapterWorkflowRunner(
-                self.novel_id, canonical_index
-            ).inspect()
-            canonical_status = str(
-                canonical_state["values"].get("workflow_status", "")
-            ).upper()
-            if canonical_status != "DERIVED_READY":
+            if not is_derived_ready(self.fs, canonical_index):
+                canonical_state = ChapterWorkflowRunner(
+                    self.novel_id, canonical_index
+                ).inspect()
+                canonical_status = str(
+                    canonical_state["values"].get("workflow_status", "")
+                ).upper()
                 return {
                     "action": "repair_derivation",
                     "chapter_index": canonical_index,
@@ -132,10 +133,7 @@ class NovelContinuationService:
         while True:
             latest = self._latest_canonical()
             if latest >= target:
-                status = ChapterWorkflowRunner(
-                    self.novel_id, target
-                ).get_workflow_status()
-                if status != "DERIVED_READY":
+                if not is_derived_ready(self.fs, target):
                     return self.continue_once()
                 return {
                     "workflow_status": "DERIVED_READY",

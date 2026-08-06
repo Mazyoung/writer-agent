@@ -22,6 +22,7 @@ from src.storage.atomic_fact_store import COLLECTION_NAME as ATOMIC_FACT_COLLECT
 from src.storage.author_rag_store import COLLECTION_NAME as AUTHOR_RAG_COLLECTION
 from src.storage.document_formats import CurrentState
 from src.storage.file_store import FileStore
+from src.storage.chapter_completion import is_derived_ready
 
 
 SCHEMA_VERSION = 1
@@ -282,7 +283,11 @@ class StorySavepointManager:
         }
         if pending:
             self._assert_no_pending_workflow()
-        if states.get(chapter) != "DERIVED_READY":
+        try:
+            completed = is_derived_ready(self.file_store, chapter)
+        except ValueError as exc:
+            raise SavepointError(str(exc)) from exc
+        if not completed:
             raise SavepointError(
                 f"最新正式章节 Chapter {chapter} 尚未达到 DERIVED_READY"
             )
@@ -297,9 +302,6 @@ class StorySavepointManager:
             raise SavepointError(
                 "Current State 与最新正式章节不一致，不能补建过去章节 Savepoint"
             )
-        marker = self.root / "states" / f"chapter_{chapter:04d}_derived"
-        if not marker.is_file():
-            raise SavepointError(f"缺少 Chapter {chapter} derived marker")
         if not self.state_db.is_file():
             raise SavepointError("缺少 state.db")
         return chapter
@@ -640,6 +642,14 @@ class StorySavepointManager:
         )
         if current.through_chapter != chapter or current.chapter.chapter_index != chapter:
             raise SavepointVerificationError("Load 后 Current State 章节不匹配")
+        try:
+            completed = is_derived_ready(self.file_store, chapter)
+        except ValueError as exc:
+            raise SavepointVerificationError(str(exc)) from exc
+        if not completed:
+            raise SavepointVerificationError(
+                f"Load 后缺少 Chapter {chapter} DERIVED_READY marker"
+            )
         connection = sqlite3.connect(self.state_db)
         try:
             row = connection.execute("PRAGMA integrity_check").fetchone()

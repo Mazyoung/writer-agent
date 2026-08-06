@@ -37,7 +37,7 @@ Scene / Writer   chapters/                    执行：无规划修改权，只�
 反向链路（Foundation 已建、未接通）：
 ```text
 Execution → Supervisor → Planning Problem(L2/L3)
-         → HALT → Human Review → PlanRevision / StrategicRepairCase
+         → 旧停机状态 → Human Review → PlanRevision / StrategicRepairCase
          → (未来) Forward Repair / Rollback & Rewrite(StoryBranch + ChapterCheckpoint)
 ```
 
@@ -163,8 +163,8 @@ Rollback=Workflow State Rollback、Chroma invalidate+rebuild 决策。
 | 级别 | 范围 | 处理 |
 |---|---|---|
 | L1 Execution Issue | 场景表达/文本逻辑 | Writer 自动重写；无需审批；**禁改任何 Plan** |
-| L2 Planning Issue | Chapter Plan 不可执行 / Volume 局部节点调整 | 必须生成 Report → HALT → **Human Review** → Accept/Edit+Confirm 后才创建 PlanRevision |
-| L3 Strategic Issue | Volume/Book 战略失效、多章受影响、无唯一解 | **HALT PIPELINE**，禁止 Agent 自动修复 → 人机协同 Strategic Repair |
+| L2 Planning Issue | Chapter Plan 不可执行 / Volume 局部节点调整 | 必须生成 Report → 旧停机状态 → **Human Review** → Accept/Edit+Confirm 后才创建 PlanRevision |
+| L3 Strategic Issue | Volume/Book 战略失效、多章受影响、无唯一解 | **旧停机状态 PIPELINE**，禁止 Agent 自动修复 → 人机协同 Strategic Repair |
 
 权限表（实现于代码注释与 models.py docstring）：Writer 只报告；
 ChapterPlanner 只重生成当前章；StateManager 只可创建 Report/RepairCase（未来）；

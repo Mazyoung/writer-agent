@@ -198,7 +198,7 @@ review_chapter(input: styled_chapter, plan, tracking_docs, world_setting,
           → _index_chapter_to_rag()              [ChromaDB]
       → if failed (commit/parse/snapshot):
           → return ERROR (no Fact Digest, no RAG)
-  → if NEEDS_REVISION / HALT / UNKNOWN:
+  → if NEEDS_REVISION / 旧停机状态 / UNKNOWN:
       → no commit, no Fact Digest, no RAG
 ```
 
@@ -209,8 +209,8 @@ review_chapter(input: styled_chapter, plan, tracking_docs, world_setting,
 | PASS + committed | decision=PASS + commit success | 提示继续下一章 |
 | PASS + commit FAILED | decision=PASS + any commit failure | halted, 不提示下一章 |
 | NEEDS_REVISION | T1 errors or quality MAJOR | 提示修复后重新 review |
-| HALT + L2 | planning-level issue | 提示规划层处理 |
-| HALT + L3 | strategic issue (Book Plan violation) | 提示战略层修复 |
+| 旧停机状态 + L2 | planning-level issue | 提示规划层处理 |
+| 旧停机状态 + L3 | strategic issue (Book Plan violation) | 提示战略层修复 |
 | UNKNOWN | missing/invalid decision section | halted, 提示人工判断 |
 
 ### E07 关键映射点

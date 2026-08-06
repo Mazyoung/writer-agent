@@ -373,7 +373,7 @@ review_chapter(input: styled_chapter, plan, tracking_docs, world_setting,
           → _index_chapter_to_rag()              [ChromaDB]
       → if failed:
           → return ERROR (no Fact Digest, no RAG)
-  → if NEEDS_REVISION / HALT / UNKNOWN:
+  → if NEEDS_REVISION / 旧停机状态 / UNKNOWN:
       → no commit, no Fact Digest, no RAG
 ```
 
@@ -381,7 +381,7 @@ review_chapter(input: styled_chapter, plan, tracking_docs, world_setting,
 
 1. `commit failure → no Fact Digest → no RAG` (E06.2)
 2. `review requires styled candidate` (E06.2)
-3. `PASS / NEEDS_REVISION / HALT / UNKNOWN / runtime failure` — 5 种 Workflow 终态
+3. `PASS / NEEDS_REVISION / 旧停机状态 / UNKNOWN / runtime failure` — 5 种 Workflow 终态
 4. `StateCommitResult.success` 是唯一 programmatic commit 信号
 5. Chroma 是 rebuildable derived state
 6. Fact Digest 是 derived state，但只从 committed chapter 生成
@@ -392,7 +392,7 @@ review_chapter(input: styled_chapter, plan, tracking_docs, world_setting,
 - `_commit_all_tracking_docs` 的内部回滚逻辑（snapshot → write → rollback）可能与 LangGraph checkpoint 机制重叠
 - 当前 4 个 canonical tracking docs 的原子化可映射为 LangGraph 的单步 transactional node
 - SQLite (foreshadowing) 和 Chroma 不在 canonical multi-file transaction 范围内
-- CLI workflow state 呈现（PASS/REVISION/HALT/UNKNOWN/ERROR）已在 orchestrator 中字符串化
+- CLI workflow state 呈现（PASS/REVISION/旧停机状态/UNKNOWN/ERROR）已在 orchestrator 中字符串化
 
 ---
 
@@ -437,8 +437,8 @@ except Exception as e:
 | PASS + commit success | `Review PASS — Canonical state committed` + 下一步提示 | ✅ |
 | PASS + commit FAILED | `Canonical state commit failed — workflow halted` | ❌ |
 | NEEDS_REVISION | `当前章节需要修订 — 不要继续规划下一章` | ❌ |
-| HALT + L2 | `Planning issue detected — planning_level = L2` | ❌ |
-| HALT + L3 | `Strategic issue detected — planning_level = L3` | ❌ |
+| 旧停机状态 + L2 | `Planning issue detected — planning_level = L2` | ❌ |
+| 旧停机状态 + L3 | `Strategic issue detected — planning_level = L3` | ❌ |
 | UNKNOWN | `Supervisor decision unresolved — workflow halted` | ❌ |
 
 ### 16.5 P1 — RAG Rebuild Clear Failure 必须 Abort
@@ -514,7 +514,7 @@ review_chapter(input: styled_chapter, plan, tracking_docs, world_setting,
           → _index_chapter_to_rag()              [ChromaDB]
       → if failed:
           → return ERROR (no Fact Digest, no RAG)
-  → if NEEDS_REVISION / HALT / UNKNOWN:
+  → if NEEDS_REVISION / 旧停机状态 / UNKNOWN:
       → no commit, no Fact Digest, no RAG
 ```
 
@@ -524,7 +524,7 @@ review_chapter(input: styled_chapter, plan, tracking_docs, world_setting,
 2. `write failure → ALL OLD restored` (E06.2)
 3. `commit failure → no Fact Digest → no RAG` (E06.2)
 4. `review requires styled candidate` (E06.2)
-5. `PASS / NEEDS_REVISION / HALT+L2 / HALT+L3 / UNKNOWN / runtime failure` — 6 种 Workflow 终态
+5. `PASS / NEEDS_REVISION / 旧停机状态+L2 / 旧停机状态+L3 / UNKNOWN / runtime failure` — 6 种 Workflow 终态
 6. `CLI only prints "next chapter" after PASS + successful commit` (E06.2.1)
 7. `StateCommitResult.success` 是唯一 programmatic commit 信号
 8. Chroma 是 rebuildable derived state；`rebuild_branch()` 失败 → abort 整个 rebuild

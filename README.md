@@ -204,6 +204,14 @@ PLAN_BASE_URL=
 PLAN_MODEL=<plan-model>
 PLAN_MAX_TOKENS=16384
 
+# ----- Query Intent Builder (PLAN sub-configuration) -----
+# 留空时逐字段继承 PLAN_*
+QUERY_INTENT_PROVIDER=
+QUERY_INTENT_API_KEY=
+QUERY_INTENT_BASE_URL=
+QUERY_INTENT_MODEL=
+QUERY_INTENT_MAX_TOKENS=
+
 # ----- Prose creation -----
 WRITE_PROVIDER=
 WRITE_API_KEY=
@@ -246,6 +254,10 @@ WRITE_MODEL=<write-model>
 
 Writer 与 Stylist 始终共同使用 `WRITE`。Writer-Agent 不发送 Thinking、Extended Thinking、`reasoning_effort` 或其他 provider-specific reasoning 参数，模型使用当前 API/model 的默认推理行为。每次真正调用 LLM 前，系统只对本次需要的 slot 执行 preflight；错误会以中文列出 slot、缺失字段和对应环境变量，不输出 API Key 内容。
 
+Query Intent Builder 属于 PLAN 职责，不是第五个主槽位。`QUERY_INTENT_*` 每个空字段分别继承对应的 `PLAN_*`；如需使用更便宜的快速模型，可单独填写 provider、connection、model 和 max_tokens。
+
+章节检索只把 Query Intent 发送给 Embedding。Builder 输入完整 Volume Plan、上一章末尾约 1500 字的完整段落窗口、完整 Current State 和原始 Human Intent；Human Intent 仍会原样直接交给 Planner。Query Intent 通常应在 3000 字以内，5000–9999 字仍接受；达到 10000 字时仅自动压缩重写一次，再次严重超长则 fail-closed，绝不静默截断。
+
 ### Embedding 与 LLM 不同
 
 LLM slot 的 provider、API 和 model 可以随时修改。Embedding vector space 则在 `init` 时确认并永久绑定当前小说：
@@ -268,6 +280,8 @@ EMBEDDING_DIMENSIONS=
 确认 `init` 后，小说的 Embedding Mode、Model、Dimensions 永久固定。以后修改 `.env` 中这三个值只影响下一本新小说，不影响已有小说；API Key 和 Base URL 属于运行时连接信息，可以轮换，但必须继续访问同一个模型/vector space。内部配置不保存 API Key，也不会随 Story Savepoint Load 改变。
 
 `AUTO_SAVEPOINT_EVERY=0` 关闭自动 Savepoint；正整数 `N` 表示每当正式章节达到 `DERIVED_READY` 且章节号可被 `N` 整除时，自动创建与手动 Savepoint 完全相同的 READY Savepoint。
+
+`DERIVED_READY` 由小说 creative state 内的最终 marker 持久记录。它只在 Canonical、Current State、Fact Digest、Volume Progress、chapter_sources 和 Chroma 同步全部成功后写入，不依赖历史 LangGraph checkpoint，因此 Savepoint Load 后仍可正确选择下一章。
 
 ---
 

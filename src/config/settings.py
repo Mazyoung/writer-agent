@@ -94,6 +94,37 @@ class Settings:
                 ),
             )
 
+        plan = self._model_slots["plan"]
+        query_provider = (
+            os.getenv("QUERY_INTENT_PROVIDER", "").strip().lower()
+            or plan.provider
+        )
+        self._validate_provider("QUERY_INTENT_PROVIDER", query_provider)
+        query_max_raw = os.getenv("QUERY_INTENT_MAX_TOKENS", "").strip()
+        query_max_tokens = (
+            self._positive_integer(
+                "QUERY_INTENT_MAX_TOKENS", str(plan.max_tokens)
+            )
+            if query_max_raw else plan.max_tokens
+        )
+        self._query_intent_slot = ModelSlot(
+            name="query_intent",
+            provider=query_provider,
+            api_key=(
+                os.getenv("QUERY_INTENT_API_KEY", "").strip()
+                or plan.api_key
+            ),
+            base_url=(
+                os.getenv("QUERY_INTENT_BASE_URL", "").strip()
+                or plan.base_url
+            ),
+            model=(
+                os.getenv("QUERY_INTENT_MODEL", "").strip()
+                or plan.model
+            ),
+            max_tokens=query_max_tokens,
+        )
+
         self.chapter_mode = os.getenv("CHAPTER_MODE", "agent").strip().lower()
         if self.chapter_mode not in {"agent", "human"}:
             raise ValueError(
@@ -193,6 +224,10 @@ class Settings:
                 "architect、plan、write、system 之一"
             )
         return self._model_slots[normalized]
+
+    def get_query_intent_slot(self) -> ModelSlot:
+        """Resolved PLAN sub-configuration for Query Intent Builder."""
+        return self._query_intent_slot
 
     def get_agent_policy(self, agent_name: str) -> AgentModelPolicy:
         if agent_name not in AGENT_MODEL_POLICIES:

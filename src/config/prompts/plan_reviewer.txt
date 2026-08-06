@@ -15,8 +15,7 @@
 ## 决策规则
 
 - PASS：规划可直接交给 Writer。
-- NEEDS_REVISION：规划本身需要人工修改，但不涉及 Book 层战略停机。
-- HALT：存在不能通过局部 Chapter Plan 编辑安全解决的 L2/L3 问题，需要人工处理更高层规划。
+- NEEDS_REVISION：规划存在必须修正的问题，包括局部执行问题或高层规划冲突。
 
 你不得自动重写 Chapter Plan。任何缺失或不确定信息都必须明确报告，不能默认 PASS。
 
@@ -42,7 +41,7 @@
 - **Writer 信息边界**: PASS / MINOR / MAJOR — [说明]
 
 ## 审阅决策
-- **决策**: PASS / NEEDS_REVISION / HALT
+- **决策**: PASS / NEEDS_REVISION
 - **严重性**: PASS / MINOR / MAJOR
 - **主要问题**: [如有，分号分隔]
 - **规划级别**: L1 / L2 / L3

@@ -48,7 +48,7 @@ main.py:cmd_write
 preflight → plan_chapter → write_draft → style_edit → save_styled
           → review_chapter → parse_decision
               PASS → commit_state → save_fact_digest → rag_index
-              NEEDS_REVISION/HALT → stop_non_pass
+              NEEDS_REVISION/旧停机状态 → stop_non_pass
               UNKNOWN/error → END
 ```
 
@@ -66,7 +66,7 @@ HITL 的插入点是 `src/workflows/chapter_workflow.py` 中 `parse_decision` �
 
 - PASS：保持进入 `commit_state`；
 - NEEDS_REVISION：未来进入 `interrupt()`，接收人工反馈后 resume；
-- HALT：未来进入 `interrupt()`，接收人工决策后 resume；
+- 旧停机状态：未来进入 `interrupt()`，接收人工决策后 resume；
 - UNKNOWN/error：继续 fail-closed。
 
 恢复仍应复用 `ChapterWorkflowRunner` 当前 deterministic `thread_id` 和 SQLite checkpointer；E07.5 再引入 `Command(resume=...)`。E07.4.1 未实现 interrupt、人工反馈或 revision loop。

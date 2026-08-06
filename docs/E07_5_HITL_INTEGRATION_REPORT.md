@@ -1,7 +1,7 @@
 # E07.5 Human-in-the-loop Integration Report
 
 日期：2026-08-05  
-范围：为现有 checkpointed LangGraph chapter workflow 增加 NEEDS_REVISION/HALT 人工暂停与恢复。
+范围：为现有 checkpointed LangGraph chapter workflow 增加 NEEDS_REVISION/旧停机状态 人工暂停与恢复。
 
 ## 1. 修改文件
 
@@ -26,7 +26,7 @@ parse_decision
   │    → rag_index
   │    → END
   │
-  ├─ NEEDS_REVISION / HALT
+  ├─ NEEDS_REVISION / 旧停机状态
   │    → await_human_review
   │    → interrupt(payload)
   │    → WAITING_HUMAN
@@ -109,7 +109,7 @@ NEEDS_REVISION + revise
   → re-review
   → parse_decision
 
-HALT + approved planning action
+旧停机状态 + approved planning action
   → future planning repair entry
 
 stop/acknowledge

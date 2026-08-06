@@ -112,7 +112,7 @@ Expected future flow:
 
 Planning Problem
 → PlanningModificationReport
-→ HALT
+→ 旧停机状态
 → Human Review
 → PlanRevision
 
@@ -120,7 +120,7 @@ Planning Problem
 
 If established history invalidates strategic planning:
 
-HALT PIPELINE.
+旧停机状态 PIPELINE.
 
 Do not autonomously repair Book-level strategy.
 
