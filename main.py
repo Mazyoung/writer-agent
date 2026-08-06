@@ -40,6 +40,7 @@ from src.planning.chapter_planning_service import ChapterPlanningService
 from src.planning.novel_lifecycle import NovelLifecycleService
 from src.storage.file_store import FileStore
 from src.storage.rag_maintenance_v2 import RAGMaintenanceService
+from src.storage.story_savepoint import SavepointError, StorySavepointManager
 from src.workflows.chapter_editing import ChapterEditingService
 from src.workflows.chapter_runner import (
     repair_chapter_derivation,
@@ -371,6 +372,60 @@ def cmd_rag_index(args):
         print(f"\n  RAG 重建已中止。未修改索引。")
 
 
+def cmd_savepoint(args):
+    novel_dir = get_settings().data_dir / "novels" / args.name
+    if not novel_dir.is_dir():
+        print(f"小说 '{args.name}' 不存在。请先运行 init。")
+        return
+    manager = StorySavepointManager(args.name)
+    try:
+        if args.savepoint_action == "create":
+            manifest = manager.create()
+            print(
+                f"Story Savepoint {manifest['savepoint_id']} 已创建并达到 READY "
+                f"（Chapter {manifest['chapter_index']}）。"
+            )
+            return
+        if args.savepoint_action == "list":
+            savepoints = manager.list()
+            if not savepoints:
+                print("当前没有 READY Story Savepoint。")
+                return
+            print("READY Story Savepoint：")
+            for item in savepoints:
+                print(
+                    f"  {item['savepoint_id']}  Chapter {item['chapter_index']}  "
+                    f"{item['created_at']}"
+                )
+            return
+        if args.savepoint_action == "verify":
+            manifest = manager.verify(args.savepoint_id)
+            print(
+                f"Story Savepoint {manifest['savepoint_id']} 完整性验证通过（READY）。"
+            )
+            return
+        if args.savepoint_action == "load":
+            savepoint_id = args.savepoint_id.upper()
+            print("\n警告：加载该 Savepoint 会覆盖当前创作工作区。")
+            print("当前未另行保存的修改会丢失。")
+            print("其他已经 READY 的 Story Savepoint 不受影响，之后仍可重新加载。")
+            novel_confirmation = input("\n第一次确认：请输入小说名：").strip()
+            if novel_confirmation != args.name:
+                print("小说名不匹配，已取消 Load。")
+                return
+            exact = input(f"第二次确认：请输入 LOAD {savepoint_id}：").strip()
+            if exact != f"LOAD {savepoint_id}":
+                print("确认文本不匹配，已取消 Load。")
+                return
+            manifest = manager.load(savepoint_id)
+            print(
+                f"Story Savepoint {manifest['savepoint_id']} 已加载；"
+                f"当前创作世界恢复到 Chapter {manifest['chapter_index']}。"
+            )
+    except SavepointError as exc:
+        print(f"Story Savepoint 操作失败：{exc}")
+
+
 
 
 # ═══ CLI ═══════════════════════════════════════════════════════
@@ -440,6 +495,25 @@ def main():
     p.add_argument("name")
     p.add_argument("--rebuild", action="store_true", help="清空当前分支索引后重建")
 
+    # story savepoint (E07 closure)
+    p = subparsers.add_parser("savepoint", help="Story Savepoint 创建、校验与加载")
+    savepoint_subparsers = p.add_subparsers(
+        dest="savepoint_action", required=True, help="Savepoint 操作"
+    )
+    for action, help_text in (
+        ("create", "为当前 DERIVED_READY 世界创建 Savepoint"),
+        ("list", "列出 READY Savepoint"),
+    ):
+        child = savepoint_subparsers.add_parser(action, help=help_text)
+        child.add_argument("name")
+    for action, help_text in (
+        ("verify", "验证 Savepoint 完整性"),
+        ("load", "覆盖当前创作世界并加载 Savepoint"),
+    ):
+        child = savepoint_subparsers.add_parser(action, help=help_text)
+        child.add_argument("name")
+        child.add_argument("savepoint_id", metavar="ID")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -459,6 +533,7 @@ def main():
         "approve-volume": cmd_approve_volume,
         "repair-derivation": cmd_repair_derivation,
         "rag-index": cmd_rag_index,
+        "savepoint": cmd_savepoint,
     }
     if args.command in cmds:
         cmds[args.command](args)

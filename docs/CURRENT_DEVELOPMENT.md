@@ -2,7 +2,7 @@
 
 ## Current Stage
 
-E07.9.1 Human Author Mode 已完整闭环并在工作树中完成。
+E07 Story Savepoint + Load Savepoint 已完成。
 
 正式支持两种完整章节创作模式：
 
@@ -18,7 +18,20 @@ human: Intent(required) → Current State / Historical RAG → Writing Context
 
 作者拥有最终决定权。系统 Review/Consistency 是决策辅助：非 PASS/WARN 不会自动提交，但作者可以在看到明确警告后通过独立二次确认 override。原始 verdict 保持不变，不会伪造成 PASS/CLEAN。
 
-Story Snapshot、Jump、Branch、Savepoint、Restore、Rollback 尚未开始。
+Story Savepoint 将正式章节完成后的完整小说创作世界保存为 immutable READY 快照；Load 可在任意 READY Savepoint 之间双向恢复，不删除或修改其他 Savepoint。当前仅支持 `branch_id=main`，Branch/Fork/Merge 未实现。
+
+## E07 Story Savepoint Closure
+
+- `StorySavepointManager.create/list/verify/load` 提供中性底层接口；Savepoint ID 按最新正式章节生成，例如 `S0040`。
+- Create 只接受最新 canonical、Current State、derived marker 和 LangGraph terminal status 全部一致且达到 `DERIVED_READY` 的当前世界；pending interrupt、未完成 execution、derivation error 和补建过去章节均 fail closed。
+- `story_savepoints/<ID>/` 使用 staging → 文件/SQLite/Chroma hash 与 integrity verify → READY 流程。READY Load 路径不会修改目标或其他 Savepoint。
+- 文件快照覆盖 novel creative/project tree，并排除 `story_savepoints/`、temp/staging/cache、operation lock、`LOAD_ERROR` 和 workflow checkpoint infrastructure。
+- `state.db` 使用 SQLite online backup API 快照并执行 `PRAGMA integrity_check`；Load 恢复同一份 Markdown、SQLite projection 与 derived marker。
+- Chroma 对 `atomic_facts_v2` 与 `author_knowledge_v1` 按 `novel_id + branch_id=main` 逻辑导出 ids/documents/metadatas/embeddings；Load 原样恢复 embeddings，不调用 LLM、embedding 或 Markdown rebuild。
+- Create/Load 与章节 run/resume/repair 共用 novel-level exclusive operation lock。双重恢复失败会写入 `LOAD_ERROR.json`，并由 lock 与 FileStore 阻断后续创作写入。
+- Load 修改工作区前创建隐藏 internal safety snapshot；中途失败自动恢复。成功后删除 safety snapshot，并仅删除当前 novel 中目标章节之后的 LangGraph threads。
+- CLI 提供 `savepoint create|list|verify|load`。Load 没有 `--yes/--force` 绕过，并强制依次输入 novel name 与精确 `LOAD <ID>`。
+- 自动 Savepoint、Branch/Fork/Merge、压缩/去重、云同步和真实 API smoke test 均未扩展。
 ## E07.9 Production Closure
 
 - The Python and Markdown call chain uses canonical_source_path / Canonical Source from Chapter Workflow through StateManager and CurrentStateStore.
@@ -55,11 +68,11 @@ Tests tied to the retired src.core.orchestrator, automatic revision, PASS-to-dir
 
 ## Verification
 
-- E07.9.1-B 新增 mocked/no-paid-call tests：11 passed。
-- E07.9.1 + existing Agent / RAG / E07.7 / E07.8 / E07.9 / Chapter Plan focused regression：70 passed。
-- 完整保留 unittest suite：149 passed。
+- Story Savepoint destructive isolated integration / CLI tests：11 passed。
+- Savepoint + existing chapter workflow focused regression：47 passed。
+- 完整保留 unittest suite：160 passed。
 - `py_compile` 与 `git diff --check` 通过。
 
 ## Next Task
 
-E07.10 — 使用真实临时小说项目开展 Story Savepoint / Rollback 破坏性集成验证。未经明确任务，不开始实现。
+E07 Real End-to-End Smoke Test。未经明确任务，不调用真实 API。

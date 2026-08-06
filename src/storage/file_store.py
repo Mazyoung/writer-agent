@@ -14,10 +14,11 @@ class FileStore:
         ("tracking", "author_rag"),
     }
 
-    def __init__(self, novel_id: str, data_dir: Path):
+    def __init__(self, novel_id: str, data_dir: Path, ensure_dirs: bool = True):
         self.novel_id = novel_id
         self.root = data_dir / "novels" / novel_id
-        self._ensure_dirs()
+        if ensure_dirs:
+            self._ensure_dirs()
 
     def _ensure_dirs(self):
         for sub in ["settings", "outlines", "chapters", "states", "briefs",
@@ -27,8 +28,17 @@ class FileStore:
     def _timestamp(self) -> str:
         return datetime.now().strftime("%Y%m%d_%H%M%S")
 
+    def _assert_writable(self) -> None:
+        """Fail closed after an unrecoverable Savepoint load failure."""
+        marker = self.root / "LOAD_ERROR.json"
+        if marker.exists():
+            raise RuntimeError(
+                f"小说处于 LOAD_ERROR 阻断状态；请先按 {marker} 人工恢复"
+            )
+
     def save(self, category: str, filename: str, content: str) -> Path:
         """保存文件，自动加时间戳"""
+        self._assert_writable()
         ts = self._timestamp()
         filepath = self.root / category / f"{filename}_{ts}.md"
         filepath.write_text(content, encoding="utf-8")
@@ -64,6 +74,7 @@ class FileStore:
 
     def save_canonical(self, category: str, filename: str, content: str) -> Path:
         """保存为固定文件名（无时间戳），覆盖旧版本。旧版本备份为 .bak.md"""
+        self._assert_writable()
         filepath = self.root / category / f"{filename}.md"
         self._backup_if_exists(filepath)
         filepath.write_text(content, encoding="utf-8")
@@ -151,6 +162,7 @@ class FileStore:
 
     def commit_canonical_chapter(self, chapter_index: int, content: str) -> Path:
         """Create formal prose exactly once; Generate may never overwrite it."""
+        self._assert_writable()
         if not content.strip():
             raise ValueError("Canonical chapter prose cannot be empty")
         path = self.canonical_chapter_path(chapter_index)
@@ -165,6 +177,7 @@ class FileStore:
 
     def rollback_canonical(self, category: str, filename: str) -> bool:
         """回退 canonical 文件：用 .bak.md 替换 .md。成功返回 True。"""
+        self._assert_writable()
         main = self.root / category / f"{filename}.md"
         bak = self.root / category / f"{filename}.bak.md"
         if bak.exists():
@@ -202,6 +215,7 @@ class FileStore:
 
     def save_generated_tracking_doc(self, name: str, content: str) -> Path:
         """Atomically replace one generated tracking report."""
+        self._assert_writable()
         path = self.root / "tracking" / f"{name}.md"
         temporary = path.with_suffix(".tmp")
         try:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
+from functools import wraps
 from pathlib import Path
 from typing import Any
 
@@ -13,7 +14,17 @@ from langgraph.types import Command, StateSnapshot
 from src.config.settings import get_settings
 from src.storage.file_store import FileStore
 from src.storage.document_formats import ChapterPlan
+from src.storage.story_savepoint import NovelOperationLock
 from src.workflows.chapter_workflow import build_chapter_workflow
+
+
+def _novel_mutation_locked(method):
+    """Prevent chapter production from racing savepoint create/load."""
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        with NovelOperationLock(self.file_store.root):
+            return method(self, *args, **kwargs)
+    return wrapped
 
 
 class ChapterWorkflowRunner:
@@ -69,6 +80,7 @@ class ChapterWorkflowRunner:
         finally:
             connection.close()
 
+    @_novel_mutation_locked
     def run(
         self,
         chapter_outline: str = "",
@@ -214,6 +226,7 @@ class ChapterWorkflowRunner:
         checkpointer.delete_thread(self.thread_id)
         return removed
 
+    @_novel_mutation_locked
     def resume(self, resume_value: dict[str, Any]) -> dict[str, Any]:
         """Resume the existing interrupt with a validated human edit or stop."""
         if not isinstance(resume_value, dict):
@@ -278,6 +291,7 @@ class ChapterWorkflowRunner:
             connection.close()
 
 
+    @_novel_mutation_locked
     def repair_derivation(self) -> dict[str, Any]:
         """Resume only the first incomplete post-canonical derivation stage."""
         connection, _checkpointer, graph = self._open_graph()
