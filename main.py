@@ -204,7 +204,11 @@ def cmd_write(args):
             result = resume_chapter_workflow(
                 args.name,
                 args.chapter,
-                {"action": requested_action, "feedback": resume_feedback or ""},
+                {
+                    "action": requested_action,
+                    "feedback": resume_feedback or "",
+                    "candidate_file": getattr(args, "candidate_file", "") or "",
+                },
             )
         elif getattr(args, "stop", False):
             result = resume_chapter_workflow(
@@ -226,55 +230,88 @@ def cmd_write(args):
                 chapter_intent=getattr(args, "chapter_intent", "") or "",
             )
     except ValueError as exc:
-        print(f"\n  Chapter workflow resume rejected: {exc}")
+        print(f"\n  章节工作流恢复请求被拒绝：{exc}")
         return
 
     status = result.get("workflow_status", "error")
-    verdict = result.get("verdict", "UNKNOWN")
+    verdict = (
+        result.get("consistency_verdict")
+        or result.get("verdict", "UNKNOWN")
+    )
     if status == "DERIVED_READY":
-        print(f"\n  Chapter workflow completed: review={verdict}")
+        print(f"\n  章节工作流已完成：review={verdict}")
         for warning in result.get("derived_state_errors", []):
-            print(f"  [DERIVED STATE ERROR] {warning}")
+            print(f"  [派生状态错误] {warning}")
         return
     if status == "DERIVATION_ERROR":
-        print("\n  Canonical chapter committed; derivation failed and remains retryable.")
+        print("\n  Canonical 章节已提交；派生失败，可使用 repair-derivation 重试。")
         for warning in result.get("derived_state_errors", []):
-            print(f"  [DERIVATION ERROR] {warning}")
+            print(f"  [派生错误] {warning}")
         return
     if status == "DISCARDED":
-        print("\n  Candidate/checkpoint discarded; Chapter Intent was preserved.")
+        print("\n  Candidate/checkpoint 已放弃；Chapter Intent 已保留。")
         return
     if status == "WAITING_HUMAN":
-        print(f"\n  Chapter workflow waiting for human input: review={verdict}")
-        human_writing = False
-        for pending in result.get("interrupts", []):
-            payload = pending.get("value", {})
-            print(f"  Interrupt ID: {pending.get('id', '')}")
-            print(f"  Type: {payload.get('type', 'unknown')}")
-            print(f"  Planning level: {payload.get('planning_level', 'L1')}")
-            print(f"  Edit file: {payload.get('edit_path', '')}")
-            if payload.get("type") == "human_writing":
-                human_writing = True
-                print(f"  Writing context: {payload.get('writing_context_path', '')}")
-                print(f"  {payload.get('message', '')}")
-            for reason in payload.get("reasons", [])[:5]:
-                print(f"    - {reason}")
-        if human_writing:
-            print("  Candidate submission will be added in E07.9.1-B.")
+        pending_items = result.get("interrupts", [])
+        payload = pending_items[0].get("value", {}) if pending_items else {}
+        interrupt_type = payload.get("type", "unknown")
+        if interrupt_type == "human_writing":
+            print("\n【人工创作模式】")
+            print("\n本章相关历史信息已经整理完成：")
+            print(f"\nWriting Context：\n{payload.get('writing_context_path', '')}")
+            print("\n请根据上述资料自行完成正文。")
+            print("完成后提交 Candidate 继续一致性检查：")
+            print(
+                f"  python main.py write {args.name} --chapter {args.chapter} "
+                "--action submit --file <正文文件>"
+            )
             return
+        if interrupt_type == "human_final_approval":
+            consistency = payload.get("verdict", "UNKNOWN")
+            if consistency == "CLEAN":
+                print("\n一致性检查完成，未发现明确的历史事实或状态冲突。")
+            else:
+                print("\n⚠ 一致性警告")
+                print("\n系统发现以下可能的连续性问题：")
+                for reason in payload.get("reasons", []) or ["未提供具体说明"]:
+                    print(f"  - {reason}")
+                print("\n这些提示不会自动否决作者的设定。")
+                print("你可以修改正文，也可以确认这是有意设计后继续提交。")
+            print(f"\n人工修改文件：{payload.get('edit_path', '')}")
+            print("操作：--action approve|manual_edit|pause|discard")
+            return
+        if interrupt_type == "review_override_confirmation":
+            print("\n⚠ 当前审阅尚未通过")
+            print(f"\n当前审阅结论：{payload.get('verdict', 'UNKNOWN')}")
+            for reason in payload.get("reasons", []):
+                print(f"  - {reason}")
+            print("\n如果继续，本章将按当前版本正式提交。")
+            print("原审阅结论不会被修改，并会记录本次提交是作者主动确认的结果。")
+            print("\n请再次确认你仍然希望提交当前版本：")
+            print("  --action confirm_override")
+            print("返回上一审批步骤：--action back")
+            return
+
+        print(f"\n章节工作流正在等待人工处理：review={verdict}")
+        print(f"  Interrupt ID: {pending_items[0].get('id', '') if pending_items else ''}")
+        print(f"  Type: {interrupt_type}")
+        print(f"  Planning level: {payload.get('planning_level', 'L1')}")
+        print(f"  Edit file: {payload.get('edit_path', '')}")
+        for reason in payload.get("reasons", [])[:5]:
+            print(f"    - {reason}")
         print(
-            "  Resume with --action approve|agent_edit|manual_edit|regenerate|"
-            "pause|discard (manual_edit reads the Edit file shown above)."
+            "  可用操作：--action approve|agent_edit|manual_edit|regenerate|"
+            "pause|discard（manual_edit 会读取上方 Edit file）。"
         )
         print(
-            "  Or stop this execution with: python main.py write "
+            "  或停止本次执行：python main.py write "
             f"{args.name} --chapter {args.chapter} --stop"
         )
         return
     if status == "STOPPED_NON_PASS":
-        print(f"\n  Chapter workflow stopped after human review: review={verdict}")
+        print(f"\n  章节工作流已在人工审阅后停止：review={verdict}")
         return
-    print(f"\n  Chapter workflow halted: {result.get('error', status)}")
+    print(f"\n  章节工作流已中止：{result.get('error', status)}")
 
 
 def cmd_style(args):
@@ -367,10 +404,14 @@ def main():
         help="可选 Chapter Intent（--instructions 为兼容别名）",
     )
     p.add_argument("--resume", help="提交人工编辑并记录反馈")
+    p.add_argument("--file", dest="candidate_file", help="人工正文 Candidate 文件路径")
     p.add_argument(
         "--action",
-        choices=["approve", "agent_edit", "manual_edit", "regenerate", "pause", "discard"],
-        help="恢复 prose Review / Final Approval 的 Human action",
+        choices=[
+            "submit", "approve", "confirm_override", "back",
+            "agent_edit", "manual_edit", "regenerate", "pause", "discard",
+        ],
+        help="恢复当前章节工作流 interrupt 的操作 token",
     )
     p.add_argument("--stop", action="store_true", help="停止当前等待人工处理的执行")
 

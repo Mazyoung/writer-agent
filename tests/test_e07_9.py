@@ -64,12 +64,12 @@ class E079Case(unittest.TestCase):
 
 
 class TestContracts(E079Case):
-    def test_prose_halt_is_unknown_fail_closed(self):
+    def test_prose_halt_is_preserved_for_explicit_author_override(self):
         result = parse_chapter_decision({
             "raw_analysis": "## 审阅决策\n- **决策**: HALT\n- **严重性**: MAJOR",
         })
-        self.assertEqual(result["verdict"], "UNKNOWN")
-        self.assertEqual(result["workflow_status"], "error")
+        self.assertEqual(result["verdict"], "HALT")
+        self.assertEqual(result["workflow_status"], "DECISION_HALT")
 
     def test_volume_progress_is_advisory_enum(self):
         self.assertEqual(_parse_volume_progress(

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import re
 import sqlite3
+from pathlib import Path
 from typing import Any
 
 from langgraph.checkpoint.sqlite import SqliteSaver
@@ -86,11 +88,11 @@ class ChapterWorkflowRunner:
 
             snapshot = graph.get_state(self.config)
             if snapshot.interrupts:
-                print("  [LangGraph] Chapter workflow is waiting for human input.")
+                print("  [LangGraph] 章节工作流正在等待人工输入。")
                 return self._waiting_result(snapshot)
             if snapshot.values and snapshot.next:
                 print(
-                    "  [LangGraph] Resuming chapter workflow from checkpoint: "
+                    "  [LangGraph] 正在从 checkpoint 恢复章节工作流："
                     + ", ".join(snapshot.next)
                 )
                 return self._result_or_interrupt(
@@ -103,11 +105,11 @@ class ChapterWorkflowRunner:
                 if terminal_status in {"ERROR", "STOPPED_NON_PASS", "DISCARDED"}:
                     checkpointer.delete_thread(self.thread_id)
                     print(
-                        "  [LangGraph] Cleared retryable terminal checkpoint; "
-                        "starting a new chapter execution."
+                        "  [LangGraph] 已清除可重试的终态 checkpoint；"
+                        "正在开始新的章节执行。"
                     )
                 else:
-                    print("  [LangGraph] Chapter workflow is already terminal; no nodes replayed.")
+                    print("  [LangGraph] 章节工作流已结束，不会重复执行节点。")
                     return dict(snapshot.values)
 
             initial_state = {
@@ -123,7 +125,7 @@ class ChapterWorkflowRunner:
                 "workflow_status": "running",
                 "warnings": [],
             }
-            print("  [LangGraph] Starting checkpointed chapter workflow.")
+            print("  [LangGraph] 正在启动 checkpointed 章节工作流。")
             return self._result_or_interrupt(
                 graph, graph.invoke(initial_state, config=self.config)
             )
@@ -148,8 +150,47 @@ class ChapterWorkflowRunner:
                 raise ValueError(
                     "Human-edited Chapter Plan is invalid or targets another chapter"
                 )
-        elif interrupt_type not in {"chapter_review", "final_author_approval"}:
+        elif interrupt_type not in {
+            "chapter_review", "final_author_approval", "human_final_approval"
+        }:
             raise ValueError(f"Unsupported pending interrupt type: {interrupt_type}")
+        return text
+
+    def _load_candidate_file(
+        self, candidate_file: str, interrupt_value: dict[str, Any]
+    ) -> str:
+        """在消费 human_writing interrupt 前验证人工正文文件。"""
+        if interrupt_value.get("type") != "human_writing":
+            raise ValueError("submit 仅可用于 human_writing 阶段")
+        if (
+            interrupt_value.get("novel_id") != self.novel_id
+            or interrupt_value.get("chapter_index") != self.chapter_index
+        ):
+            raise ValueError("待处理的人工写作 checkpoint 与 novel/chapter 不匹配")
+        raw_path = str(candidate_file or "").strip()
+        if not raw_path:
+            raise ValueError("submit 必须通过 --file 指定人工正文 Candidate")
+        path = Path(raw_path).expanduser().resolve()
+        novels_root = (get_settings().data_dir / "novels").resolve()
+        try:
+            relative_novel = path.relative_to(novels_root)
+        except ValueError:
+            relative_novel = None
+        if relative_novel is not None and (
+            not relative_novel.parts or relative_novel.parts[0] != self.novel_id
+        ):
+            raise ValueError("禁止从其他 novel 目录提交正文 Candidate")
+        chapter_match = re.search(r"chapter[_-]?0*(\d+)", path.stem, re.IGNORECASE)
+        if chapter_match and int(chapter_match.group(1)) != self.chapter_index:
+            raise ValueError(
+                f"Candidate 文件名指向第 {int(chapter_match.group(1))} 章，"
+                f"当前 checkpoint 是第 {self.chapter_index} 章"
+            )
+        if not path.is_file():
+            raise ValueError(f"人工正文 Candidate 文件不存在: {path}")
+        text = path.read_text(encoding="utf-8").strip()
+        if not text:
+            raise ValueError(f"人工正文 Candidate 文件为空: {path}")
         return text
 
     def _discard_candidate(self, checkpointer: SqliteSaver) -> list[str]:
@@ -159,8 +200,10 @@ class ChapterWorkflowRunner:
         removed = []
         patterns = [
             f"chapters/chapter_{self.chapter_index:04d}_styled*.md",
+            f"chapters/chapter_{self.chapter_index:04d}_human_candidate*.md",
             f"outlines/chapter_plan_ch{self.chapter_index:04d}*.md",
             f"states/review_ch{self.chapter_index:04d}_*.md",
+            f"states/consistency_review_ch{self.chapter_index:04d}_*.md",
             f"states/derivation_ch{self.chapter_index:04d}_*.md",
             f"states/fact_digest_ch{self.chapter_index:04d}_*.md",
         ]
@@ -186,6 +229,11 @@ class ChapterWorkflowRunner:
                 raise ValueError("Chapter workflow has an unexpected number of interrupts")
 
             pending = snapshot.interrupts[0].value
+            if (
+                pending.get("novel_id", self.novel_id) != self.novel_id
+                or pending.get("chapter_index", self.chapter_index) != self.chapter_index
+            ):
+                raise ValueError("待处理 checkpoint 与当前 novel/chapter 不匹配")
             if action == "edit" and pending.get("type") in {
                 "chapter_review", "final_author_approval"
             }:
@@ -211,8 +259,16 @@ class ChapterWorkflowRunner:
             # consume the pending checkpoint interrupt.
             if action in {"edit", "manual_edit"}:
                 command_value["edited_text"] = self._load_human_edit(pending)
+            if action == "submit":
+                command_value["candidate_text"] = self._load_candidate_file(
+                    str(resume_value.get("candidate_file", "")), pending
+                )
 
-            print("  [LangGraph] Resuming chapter workflow with human input.")
+            if action == "submit":
+                print(f"  已接收第 {self.chapter_index} 章人工正文 Candidate。")
+                print("  正在执行一致性检查……")
+            else:
+                print("  [LangGraph] 正在使用人工输入恢复章节工作流。")
             result = graph.invoke(
                 Command(resume=command_value),
                 config=self.config,
@@ -255,7 +311,7 @@ class ChapterWorkflowRunner:
                 {"workflow_status": status, "error": None},
                 as_node=as_node,
             )
-            print(f"  [LangGraph] Repairing derivation after: {as_node}")
+            print(f"  [LangGraph] 正在修复以下阶段后的派生：{as_node}")
             return self._result_or_interrupt(
                 graph, graph.invoke(None, config=self.config)
             )

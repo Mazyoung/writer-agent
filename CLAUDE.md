@@ -24,6 +24,7 @@
 - `docs/E07_REMAINING_PLAN.md` is the authoritative roadmap for current E07 development; the old migration guide is historical migration reference only.
 - Use the Conda `writer` environment for Python; do not use the repository-local `venv`.
 - Do not scan the entire repository by default; inspect only files required by the current task.
+- 本项目的开发文档和用户可见输出应尽量使用中文，包括 CLI 输出、日志提示和 Git 提交信息；代码标识符、协议字段、第三方原文及必须保持兼容的既有内容除外。
 
 ## Continuing Development
 

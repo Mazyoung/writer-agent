@@ -123,6 +123,39 @@ class StateManager(BaseAgent):
         )
         return {"raw_analysis": result.content, "filepath": result.filepath}
 
+    def review_consistency(
+        self,
+        candidate_prose: str,
+        chapter_index: int,
+        *,
+        world_setting: str = "",
+        current_state_text: str = "",
+        writing_context_text: str = "",
+    ) -> dict:
+        """只检查人工正文的硬连续性；不评价文学质量，不再次执行 RAG。"""
+        if not candidate_prose.strip():
+            raise ValueError("人工正文 Candidate 不能为空")
+        numbered_text = _number_chapter_paragraphs(candidate_prose)
+        parts = [
+            f"## 第 {chapter_index} 章人工正文 Candidate\n\n{numbered_text}",
+            "## 世界观设定\n" + (world_setting[:3000] or "暂无"),
+            "## Current State\n" + (current_state_text or "暂无"),
+            "## 本次已生成的 Writing Context\n" + (
+                writing_context_text or "暂无"
+            ),
+            (
+                "请只检查明确的硬连续性冲突。不要评价文笔、节奏、对话、"
+                "人物塑造、文学技巧、风格或 AI 味；不要输出任何状态派生内容。"
+            ),
+        ]
+        self.system_prompt = self.load_prompt("consistency_reviewer.txt")
+        result = self.run(
+            user_message="\n\n---\n\n".join(parts),
+            save_category="states",
+            save_prefix=f"consistency_review_ch{chapter_index:04d}",
+        )
+        return {"raw_analysis": result.content, "filepath": result.filepath}
+
     def derive_chapter(self, canonical_prose: str, chapter_index: int,
                        previous_current_state: str,
                        current_volume_plan: str = "") -> dict:

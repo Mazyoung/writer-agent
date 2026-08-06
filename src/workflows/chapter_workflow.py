@@ -37,6 +37,8 @@ class ChapterWorkflowState(TypedDict, total=False):
     current_state_sha256: str
     draft_text: str
     styled_text: str
+    candidate_text: str
+    candidate_path: str
     canonical_source_path: str
     derivation_raw_analysis: str
     current_state_persisted: bool
@@ -53,6 +55,9 @@ class ChapterWorkflowState(TypedDict, total=False):
 
     raw_analysis: str
     verdict: str
+    consistency_raw_analysis: str
+    consistency_verdict: str
+    consistency_warnings: list[str]
     review_reasons: list[str]
     t1_issues: list[str]
     planning_level: str
@@ -62,6 +67,7 @@ class ChapterWorkflowState(TypedDict, total=False):
     human_decision: str
     human_feedback: str
     final_author_approved: bool
+    review_override_confirmed: bool
 
     commit_success: bool
     commit_error: str
@@ -267,21 +273,112 @@ def prepare_human_context(state: ChapterWorkflowState) -> dict[str, Any]:
 
 
 def await_human_writing(state: ChapterWorkflowState) -> dict[str, Any]:
-    """Stop after context preparation; candidate submission is a later stage."""
-    interrupt({
+    """接收人工正文 Candidate；正文仍须经过一致性检查与最终批准。"""
+    chapter_index = state.get("chapter_index", 0)
+    resume_value = interrupt({
         "type": "human_writing",
         "novel_id": state.get("novel_id", ""),
-        "chapter_index": state.get("chapter_index", 0),
+        "chapter_index": chapter_index,
         "writing_context_path": state.get("writing_context_path", ""),
-        "message": (
-            "Relevant writing context is ready. Waiting for the human author "
-            "to write this chapter."
-        ),
-        "allowed_actions": [],
+        "message": "相关历史写作上下文已准备完成，正在等待作者提交正文 Candidate。",
+        "allowed_actions": ["submit", "pause", "discard"],
     })
-    return _error_result(
-        "Human Candidate submission is not implemented in E07.9.1-A"
+    if not isinstance(resume_value, dict):
+        return _error_result("人工正文提交必须是一个决策对象")
+    candidate = str(resume_value.get("candidate_text", "")).strip()
+    if str(resume_value.get("action", "")).strip().lower() != "submit" or not candidate:
+        return _error_result("submit 需要非空的人工正文 Candidate")
+    fs = FileStore(state["novel_id"], get_settings().data_dir)
+    path = fs.save(
+        "chapters", f"chapter_{chapter_index:04d}_human_candidate", candidate
     )
+    return {
+        "candidate_text": candidate,
+        "candidate_path": str(path.relative_to(fs.root)).replace("\\", "/"),
+        "final_author_approved": False,
+        "review_override_confirmed": False,
+        "workflow_status": "HUMAN_CANDIDATE_SUBMITTED",
+    }
+
+
+@_guard_node
+def review_consistency(state: ChapterWorkflowState) -> dict[str, Any]:
+    """复用已 checkpoint 的 Writing Context 做一次硬连续性检查。"""
+    from src.agents.state_manager.state_manager import StateManager
+
+    candidate = state.get("candidate_text", "")
+    if not candidate.strip():
+        return _error_result("本次执行没有人工正文 Candidate，无法检查一致性")
+    fs = FileStore(state["novel_id"], get_settings().data_dir)
+    context_path = state.get("writing_context_path", "")
+    writing_context = ""
+    if context_path:
+        path = fs.root / context_path
+        if not path.is_file():
+            return _error_result(f"Writing Context 不存在: {context_path}")
+        writing_context = path.read_text(encoding="utf-8")
+    sqlite = SQLiteStore(fs.root / "state.db")
+    try:
+        analysis = StateManager(state["novel_id"], sqlite).review_consistency(
+            candidate,
+            state["chapter_index"],
+            world_setting=fs.load_canonical("settings", "world_setting") or "",
+            current_state_text=state.get("current_state_text", ""),
+            writing_context_text=writing_context,
+        )
+    finally:
+        sqlite.close()
+    return {
+        "consistency_raw_analysis": analysis["raw_analysis"],
+        "workflow_status": "CONSISTENCY_REVIEWED",
+    }
+
+
+@_guard_node
+def parse_consistency_decision(state: ChapterWorkflowState) -> dict[str, Any]:
+    """确定性解析 CLEAN/WARN；缺失或非法结论保持 fail-closed。"""
+    raw = state.get("consistency_raw_analysis", "")
+    match = re.search(
+        r"\*\*结论\*\*\s*[:：]\s*(CLEAN|WARN)\b", raw, re.IGNORECASE
+    )
+    if not match:
+        return {
+            **_error_result("一致性检查缺少有效的 CLEAN/WARN 结论"),
+            "consistency_verdict": "UNKNOWN",
+        }
+    verdict = match.group(1).upper()
+    section = re.search(
+        r"^## 连续性问题\s*\n(.*?)(?=^## |\Z)",
+        raw,
+        re.MULTILINE | re.DOTALL,
+    )
+    warnings = []
+    if section:
+        warnings = [
+            line.strip()[2:].strip()
+            for line in section.group(1).splitlines()
+            if line.strip().startswith("- ")
+            and line.strip()[2:].strip() not in {"", "无"}
+        ]
+    if verdict == "WARN" and not warnings:
+        reason = re.search(r"\*\*主要问题\*\*\s*[:：]\s*(.+)", raw)
+        if reason and reason.group(1).strip() not in {"", "无"}:
+            warnings = [
+                item.strip() for item in reason.group(1).split(";") if item.strip()
+            ]
+    return {
+        "consistency_verdict": verdict,
+        "consistency_warnings": warnings,
+        "workflow_status": f"CONSISTENCY_{verdict}",
+    }
+
+
+def _route_after_consistency(state: ChapterWorkflowState) -> str:
+    if state.get("workflow_status") == "error":
+        return END
+    if state.get("consistency_verdict") in {"CLEAN", "WARN"}:
+        return "await_human_chapter"
+    return END
 
 
 @_guard_node
@@ -417,7 +514,66 @@ def _route_after_plan_decision(state: ChapterWorkflowState) -> str:
 
 @_guard_node
 def save_chapter_sources(state: ChapterWorkflowState) -> dict[str, Any]:
-    """Write a stable automatic provenance report from the approved plan."""
+    """Write a truthful provenance report for Agent or Human creation."""
+    if state.get("chapter_mode", "agent") == "human":
+        chapter_index = state["chapter_index"]
+        facts = list(state.get("retrieved_facts", []))
+        excerpts = list(state.get("expanded_sources", []))
+        lines = [
+            f"# Chapter {chapter_index} Sources",
+            "",
+            "> 自动生成的来源报告；它记录系统提供给作者的历史上下文，不表示作者必然采用了这些事实。",
+            "",
+            "## Chapter Intent",
+            state.get("chapter_intent", "") or "暂无",
+            "",
+            "## Human Writing Context Sources",
+            f"- Writing Context: `{state.get('writing_context_path', '')}`",
+            f"- Retrieval Trace: `{state.get('retrieval_trace_path', '')}`",
+            "",
+            "## Consistency and Author Approval Audit",
+            f"- Consistency Verdict: `{state.get('consistency_verdict', 'UNKNOWN')}`",
+            f"- Review Override Confirmed: `{str(state.get('review_override_confirmed') is True).lower()}`",
+            "- Consistency Warnings:",
+            *(
+                [f"  - {warning}" for warning in state.get("consistency_warnings", [])]
+                or ["  - 无"]
+            ),
+            "",
+            "## Provided Historical Facts",
+        ]
+        if facts:
+            for fact in facts:
+                lines.append(
+                    f"- **{fact.get('fact_id', '')}** (Chapter "
+                    f"{fact.get('chapter_index', 0)}, "
+                    f"{fact.get('fact_type', 'event')}): {fact.get('text', '')}"
+                )
+        else:
+            lines.append("- 无")
+        lines.extend(["", "## Provided Canonical Prose Excerpts"])
+        if excerpts:
+            for source in excerpts:
+                lines.append(
+                    f"- **{source.get('fact_id', '')}**: "
+                    f"`{source.get('source_path', '')}` paragraphs "
+                    f"{source.get('paragraph_start', 0)}-"
+                    f"{source.get('paragraph_end', 0)} (provided-context)"
+                )
+        else:
+            lines.append("- 无")
+        fs = FileStore(state["novel_id"], get_settings().data_dir)
+        path = (
+            fs.root / "sources" / f"chapter_{chapter_index:04d}"
+            / "chapter_sources.md"
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return {
+            "chapter_sources_path": str(path.relative_to(fs.root)).replace("\\", "/"),
+            "workflow_status": "SOURCES_SAVED",
+        }
+
     from src.storage.document_formats import ChapterPlan
 
     plan_text = state.get("chapter_plan_text", "")
@@ -467,6 +623,12 @@ def save_chapter_sources(state: ChapterWorkflowState) -> dict[str, Any]:
             )
     else:
         lines.append("- 无")
+    lines.extend([
+        "",
+        "## Review and Author Approval Audit",
+        f"- Review Verdict: `{state.get('verdict', 'UNKNOWN')}`",
+        f"- Review Override Confirmed: `{str(state.get('review_override_confirmed') is True).lower()}`",
+    ])
     fs = FileStore(state["novel_id"], get_settings().data_dir)
     path = fs.root / "sources" / f"chapter_{chapter_index:04d}" / "chapter_sources.md"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -623,8 +785,6 @@ def parse_chapter_decision(state: ChapterWorkflowState) -> dict[str, Any]:
             "verdict": "UNKNOWN",
         }
     decision = _parse_review(raw)
-    if decision.verdict == "HALT":
-        decision.verdict = "UNKNOWN"
     if decision.verdict == "UNKNOWN":
         return {
             **_error_result("Review verdict UNKNOWN; commit blocked fail-closed"),
@@ -651,7 +811,7 @@ parse_decision = parse_chapter_decision
 def _route_after_chapter_decision(state: ChapterWorkflowState) -> str:
     if state.get("workflow_status") == "error":
         return END
-    if state.get("verdict") in ("PASS", "NEEDS_REVISION"):
+    if state.get("verdict") in ("PASS", "NEEDS_REVISION", "HALT"):
         return "await_human_chapter"
     return END
 
@@ -698,69 +858,146 @@ def await_human_plan(state: ChapterWorkflowState) -> dict[str, Any]:
     }
 
 
+def _approval_verdict(state: ChapterWorkflowState) -> str:
+    if state.get("chapter_mode", "agent") == "human":
+        return state.get("consistency_verdict", "UNKNOWN")
+    return state.get("verdict", "UNKNOWN")
+
+
+def _approval_warnings(state: ChapterWorkflowState) -> list[str]:
+    if state.get("chapter_mode", "agent") == "human":
+        return list(state.get("consistency_warnings", []))
+    return [
+        *state.get("t1_issues", []),
+        *state.get("review_reasons", []),
+    ]
+
+
+def _normal_review_passed(state: ChapterWorkflowState) -> bool:
+    verdict = _approval_verdict(state)
+    expected = "CLEAN" if state.get("chapter_mode", "agent") == "human" else "PASS"
+    return verdict == expected
+
+
 def await_human_chapter(state: ChapterWorkflowState) -> dict[str, Any]:
-    """Require a human decision after every prose Review, including PASS."""
+    """展示最新 Review/Consistency 结果并要求作者作最终决定。"""
     chapter_index = state.get("chapter_index", 0)
-    edit_path = f"chapters/chapter_{chapter_index:04d}_styled_edited.md"
-    passed = state.get("verdict") == "PASS"
+    human_mode = state.get("chapter_mode", "agent") == "human"
+    verdict = _approval_verdict(state)
+    passed = _normal_review_passed(state)
+    edit_path = (
+        f"chapters/chapter_{chapter_index:04d}_human_candidate_edited.md"
+        if human_mode else
+        f"chapters/chapter_{chapter_index:04d}_styled_edited.md"
+    )
+    if human_mode:
+        interrupt_type = "human_final_approval"
+        allowed_actions = ["manual_edit", "pause", "discard", "approve"]
+    else:
+        interrupt_type = "final_author_approval" if passed else "chapter_review"
+        allowed_actions = [
+            "agent_edit", "manual_edit", "regenerate", "pause", "discard", "approve"
+        ]
     resume_value = interrupt({
-        "type": "final_author_approval" if passed else "chapter_review",
+        "type": interrupt_type,
         "novel_id": state.get("novel_id", ""),
         "chapter_index": chapter_index,
-        "verdict": state.get("verdict", "UNKNOWN"),
+        "verdict": verdict,
         "planning_level": state.get("planning_level", "L1"),
-        "reasons": state.get("review_reasons", []),
-        "t1_issues": state.get("t1_issues", []),
+        "reasons": _approval_warnings(state),
+        "t1_issues": state.get("t1_issues", []) if not human_mode else [],
         "review_round": state.get("review_round", 1),
         "edit_path": edit_path,
-        "allowed_actions": [
-            "agent_edit", "manual_edit", "regenerate", "pause", "discard",
-            *(["approve"] if passed else []),
-        ],
+        "allowed_actions": allowed_actions,
     })
     if not isinstance(resume_value, dict):
-        return _error_result("Human resume value must be a decision object")
+        return _error_result("人工恢复值必须是一个决策对象")
     action = str(resume_value.get("action", "")).strip().lower()
     feedback = str(resume_value.get("feedback", "")).strip()
     if action == "approve":
-        if not passed:
-            return _error_result("Only a latest Review PASS can be approved")
         return {
             "human_decision": "approve",
             "final_author_approved": True,
+            "review_override_confirmed": False,
             "human_feedback": feedback,
-            "workflow_status": "FINAL_AUTHOR_APPROVED",
+            "workflow_status": (
+                "FINAL_AUTHOR_APPROVED" if passed else "REVIEW_OVERRIDE_REQUESTED"
+            ),
         }
-    if action == "agent_edit":
+    if action == "agent_edit" and not human_mode:
         return {
             "human_decision": action,
             "human_feedback": feedback,
             "final_author_approved": False,
+            "review_override_confirmed": False,
             "workflow_status": "AGENT_EDIT_REQUESTED",
         }
     if action == "manual_edit":
         edited = str(resume_value.get("edited_text", "")).strip()
         if not edited:
-            return _error_result("manual_edit requires non-empty edited prose")
-        return {
-            "styled_text": edited,
+            return _error_result("manual_edit 需要非空正文")
+        common = {
             "human_decision": action,
             "human_feedback": feedback,
             "final_author_approved": False,
+            "review_override_confirmed": False,
             "review_round": state.get("review_round", 1) + 1,
-            "verdict": "",
             "workflow_status": "MANUAL_EDITED",
         }
-    if action == "regenerate":
+        if human_mode:
+            return {
+                **common,
+                "candidate_text": edited,
+                "candidate_path": edit_path,
+                "consistency_raw_analysis": "",
+                "consistency_verdict": "",
+                "consistency_warnings": [],
+            }
+        return {**common, "styled_text": edited, "verdict": ""}
+    if action == "regenerate" and not human_mode:
         return {
             "human_decision": action,
             "human_feedback": feedback,
             "final_author_approved": False,
+            "review_override_confirmed": False,
             "verdict": "",
             "workflow_status": "REGENERATE_REQUESTED",
         }
-    return _error_result(f"Unsupported in-graph human action: {action}")
+    return _error_result(f"当前审批阶段不支持操作: {action}")
 
+
+def await_review_override(state: ChapterWorkflowState) -> dict[str, Any]:
+    """非 PASS/CLEAN 的 approve 必须在独立 checkpoint interrupt 二次确认。"""
+    verdict = _approval_verdict(state)
+    resume_value = interrupt({
+        "type": "review_override_confirmation",
+        "novel_id": state.get("novel_id", ""),
+        "chapter_index": state.get("chapter_index", 0),
+        "verdict": verdict,
+        "reasons": _approval_warnings(state),
+        "message": (
+            "当前审阅尚未通过。原审阅结论不会被修改；继续将记录为作者在已知警告后的主动提交。"
+        ),
+        "allowed_actions": ["confirm_override", "back", "pause", "discard"],
+    })
+    if not isinstance(resume_value, dict):
+        return _error_result("审阅 override 确认必须是一个决策对象")
+    action = str(resume_value.get("action", "")).strip().lower()
+    if action == "confirm_override":
+        return {
+            "human_decision": "confirm_override",
+            "final_author_approved": True,
+            "review_override_confirmed": True,
+            "workflow_status": "REVIEW_OVERRIDE_CONFIRMED",
+        }
+    if action == "back":
+        return {
+            "human_decision": "back",
+            "final_author_approved": False,
+            "review_override_confirmed": False,
+            "workflow_status": "REVIEW_OVERRIDE_BACK",
+        }
+    return _error_result(f"Override 确认阶段不支持操作: {action}")
 
 # Compatibility alias; E07.6 routes to the typed interrupt nodes above.
 await_human_review = await_human_chapter
@@ -775,32 +1012,64 @@ def _route_after_human_plan(state: ChapterWorkflowState) -> str:
 def _route_after_human_chapter(state: ChapterWorkflowState) -> str:
     if state.get("workflow_status") == "error":
         return END
+    decision = state.get("human_decision", "")
+    if decision == "approve":
+        return (
+            "commit_canonical_prose"
+            if _normal_review_passed(state) else "await_review_override"
+        )
+    if decision == "manual_edit":
+        return (
+            "review_consistency"
+            if state.get("chapter_mode", "agent") == "human" else "save_styled"
+        )
     return {
-        "approve": "commit_canonical_prose",
         "agent_edit": "agent_edit_chapter",
-        "manual_edit": "save_styled",
         "regenerate": "write_draft",
-    }.get(state.get("human_decision", ""), END)
+    }.get(decision, END)
+
+
+def _route_after_override(state: ChapterWorkflowState) -> str:
+    if state.get("workflow_status") == "error":
+        return END
+    if state.get("human_decision") == "confirm_override":
+        return "commit_canonical_prose"
+    if state.get("human_decision") == "back":
+        return "await_human_chapter"
+    return END
+
+
+def _is_canonical_authorized(state: ChapterWorkflowState) -> bool:
+    return bool(state.get("final_author_approved")) and (
+        _normal_review_passed(state)
+        or state.get("review_override_confirmed") is True
+    )
+
+
+def _candidate_prose(state: ChapterWorkflowState) -> str:
+    if state.get("chapter_mode", "agent") == "human":
+        return state.get("candidate_text", "")
+    return state.get("styled_text", "")
 
 
 @_guard_node
 def commit_canonical_prose(state: ChapterWorkflowState) -> dict[str, Any]:
-    """Create the one formal chapter only after explicit final approval."""
-    if state.get("verdict") != "PASS" or not state.get("final_author_approved"):
+    """Create the one formal chapter from the shared Candidate seam."""
+    if not _is_canonical_authorized(state):
         return {
-            **_error_result("Canonical commit requires Review PASS and final approval"),
+            **_error_result("Canonical 提交需要作者批准，以及 PASS/CLEAN 或显式 override 确认"),
             "commit_success": False,
-            "commit_error": "final author approval missing",
+            "commit_error": "canonical authorization missing",
         }
-    styled = state.get("styled_text", "")
-    if not styled.strip():
+    candidate = _candidate_prose(state)
+    if not candidate.strip():
         return {
-            **_error_result("styled_text 为空，无法提交 canonical prose"),
+            **_error_result("Candidate 正文为空，无法提交 Canonical"),
             "commit_success": False,
-            "commit_error": "styled_text missing",
+            "commit_error": "candidate prose missing",
         }
     fs = FileStore(state["novel_id"], get_settings().data_dir)
-    path = fs.commit_canonical_chapter(state["chapter_index"], styled)
+    path = fs.commit_canonical_chapter(state["chapter_index"], candidate)
     relative = str(path.relative_to(fs.root)).replace("\\", "/")
     return {
         "commit_success": True,
@@ -876,12 +1145,16 @@ def persist_current_state(state: ChapterWorkflowState) -> dict[str, Any]:
     canonical = fs.load_canonical_chapter(state["chapter_index"]) or ""
     sqlite = SQLiteStore(fs.root / "state.db")
     try:
-        plan = ChapterPlan.from_markdown(state.get("chapter_plan_text", ""))
+        chapter_title = ""
+        if state.get("chapter_mode", "agent") != "human":
+            chapter_title = ChapterPlan.from_markdown(
+                state.get("chapter_plan_text", "")
+            ).title
         changes = StateManager(state["novel_id"], sqlite).update_tracking_docs(
             state["chapter_index"], canonical,
             state.get("derivation_raw_analysis", ""),
             expected_state_sha256=state.get("current_state_sha256", ""),
-            chapter_title=plan.title,
+            chapter_title=chapter_title,
             canonical_source_path=state.get("canonical_source_path", ""),
         )
         result = changes.get("_commit_result")
@@ -1045,6 +1318,8 @@ def build_chapter_workflow(checkpointer: Any = None) -> Any:
         ("load_chapter_intent", load_chapter_intent),
         ("prepare_human_context", prepare_human_context),
         ("await_human_writing", await_human_writing),
+        ("review_consistency", review_consistency),
+        ("parse_consistency_decision", parse_consistency_decision),
         ("plan_chapter", plan_chapter),
         ("review_plan", review_plan),
         ("parse_plan_decision", parse_plan_decision),
@@ -1056,6 +1331,7 @@ def build_chapter_workflow(checkpointer: Any = None) -> Any:
         ("review_chapter", review_chapter),
         ("parse_chapter_decision", parse_chapter_decision),
         ("await_human_chapter", await_human_chapter),
+        ("await_review_override", await_review_override),
         ("commit_canonical_prose", commit_canonical_prose),
         ("derive_semantics", derive_semantics),
         ("persist_current_state", persist_current_state),
@@ -1077,6 +1353,7 @@ def build_chapter_workflow(checkpointer: Any = None) -> Any:
         ("agent_edit_chapter", "save_styled"),
         ("save_styled", "review_chapter"),
         ("review_chapter", "parse_chapter_decision"),
+        ("review_consistency", "parse_consistency_decision"),
     ):
         graph.add_conditional_edges(
             node,
@@ -1097,7 +1374,15 @@ def build_chapter_workflow(checkpointer: Any = None) -> Any:
         lambda state: _route_after_node(state, "await_human_writing"),
         {"await_human_writing": "await_human_writing", END: END},
     )
-    graph.add_edge("await_human_writing", END)
+    graph.add_conditional_edges(
+        "await_human_writing",
+        lambda state: _route_after_node(state, "review_consistency"),
+        {"review_consistency": "review_consistency", END: END},
+    )
+    graph.add_conditional_edges(
+        "parse_consistency_decision", _route_after_consistency,
+        {"await_human_chapter": "await_human_chapter", END: END},
+    )
 
     graph.add_conditional_edges(
         "parse_plan_decision", _route_after_plan_decision,
@@ -1118,9 +1403,19 @@ def build_chapter_workflow(checkpointer: Any = None) -> Any:
         "await_human_chapter", _route_after_human_chapter,
         {
             "commit_canonical_prose": "commit_canonical_prose",
+            "await_review_override": "await_review_override",
+            "review_consistency": "review_consistency",
             "agent_edit_chapter": "agent_edit_chapter",
             "save_styled": "save_styled",
             "write_draft": "write_draft",
+            END: END,
+        },
+    )
+    graph.add_conditional_edges(
+        "await_review_override", _route_after_override,
+        {
+            "commit_canonical_prose": "commit_canonical_prose",
+            "await_human_chapter": "await_human_chapter",
             END: END,
         },
     )

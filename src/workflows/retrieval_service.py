@@ -8,7 +8,6 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-from src.agents.author.chapter_planner import ChapterPlanner
 from src.config.settings import get_settings
 from src.storage.atomic_fact_store import (
     AtomicFactStore,
@@ -82,7 +81,6 @@ class ChapterRetrievalService:
         self.fs = FileStore(novel_id, settings.data_dir)
         self.chroma = AtomicFactStore(settings.data_dir / "chroma_db")
         self.author_chroma = AuthorRAGStore(settings.data_dir / "chroma_db")
-        self.planner = ChapterPlanner(novel_id)
 
     def retrieve(
         self,
