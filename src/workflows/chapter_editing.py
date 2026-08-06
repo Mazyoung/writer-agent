@@ -46,7 +46,7 @@ class ChapterEditingService:
             chapter_text,
             chapter_index,
             emotion_palette=plan.context.emotion_palette,
-            scene_plan_text=plan_text[:3000],
+            scene_plan_text=plan_text,
             style_feedback=feedback,
         )
         self.file_store.save(

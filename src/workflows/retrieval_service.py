@@ -16,7 +16,6 @@ from src.storage.atomic_fact_store import (
 )
 from src.storage.author_rag_store import AuthorRAGStore, AuthorKnowledgeResult
 from src.storage.file_store import FileStore
-from src.core.text_windows import previous_chapter_end
 
 
 @dataclass
@@ -73,7 +72,7 @@ class RetrievalOutcome:
 
 
 class ChapterRetrievalService:
-    """Own deterministic query, Chroma search, evidence, and trace lifecycle."""
+    """Execute one supplied Query Intent through RAG and trace persistence."""
 
     def __init__(self, novel_id: str):
         settings = get_settings()
@@ -86,17 +85,14 @@ class ChapterRetrievalService:
     def retrieve(
         self,
         chapter_index: int,
-        chapter_outline: str = "",
-        extra_instructions: str = "",
-        chapter_intent: str = "",
-        current_state_text: str = "",
-        query_mode: str = "agent",
+        query_intent: str,
     ) -> RetrievalOutcome:
         branch_id = DEFAULT_BRANCH_ID
+        normalized_query = str(query_intent).strip()
         trace = FactRetrievalTrace(
             chapter_index=chapter_index,
             branch_id=branch_id,
-            query="",
+            query=normalized_query,
             top_k=self.settings.rag_top_k,
             filters={
                 "novel_id": self.novel_id,
@@ -109,9 +105,8 @@ class ChapterRetrievalService:
         outcome = RetrievalOutcome(trace=trace)
 
         try:
-            trace.query = self._build_query(
-                chapter_index, chapter_outline, extra_instructions,
-                chapter_intent, current_state_text, query_mode=query_mode)
+            if not normalized_query:
+                raise ValueError("历史检索需要非空 Query Intent")
             trace.results = self.chroma.search(
                 novel_id=self.novel_id,
                 branch_id=branch_id,
@@ -147,35 +142,6 @@ class ChapterRetrievalService:
                 f"RetrievalTrace persistence failed: {type(exc).__name__}: {exc}")
 
         return outcome
-
-    def _build_query(
-        self,
-        chapter_index: int,
-        chapter_outline: str,
-        extra_instructions: str,
-        chapter_intent: str = "",
-        current_state_text: str = "",
-        query_mode: str = "agent",
-    ) -> str:
-        if query_mode not in {"agent", "human"}:
-            raise ValueError(f"不支持的 retrieval query mode：{query_mode}")
-        if query_mode == "human" and not chapter_intent.strip():
-            raise ValueError(
-                "Human Mode 执行历史检索前必须提供非空 Chapter Intent。"
-            )
-
-        volume_plan = self.fs.load_tracking_doc("volume_plan") or ""
-        current_state = current_state_text or self.fs.load_generated_tracking_doc(
-            "current_state") or ""
-        recent_end = previous_chapter_end(self.fs, chapter_index)
-        from src.agents.author.query_intent_builder import QueryIntentBuilder
-
-        return QueryIntentBuilder(self.novel_id).build(
-            volume_plan=volume_plan,
-            recent_chapter_end=recent_end,
-            current_state=current_state,
-            human_intent=chapter_intent,
-        )
 
     @staticmethod
     def _format_evidence(

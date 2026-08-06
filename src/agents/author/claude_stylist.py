@@ -4,6 +4,7 @@ from pathlib import Path
 
 from src.config.settings import get_settings
 from src.core.model_provider import ModelProviderClient
+from src.core.token_guard import guard_planning_context
 from src.storage.file_store import FileStore
 
 
@@ -32,6 +33,12 @@ class ClaudeStylist:
         scene_plan_text: str = "",
         style_feedback: str = "",
     ) -> str:
+        guard_planning_context(self.model_slot, {
+            "chapter_plan.md": scene_plan_text,
+            "candidate_prose.md": draft_text,
+            "emotion_palette": emotion_palette,
+            "human_feedback": style_feedback,
+        })
         user_msg = self._build_message(
             draft_text,
             chapter_index,
@@ -77,7 +84,7 @@ class ClaudeStylist:
         if emotion:
             parts.append(f"### 情感调色板\n{emotion}")
         if plan:
-            parts.append(f"### 场景规划（用于对齐检查）\n{plan[:3000]}")
+            parts.append(f"### 场景规划（用于对齐检查）\n{plan}")
         parts.append(f"### 原始正文\n{draft}")
         parts.append("---\n请调整叙事语气，检查场景规划对齐。")
         return "\n\n".join(parts)

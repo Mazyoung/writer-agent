@@ -102,12 +102,15 @@ Tests tied to the retired src.core.orchestrator, automatic revision, PASS-to-dir
 - Canonical 后的 `CANONICAL_COMMITTED / SEMANTICS_DERIVED / CURRENT_STATE_PERSISTED / FACT_DIGEST_PERSISTED / VOLUME_PROGRESS_PERSISTED / CHAPTER_SOURCES_PERSISTED` 均可从 checkpoint 的首个未完成阶段继续；无法安全确定位置时 fail-closed。
 - Review verdict 仅保留 `PASS / NEEDS_REVISION / UNKNOWN`。supervised PASS 的 Plan checkpoint 提供 `approve/agent_edit/human_edit/restart`，Prose 额外提供 `regenerate_prose`；PASS 后 `agent_edit` 强制要求非空 human feedback。
 - Query Intent Builder 输入完整 Volume Plan、共享的约 1500 字完整段落窗口、完整 Current State 和原始 Human Intent。Embedding 只使用 Query Intent；达到 10000 字时携带明确压缩反馈重试一次，第二次仍严重超长才 fail-closed。
+- Writer、Planner、Query Intent Builder 共用 `text_windows.previous_chapter_end()`：从上一章 Canonical 末段向前按完整段落累计约 1500 字，允许为保留完整段落略超目标；Writer prompt 不再二次截断。
+- Writer、Stylist、Plan Review、Prose/Consistency Review 不再静默裁剪 World Setting、Book Plan、Volume Plan、Chapter Plan、Current State 或 Human Intent；正式上下文过大时统一由 Token Guard 在模型调用前中文拒绝。
+- Chapter Workflow / standalone Planning Service 先生成 Query Intent，再调用 `ChapterRetrievalService.retrieve(chapter_index, query_intent)`；Retrieval Service 仅负责 Embedding、Atomic Fact Top-K、Canonical paragraph ±1 expansion、Author Knowledge、trace 和 outcome。
 
 ## Verification
 
-- 本轮 durable completion / Query Intent 核心 focused tests：16 passed；联合 Savepoint/配置 focused tests：56 passed。
+- residual cleanup focused tests：52 passed。
 - 完整 unittest suite：222 passed。
-- `py_compile`、workflow graph build 与 `git diff --check` 通过。
+- `py_compile`、workflow graph build、CLI parser smoke 与 `git diff --check` 通过。
 
 ## Next Task
 

@@ -15,6 +15,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
 from src.config.settings import get_settings
+from src.core.text_windows import previous_chapter_end
 from src.storage.file_store import FileStore
 from src.storage.sqlite_store import SQLiteStore
 
@@ -208,6 +209,19 @@ def _evidence_section(evidence: str, heading: str) -> str:
     return match.group(1).strip() if match else "- None retrieved"
 
 
+def _build_query_intent(state: ChapterWorkflowState) -> str:
+    """Build the sole embedding query from complete formal planning context."""
+    from src.agents.author.query_intent_builder import QueryIntentBuilder
+
+    fs = FileStore(state["novel_id"], get_settings().data_dir)
+    return QueryIntentBuilder(state["novel_id"]).build(
+        volume_plan=fs.load_tracking_doc("volume_plan") or "",
+        recent_chapter_end=previous_chapter_end(fs, state["chapter_index"]),
+        current_state=state.get("current_state_text", ""),
+        human_intent=state.get("chapter_intent", ""),
+    )
+
+
 @_guard_node
 def prepare_human_context(state: ChapterWorkflowState) -> dict[str, Any]:
     """Retrieve bounded history and persist an author-readable generated report."""
@@ -218,11 +232,9 @@ def prepare_human_context(state: ChapterWorkflowState) -> dict[str, Any]:
         return _error_result(
             "Human Mode 执行历史检索前必须提供非空 Chapter Intent。"
         )
+    query_intent = _build_query_intent(state)
     retrieval = ChapterRetrievalService(state["novel_id"]).retrieve(
-        state["chapter_index"],
-        chapter_intent=intent,
-        current_state_text=state.get("current_state_text", ""),
-        query_mode="human",
+        state["chapter_index"], query_intent
     )
     if not retrieval.trace.success:
         return _error_result(
@@ -267,7 +279,7 @@ def prepare_human_context(state: ChapterWorkflowState) -> dict[str, Any]:
     )
     return {
         "historical_evidence": retrieval.evidence,
-        "query_intent": retrieval.trace.query,
+        "query_intent": query_intent,
         "retrieval_success": True,
         "retrieval_result_count": len(retrieval.trace.results),
         "retrieval_trace_path": retrieval.trace_path,
@@ -400,12 +412,9 @@ def plan_chapter(state: ChapterWorkflowState) -> dict[str, Any]:
     instructions = state.get("extra_instructions", "")
     intent = state.get("chapter_intent", "")
 
+    query_intent = _build_query_intent(state)
     retrieval = ChapterRetrievalService(novel_id).retrieve(
-        chapter_index,
-        outline,
-        instructions,
-        chapter_intent=intent,
-        current_state_text=state.get("current_state_text", ""),
+        chapter_index, query_intent
     )
     if not retrieval.trace.success:
         return _error_result(
@@ -435,7 +444,7 @@ def plan_chapter(state: ChapterWorkflowState) -> dict[str, Any]:
     return {
         "chapter_plan_text": plan_text,
         "historical_evidence": retrieval.evidence,
-        "query_intent": retrieval.trace.query,
+        "query_intent": query_intent,
         "retrieval_success": retrieval.trace.success,
         "retrieval_result_count": len(retrieval.trace.results),
         "retrieval_trace_path": retrieval.trace_path,
@@ -729,12 +738,8 @@ def write_draft(state: ChapterWorkflowState) -> dict[str, Any]:
 
 
 def _load_prev_chapter_end(fs: FileStore, chapter_index: int) -> str:
-    if chapter_index <= 1:
-        return ""
-    prev = fs.load_canonical_chapter(chapter_index - 1)
-    if not prev:
-        return ""
-    return prev[-500:] if len(prev) > 500 else prev
+    """Compatibility wrapper around the shared complete-paragraph window."""
+    return previous_chapter_end(fs, chapter_index)
 
 
 @_guard_node
@@ -752,7 +757,7 @@ def style_edit(state: ChapterWorkflowState) -> dict[str, Any]:
         draft,
         state["chapter_index"],
         emotion_palette=plan.context.emotion_palette if plan else "",
-        scene_plan_text=plan_text[:3000],
+        scene_plan_text=plan_text,
     )
     return {"styled_text": styled, "workflow_status": "STYLED"}
 

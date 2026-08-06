@@ -13,6 +13,7 @@ import re
 from typing import Optional
 
 from src.core.agent_base import BaseAgent
+from src.core.token_guard import guard_planning_context
 from src.storage.file_store import FileStore
 from src.storage.document_formats import (
     FactDigest, CharacterRelationships, ItemsEquipment, CultivationSystem,
@@ -78,15 +79,15 @@ class StateManager(BaseAgent):
         # E06.1: Review Strategic Context (Book Plan + Active Volume Plan for L2/L3)
         if book_plan_text:
             parts.append("## 全书战略规划 Book Plan（Strategic Context — L2/L3 检测）\n"
-                         f"{book_plan_text[:3000]}\n\n---")
+                         f"{book_plan_text}\n\n---")
         if volume_plan_text:
             parts.append("## 当前卷规划 Volume Plan（Tactical Context — L2/L3 检测）\n"
-                         f"{volume_plan_text[:3000]}\n\n---")
+                         f"{volume_plan_text}\n\n---")
 
         # E06: World Setting 进入 review（T1 一致性检查必需）
         if world_setting:
-            parts.append(f"## 世界观设定（用于一致性检查，截断至 2000 字符）"
-                         f"\n{world_setting[:2000]}\n\n---")
+            parts.append(f"## 世界观设定（用于一致性检查）"
+                         f"\n{world_setting}\n\n---")
 
         parts.append(f"## 章规划（用于对比）\n{chapter_plan_text or '暂无'}\n\n---")
 
@@ -114,6 +115,14 @@ class StateManager(BaseAgent):
         )
 
         user_msg = "\n\n".join(parts)
+        guard_planning_context(self.model_slot, {
+            "candidate_prose.md": chapter_text,
+            "chapter_plan.md": chapter_plan_text,
+            "world_setting.md": world_setting,
+            "book_plan.md": book_plan_text,
+            "volume_plan.md": volume_plan_text,
+            "current_state.md": current_state_text,
+        })
 
         self.system_prompt = self.load_prompt("prose_reviewer.txt")
         result = self.run(
@@ -138,7 +147,7 @@ class StateManager(BaseAgent):
         numbered_text = _number_chapter_paragraphs(candidate_prose)
         parts = [
             f"## 第 {chapter_index} 章人工正文 Candidate\n\n{numbered_text}",
-            "## 世界观设定\n" + (world_setting[:3000] or "暂无"),
+            "## 世界观设定\n" + (world_setting or "暂无"),
             "## Current State\n" + (current_state_text or "暂无"),
             "## 本次已生成的 Writing Context\n" + (
                 writing_context_text or "暂无"
@@ -148,6 +157,12 @@ class StateManager(BaseAgent):
                 "人物塑造、文学技巧、风格或 AI 味；不要输出任何状态派生内容。"
             ),
         ]
+        guard_planning_context(self.model_slot, {
+            "candidate_prose.md": candidate_prose,
+            "world_setting.md": world_setting,
+            "current_state.md": current_state_text,
+            "writing_context.md": writing_context_text,
+        })
         self.system_prompt = self.load_prompt("consistency_reviewer.txt")
         result = self.run(
             user_message="\n\n---\n\n".join(parts),

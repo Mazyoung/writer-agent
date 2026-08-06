@@ -1,7 +1,9 @@
 """Standalone chapter planning service outside the execution workflow."""
 
 from src.agents.author.chapter_planner import ChapterPlanner
+from src.agents.author.query_intent_builder import QueryIntentBuilder
 from src.config.settings import get_settings
+from src.core.text_windows import previous_chapter_end
 from src.storage.document_formats import ChapterPlan
 from src.storage.file_store import FileStore
 from src.workflows.retrieval_service import ChapterRetrievalService
@@ -35,11 +37,24 @@ class ChapterPlanningService:
         print(f"{'=' * 60}\n")
 
         print("  [RAG] 检索历史证据...")
-        retrieval = self.retrieval.retrieve(
-            chapter_index,
-            chapter_outline,
-            extra_instructions,
+        from src.storage.current_state_store import CurrentStateStore
+        from src.storage.sqlite_store import SQLiteStore
+
+        sqlite = SQLiteStore(self.file_store.root / "state.db")
+        try:
+            _state, current_state, _digest = CurrentStateStore(
+                self.novel_id, self.file_store, sqlite
+            ).ensure_initialized()
+        finally:
+            sqlite.close()
+        query_intent = QueryIntentBuilder(self.novel_id).build(
+            volume_plan=self.file_store.load_tracking_doc("volume_plan") or "",
+            recent_chapter_end=previous_chapter_end(
+                self.file_store, chapter_index
+            ),
+            current_state=current_state,
         )
+        retrieval = self.retrieval.retrieve(chapter_index, query_intent)
         if retrieval.evidence:
             print(f"  [RAG] 检索到 {len(retrieval.trace.results)} 个相关历史片段")
         else:
@@ -55,7 +70,8 @@ class ChapterPlanningService:
             chapter_outline,
             extra_instructions,
             rag_evidence=retrieval.evidence,
-            query_intent=retrieval.trace.query,
+            query_intent=query_intent,
+            current_state_text=current_state,
         )
 
         print(f"  Part A: {len(plan.scenes)} 个场景")

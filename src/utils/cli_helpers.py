@@ -5,6 +5,7 @@
 """
 
 import re
+from src.config.settings import get_settings
 from src.storage.file_store import FileStore
 
 
@@ -134,8 +135,13 @@ class InteractivePlanEngine:
         ctx["volume_plan"] = vp or "（尚无 Volume Plan）"
 
         # 上一章结尾
+        from src.core.text_windows import trailing_complete_paragraphs
+
         prev = self._load_prev_end()
-        ctx["prev_chapter_end"] = prev[-400:] if prev else "（第一章，无上一章）"
+        ctx["prev_chapter_end"] = (
+            trailing_complete_paragraphs(prev)
+            if prev else "（第一章，无上一章）"
+        )
 
         from src.storage.current_state_store import CurrentStateStore
         from src.storage.sqlite_store import SQLiteStore
@@ -196,10 +202,19 @@ class InteractivePlanEngine:
         parts.append(f"### 场景拆分\n{self.answers.get('scenes', '')}")
 
         # 附上追踪文档
-        parts.append(f"## 角色关系文档\n{self.context.get('character_relations', '')[:2000]}")
-        parts.append(f"## 物品装备文档\n{self.context.get('items_tracking', '')[:1500]}")
+        parts.append(f"## 角色关系文档\n{self.context.get('character_relations', '')}")
+        parts.append(f"## 物品装备文档\n{self.context.get('items_tracking', '')}")
         parts.append(f"## 当前卷大故事路径\n{self.context.get('volume_plan', '')}")
 
+        from src.core.token_guard import guard_planning_context
+        guard_planning_context(get_settings().get_model_slot("plan"), {
+            "volume_plan.md": self.context.get("volume_plan", ""),
+            "current_state.md": self.context.get("character_relations", ""),
+            "recent_chapter_end": self.context.get("prev_chapter_end", ""),
+            "human_answers": "\n".join(
+                str(value) for value in self.answers.values()
+            ),
+        })
         parts.append("\n---\n请根据以上所有信息，按输出格式生成完整的章规划（Part A + Part B）。")
         return "\n\n".join(parts)
 
@@ -208,12 +223,7 @@ class InteractivePlanEngine:
     def _load_prev_end(self) -> str:
         if self.chapter_index <= 1:
             return ""
-        prev = self.fs.load_latest("chapters",
-                                    f"chapter_{self.chapter_index - 1:04d}_styled")
-        if not prev:
-            prev = self.fs.load_latest("chapters",
-                                        f"chapter_{self.chapter_index - 1:04d}")
-        return prev or ""
+        return self.fs.load_canonical_chapter(self.chapter_index - 1) or ""
 
     def _load_pending_foreshadows(self) -> str:
         from src.storage.current_state_store import CurrentStateStore

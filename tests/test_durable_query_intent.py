@@ -328,20 +328,25 @@ class QueryIntentTests(FocusCase):
         service.chroma = MagicMock()
         service.chroma.search.return_value = []
         service.author_chroma = MagicMock()
-        with patch(
-            "src.agents.author.query_intent_builder.QueryIntentBuilder.build",
-            return_value="ONLY QUERY INTENT",
-        ):
-            outcome = service.retrieve(
-                2, chapter_intent="RAW HUMAN INTENT",
-                current_state_text="FULL STATE",
-            )
+        outcome = service.retrieve(2, "ONLY QUERY INTENT")
         self.assertTrue(outcome.trace.success)
         self.assertEqual("ONLY QUERY INTENT", outcome.trace.query)
         self.assertEqual(
             "ONLY QUERY INTENT",
             service.chroma.search.call_args.kwargs["query"],
         )
+
+    def test_stylist_receives_complete_chapter_plan(self):
+        from src.agents.author.claude_stylist import ClaudeStylist
+
+        stylist = object.__new__(ClaudeStylist)
+        stylist.model_slot = self.settings.get_model_slot("write")
+        stylist._call_write_slot = MagicMock(return_value="STYLED")
+        stylist._prompt = ""
+        plan = "PLAN-HEAD\n" + "P" * 4000 + "PLAN-TAIL"
+        stylist.edit_chapter("DRAFT", 1, scene_plan_text=plan)
+        user_msg = stylist._call_write_slot.call_args.args[0]
+        self.assertIn("PLAN-TAIL", user_msg)
 
     def test_sources_record_actual_query_intent(self):
         result = save_chapter_sources({

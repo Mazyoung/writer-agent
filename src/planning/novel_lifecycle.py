@@ -479,5 +479,5 @@ per-chapter outline. Output exactly this Markdown structure:
         files = sorted(states_dir.glob("fact_digest_ch*_*.md"))[-count:]
         parts = []
         for f in files:
-            parts.append(f"## {f.stem}\n{f.read_text(encoding='utf-8')[:1200]}")
+            parts.append(f"## {f.stem}\n{f.read_text(encoding='utf-8')}")
         return "\n\n".join(parts)

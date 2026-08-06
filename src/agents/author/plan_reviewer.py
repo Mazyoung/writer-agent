@@ -1,6 +1,7 @@
 """Chapter Plan review gate for the E07.6 production workflow."""
 
 from src.core.agent_base import BaseAgent
+from src.core.token_guard import guard_planning_context
 
 
 class PlanReviewer(BaseAgent):
@@ -29,16 +30,25 @@ class PlanReviewer(BaseAgent):
         if chapter_intent:
             parts.append(f"## Chapter Intent（作者本章意图）\n{chapter_intent}")
         if world_setting:
-            parts.append(f"## 世界观设定\n{world_setting[:2500]}")
+            parts.append(f"## 世界观设定\n{world_setting}")
         if book_plan:
-            parts.append(f"## Book Plan（战略约束）\n{book_plan[:3000]}")
+            parts.append(f"## Book Plan（战略约束）\n{book_plan}")
         if volume_plan:
-            parts.append(f"## Volume Plan（当前卷战术约束）\n{volume_plan[:3000]}")
+            parts.append(f"## Volume Plan（当前卷战术约束）\n{volume_plan}")
         if current_state:
-            parts.append(f"## Current State\n{current_state[:6000]}")
+            parts.append(f"## Current State\n{current_state}")
         if historical_evidence:
-            parts.append(f"## Relevant Historical Facts\n{historical_evidence[:5000]}")
+            parts.append(f"## Relevant Historical Facts\n{historical_evidence}")
         parts.append("---\n请按输出格式审阅规划。")
+        guard_planning_context(self.model_slot, {
+            "chapter_plan.md": plan_text,
+            "human_intent": chapter_intent,
+            "world_setting.md": world_setting,
+            "book_plan.md": book_plan,
+            "volume_plan.md": volume_plan,
+            "current_state.md": current_state,
+            "historical_evidence": historical_evidence,
+        })
 
         result = self.run(
             user_message="\n\n".join(parts),

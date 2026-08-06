@@ -12,9 +12,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.storage.document_formats import (
-    ChapterPlan, SceneSpec, WORLD_SETTING_PROMPT_LIMIT,
-)
+from src.storage.document_formats import ChapterPlan, SceneSpec
 
 
 def _make_plan(n: int) -> ChapterPlan:
@@ -66,11 +64,10 @@ class TestWorldSettingInjection(unittest.TestCase):
         self.assertIn("高优先级约束", prompt)
         self.assertIn("优先遵守世界观", prompt)
 
-    def test_truncated_at_limit(self):
-        ws = "规" * (WORLD_SETTING_PROMPT_LIMIT + 500)
+    def test_full_world_setting_reaches_writer_prompt(self):
+        ws = "规" * 3000 + "WORLD-SETTING-TAIL"
         prompt = _make_plan(10).build_writer_prompt(world_setting=ws)
-        self.assertIn("规" * WORLD_SETTING_PROMPT_LIMIT, prompt)
-        self.assertNotIn("规" * (WORLD_SETTING_PROMPT_LIMIT + 1), prompt)
+        self.assertIn(ws, prompt)
 
     def test_empty_world_setting_no_section(self):
         prompt = _make_plan(10).build_writer_prompt(world_setting="")

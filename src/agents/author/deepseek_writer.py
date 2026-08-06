@@ -8,6 +8,7 @@ DeepSeekWriter — 接收 ChapterPlan (Part A + Part B) 的创意写手。
 """
 
 from src.core.agent_base import BaseAgent
+from src.core.token_guard import guard_planning_context
 from src.storage.document_formats import ChapterPlan, SceneSpec
 
 
@@ -24,9 +25,14 @@ class DeepSeekWriter(BaseAgent):
 
         Args:
             chapter_plan: 包含 Part A (场景计划) + Part B (上下文包)
-            world_setting: 世界观设定（截断后注入 prompt 的【世界观与硬规则】区域，高优先级约束）
-            prev_chapter_end: 上一章结尾（用于衔接）
+            world_setting: 完整世界观设定（高优先级约束）
+            prev_chapter_end: 上一章结尾完整段落窗口（用于衔接）
         """
+        guard_planning_context(self.model_slot, {
+            "world_setting.md": world_setting,
+            "chapter_plan.md": chapter_plan.to_markdown(),
+            "recent_chapter_end": prev_chapter_end,
+        })
         prompt = chapter_plan.build_writer_prompt(world_setting, prev_chapter_end)
 
         result = self.run(

@@ -137,14 +137,8 @@ class TestRetrieval(E0791Case):
         self.settings.rag_top_k = 7
         service = self._service()
 
-        with patch(
-            "src.agents.author.query_intent_builder.QueryIntentBuilder.build",
-            side_effect=["AGENT QUERY INTENT", "HUMAN QUERY INTENT"],
-        ):
-            agent = service.retrieve(2, chapter_intent="AGENT INTENT")
-            human = service.retrieve(
-                2, chapter_intent="HUMAN INTENT", query_mode="human"
-            )
+        agent = service.retrieve(2, "AGENT QUERY INTENT")
+        human = service.retrieve(2, "HUMAN QUERY INTENT")
 
         self.assertTrue(agent.trace.success)
         self.assertTrue(human.trace.success)
@@ -155,14 +149,11 @@ class TestRetrieval(E0791Case):
             [7, 7],
         )
 
-    def test_human_retrieval_without_intent_fails_closed(self):
+    def test_empty_query_intent_fails_closed(self):
         service = self._service()
-        outcome = service.retrieve(2, query_mode="human")
+        outcome = service.retrieve(2, "")
         self.assertFalse(outcome.trace.success)
-        self.assertIn(
-            "Human Mode 执行历史检索前必须提供非空 Chapter Intent",
-            outcome.trace.error_message,
-        )
+        self.assertIn("非空 Query Intent", outcome.trace.error_message)
         service.chroma.search.assert_not_called()
 
 
@@ -197,7 +188,8 @@ class TestHumanWorkflow(E0791Case):
 
         self.assertEqual(result["workflow_status"], "HUMAN_CONTEXT_READY")
         call = retrieval.return_value.retrieve.call_args
-        self.assertEqual(call.kwargs["query_mode"], "human")
+        self.assertEqual(call.args[0], 2)
+        self.assertTrue(call.args[1])
         report = (self.fs.root / result["writing_context_path"]).read_text(
             encoding="utf-8"
         )

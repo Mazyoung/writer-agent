@@ -264,11 +264,6 @@ class VolumePlan:
 
 # ── ChapterPlan ────────────────────────────────────────────
 
-# build_writer_prompt 注入世界观的字符上限：
-# 简单的头部截断方案——长度可预测、规则可解释，后续可替换为语义筛选。
-WORLD_SETTING_PROMPT_LIMIT = 2500
-
-
 @dataclass
 class SceneSpec:
     """Part A: 单个场景的写作规格。"""
@@ -422,7 +417,7 @@ class ChapterPlan:
         if world_setting:
             parts.append(
                 "## 【世界观与硬规则】\n"
-                + world_setting[:WORLD_SETTING_PROMPT_LIMIT]
+                + world_setting
                 + "\n\n（以上为世界观的权威设定，属于高优先级约束："
                   "你不得与其中已有规则冲突。若本章规划与世界观发生硬冲突，"
                   "优先遵守世界观，不要自行创造新设定。）"
@@ -440,7 +435,7 @@ class ChapterPlan:
         if self.context.forbidden_list:
             parts.append("## [禁止清单] 以下内容绝对不得出现\n" + self.context.forbidden_list)
         if prev_chapter_end:
-            parts.append("## [必读] 上一章结尾（第一句话必须衔接此内容）\n" + prev_chapter_end[-500:])
+            parts.append("## [必读] 上一章结尾（第一句话必须衔接此内容）\n" + prev_chapter_end)
 
         if self.context.historical_facts:
             parts.append("## [必读] Planner 采用的历史事实\n" + self.context.historical_facts)
