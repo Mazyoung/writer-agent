@@ -11,28 +11,28 @@ SUPPORTED_PROVIDERS = {"deepseek", "openai_compatible", "anthropic"}
 
 @dataclass(frozen=True)
 class ModelSlot:
+    name: str
     provider: str
     api_key: str
     base_url: str
     model: str
+    max_tokens: int
 
 
 @dataclass(frozen=True)
 class AgentModelPolicy:
     slot: str
-    thinking: bool
-    temperature: float = 0.7
 
 
 AGENT_MODEL_POLICIES = {
-    "world_builder": AgentModelPolicy("architect", thinking=True, temperature=0.5),
-    "plot_designer": AgentModelPolicy("architect", thinking=True, temperature=0.5),
-    "chapter_planner": AgentModelPolicy("plan", thinking=True, temperature=0.5),
-    "plan_reviewer": AgentModelPolicy("plan", thinking=True, temperature=0.3),
-    "deepseek_writer": AgentModelPolicy("write", thinking=False, temperature=0.9),
-    "writer": AgentModelPolicy("write", thinking=False, temperature=0.9),
-    "stylist": AgentModelPolicy("write", thinking=False, temperature=0.7),
-    "state_manager": AgentModelPolicy("system", thinking=True, temperature=0.3),
+    "world_builder": AgentModelPolicy("architect"),
+    "plot_designer": AgentModelPolicy("architect"),
+    "chapter_planner": AgentModelPolicy("plan"),
+    "plan_reviewer": AgentModelPolicy("plan"),
+    "deepseek_writer": AgentModelPolicy("write"),
+    "writer": AgentModelPolicy("write"),
+    "stylist": AgentModelPolicy("write"),
+    "state_manager": AgentModelPolicy("system"),
 }
 
 
@@ -40,9 +40,8 @@ class Settings:
     """Global runtime configuration loaded from four model slots."""
 
     def __init__(self, env_file: Optional[str] = None):
-        load_dotenv(env_file) if env_file else load_dotenv()
-
         self.project_root = Path(__file__).parent.parent.parent
+        load_dotenv(env_file or (self.project_root / ".env"))
         self.data_dir = self.project_root / "data"
         self.prompts_dir = Path(__file__).parent / "prompts"
 
@@ -50,56 +49,49 @@ class Settings:
             os.getenv("SYSTEM_PROVIDER", "").strip().lower() or "deepseek"
         )
         self._validate_provider("SYSTEM_PROVIDER", system_provider)
-        system_api_key = (
-            os.getenv("SYSTEM_API_KEY", "").strip()
-            or os.getenv("DEEPSEEK_API_KEY", "").strip()
-        )
-        system_base_url = (
-            os.getenv("SYSTEM_BASE_URL", "").strip()
-            or os.getenv("DEEPSEEK_BASE_URL", "").strip()
-        )
+        system_api_key = os.getenv("SYSTEM_API_KEY", "").strip()
+        system_base_url = os.getenv("SYSTEM_BASE_URL", "").strip()
         if not system_base_url and system_provider == "deepseek":
             system_base_url = "https://api.deepseek.com"
-        if system_provider == "openai_compatible" and not system_base_url:
-            raise ValueError(
-                "SYSTEM_PROVIDER 为 openai_compatible 时，"
-                "SYSTEM_BASE_URL 不能为空"
-            )
-        system_model = self._model_value("SYSTEM_MODEL", "deepseek-v4-flash")
         system = ModelSlot(
+            name="system",
             provider=system_provider,
             api_key=system_api_key,
             base_url=system_base_url,
-            model=system_model,
+            model=os.getenv("SYSTEM_MODEL", "").strip(),
+            max_tokens=self._positive_integer("SYSTEM_MAX_TOKENS", "16384"),
         )
 
         self._model_slots = {"system": system}
-        defaults = {
-            "architect": "deepseek-v4-pro",
-            "plan": "deepseek-v4-flash",
-            "write": "deepseek-v4-pro",
+        max_token_defaults = {
+            "architect": "32768",
+            "plan": "16384",
+            "write": "32768",
         }
-        for slot_name, default_model in defaults.items():
+        for slot_name, max_tokens_default in max_token_defaults.items():
             prefix = slot_name.upper()
-            provider = (
-                os.getenv(f"{prefix}_PROVIDER", "").strip().lower()
-                or system.provider
-            )
+            configured_provider = os.getenv(
+                f"{prefix}_PROVIDER", ""
+            ).strip().lower()
+            provider = configured_provider or system.provider
             self._validate_provider(f"{prefix}_PROVIDER", provider)
-            api_key = os.getenv(f"{prefix}_API_KEY", "").strip() or system.api_key
-            base_url = (
-                os.getenv(f"{prefix}_BASE_URL", "").strip() or system.base_url
-            )
-            if provider == "openai_compatible" and not base_url:
-                raise ValueError(
-                    f"{prefix}_PROVIDER 为 openai_compatible 时，"
-                    f"{prefix}_BASE_URL 必须解析为非空值"
-                )
+            configured_api_key = os.getenv(f"{prefix}_API_KEY", "").strip()
+            configured_base_url = os.getenv(f"{prefix}_BASE_URL", "").strip()
+            if configured_provider:
+                api_key = configured_api_key
+                base_url = configured_base_url
+            else:
+                api_key = configured_api_key or system.api_key
+                base_url = configured_base_url or system.base_url
             self._model_slots[slot_name] = ModelSlot(
+                name=slot_name,
                 provider=provider,
                 api_key=api_key,
                 base_url=base_url,
-                model=self._model_value(f"{prefix}_MODEL", default_model),
+                model=os.getenv(f"{prefix}_MODEL", "").strip(),
+                max_tokens=self._positive_integer(
+                    f"{prefix}_MAX_TOKENS", max_tokens_default
+                ),
             )
 
         self.chapter_mode = os.getenv("CHAPTER_MODE", "agent").strip().lower()
@@ -154,14 +146,6 @@ class Settings:
                 f"{variable} 只支持 "
                 f"{', '.join(sorted(SUPPORTED_PROVIDERS))}，当前值为 {provider!r}"
             )
-
-    @staticmethod
-    def _model_value(variable: str, default: str) -> str:
-        raw = os.getenv(variable)
-        value = default if raw is None else raw.strip()
-        if not value:
-            raise ValueError(f"{variable} 必须解析为非空 model")
-        return value
 
     @staticmethod
     def _positive_integer(variable: str, default: str) -> int:

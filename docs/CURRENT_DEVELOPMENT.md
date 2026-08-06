@@ -37,8 +37,10 @@ Story Savepoint 将正式章节完成后的完整小说创作世界保存为 imm
 
 ## Runtime Configuration Closure
 
-- LLM 配置拆分为 `ARCHITECT`、`PLAN`、`WRITE`、`SYSTEM` 四个槽位；每个槽位显式固定 model，并支持 `deepseek`、`openai_compatible`、`anthropic` provider 及 provider/key/base 继承。
-- Writer 与 Stylist 共用 WRITE；StateManager 使用 SYSTEM。DeepSeek thinking 参数仅发送给 DeepSeek provider。
+- LLM 配置保持 `ARCHITECT`、`PLAN`、`WRITE`、`SYSTEM` 四个槽位；每个槽位独立解析 provider、API key、Base URL、model 与 max_tokens，并支持 `deepseek`、`openai_compatible`、`anthropic`。
+- SYSTEM 是默认 connection；子 slot connection 留空时逐字段继承。显式 provider 使用自己的 connection，model 不继承。默认 max_tokens 为 32768 / 16384 / 32768 / 16384。
+- Writer 与 Stylist 共用 WRITE；StateManager 使用 SYSTEM。所有 provider 都使用 slot max_tokens，不发送 Thinking、Extended Thinking、reasoning_effort 或其他 reasoning-specific 参数。
+- 正常 CLI 强制要求项目根目录 `.env` 存在，并在业务初始化前 fail fast；`.env.example` 覆盖全部正式配置项。真正调用 LLM 前只校验当前 slot，错误以中文列出字段和环境变量且不泄露 Key。
 - `EMBEDDING_MODE=local|api` 只决定下一本新小说的初始化方式。local 保留 Chroma 内置 Embedding；api 使用通用 OpenAI-compatible Embedding API。
 - init 在创建小说数据或调用初始化 LLM 前执行实际 probe 并要求显式确认。API Key、地址、model 或 dimensions 错误均 fail fast，拒绝确认不会留下部分初始化状态。
 - mode、model、实际 dimensions 以及是否发送 dimensions 参数保存在小说内部不可变配置中，且位于 Story Savepoint Load 不覆盖的位置；API Key 与 API 地址不持久化。
@@ -81,7 +83,8 @@ Tests tied to the retired src.core.orchestrator, automatic revision, PASS-to-dir
 ## Verification
 
 - Story Savepoint、自动 Savepoint、模型槽位和 Embedding 新增覆盖已纳入完整回归。
-- 完整 unittest suite：181 passed。
+- 模型配置 focused tests：26 passed。
+- 完整 unittest suite：186 passed。
 - `py_compile` 与 `git diff --check` 通过。
 
 ## Next Task

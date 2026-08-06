@@ -592,9 +592,8 @@ def main():
         parser.print_help()
         return
 
-    env_file = Path(__file__).parent / ".env"
-    if not env_file.exists():
-        print("提示: 创建 .env 文件并设置 SYSTEM_PROVIDER / SYSTEM_API_KEY")
+    if not _require_project_env():
+        return
 
     cmds = {
         "init": cmd_init, "status": cmd_status,
@@ -614,6 +613,23 @@ def main():
             print(f"错误：{exc}")
     else:
         parser.print_help()
+
+
+PROJECT_ROOT = Path(__file__).resolve().parent
+
+
+def _require_project_env(project_root: Path | None = None) -> bool:
+    root = project_root or PROJECT_ROOT
+    if (root / ".env").is_file():
+        return True
+    print(
+        "错误：未找到项目配置文件 .env。\n\n"
+        "请在项目根目录创建 .env。\n"
+        "可以复制 .env.example 后填写所需配置：\n\n"
+        "  copy .env.example .env\n\n"
+        "具体配置说明请参阅 README。"
+    )
+    return False
 
 
 if __name__ == "__main__":

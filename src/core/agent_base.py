@@ -25,7 +25,6 @@ class BaseAgent:
         self.model_slot: ModelSlot = settings.get_model_slot(self.config.slot)
         self.model_name = self.model_slot.model
         self.provider_client = ModelProviderClient(self.model_slot)
-        self.client = self.provider_client.client
 
         self.file_store = FileStore(novel_id, settings.data_dir)
         self.interceptor = get_interceptor()
@@ -63,11 +62,7 @@ class BaseAgent:
         return AgentOutput(content=intercepted, filepath=filepath)
 
     def _call_llm(self, messages: list[dict]) -> str:
-        return self.provider_client.complete(
-            messages,
-            temperature=self.config.temperature,
-            thinking=self.config.thinking,
-        )
+        return self.provider_client.complete(messages)
 
     def _format_context(self, context: dict) -> str:
         """将上下文字典格式化为文本，子类可重写"""

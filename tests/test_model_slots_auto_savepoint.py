@@ -6,6 +6,7 @@ import os
 import io
 import json
 import shutil
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -36,10 +37,13 @@ from src.workflows.chapter_runner import (
 
 MODEL_ENV_KEYS = {
     "SYSTEM_PROVIDER", "SYSTEM_API_KEY", "SYSTEM_BASE_URL", "SYSTEM_MODEL",
+    "SYSTEM_MAX_TOKENS",
     "ARCHITECT_PROVIDER", "ARCHITECT_API_KEY", "ARCHITECT_BASE_URL",
-    "ARCHITECT_MODEL", "PLAN_PROVIDER", "PLAN_API_KEY", "PLAN_BASE_URL",
+    "ARCHITECT_MODEL", "ARCHITECT_MAX_TOKENS",
+    "PLAN_PROVIDER", "PLAN_API_KEY", "PLAN_BASE_URL", "PLAN_MAX_TOKENS",
     "PLAN_MODEL", "WRITE_PROVIDER", "WRITE_API_KEY", "WRITE_BASE_URL",
-    "WRITE_MODEL", "DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL",
+    "WRITE_MODEL", "WRITE_MAX_TOKENS",
+    "DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL",
     "CHAPTER_MODE", "RAG_TOP_K", "AUTO_SAVEPOINT_EVERY", "EMBEDDING_MODE",
     "EMBEDDING_API_KEY", "EMBEDDING_BASE_URL", "EMBEDDING_MODEL",
     "EMBEDDING_DIMENSIONS",
@@ -81,10 +85,14 @@ class ModelSlotSettingsTests(unittest.TestCase):
             "WRITE_MODEL=write-model\n"
         )
         write = settings.get_model_slot("write")
-        self.assertEqual("deepseek", write.provider)
-        self.assertEqual("system-secret", write.api_key)
-        self.assertEqual("https://system.example", write.base_url)
-        self.assertEqual("write-model", write.model)
+        for slot_name in ("architect", "plan", "write"):
+            slot = settings.get_model_slot(slot_name)
+            self.assertEqual("deepseek", slot.provider)
+            self.assertEqual("system-secret", slot.api_key)
+            self.assertEqual("https://system.example", slot.base_url)
+        self.assertEqual(("write", "write-model", 32768), (
+            write.name, write.model, write.max_tokens,
+        ))
         expected = {
             "world_builder": "architect", "plot_designer": "architect",
             "chapter_planner": "plan", "plan_reviewer": "plan",
@@ -97,27 +105,65 @@ class ModelSlotSettingsTests(unittest.TestCase):
         )
         self.assertEqual("local", settings.embedding_mode)
 
-    def test_slot_override_and_legacy_system_fallback(self):
+    def test_explicit_provider_uses_own_connection(self):
         settings = self._settings(
-            "DEEPSEEK_API_KEY=legacy-key\n"
-            "DEEPSEEK_BASE_URL=https://legacy.example\n"
+            "SYSTEM_PROVIDER=deepseek\n"
+            "SYSTEM_API_KEY=system-key\n"
+            "SYSTEM_BASE_URL=https://system.example\n"
             "SYSTEM_MODEL=system-model\n"
+            "ARCHITECT_MODEL=architect-model\n"
+            "PLAN_MODEL=plan-model\n"
             "WRITE_PROVIDER=anthropic\n"
             "WRITE_API_KEY=write-key\n"
-            "WRITE_BASE_URL=https://anthropic.example\n"
             "WRITE_MODEL=claude-model\n"
         )
-        self.assertEqual("legacy-key", settings.get_model_slot("system").api_key)
         write = settings.get_model_slot("write")
         self.assertEqual(
-            ("anthropic", "write-key", "https://anthropic.example", "claude-model"),
+            ("anthropic", "write-key", "", "claude-model"),
             (write.provider, write.api_key, write.base_url, write.model),
         )
 
-    def test_invalid_provider_empty_model_and_auto_interval_fail_fast(self):
+    def test_slots_can_use_different_providers_and_models(self):
+        settings = self._settings(
+            "SYSTEM_PROVIDER=deepseek\nSYSTEM_API_KEY=system-key\n"
+            "SYSTEM_MODEL=system-model\n"
+            "ARCHITECT_MODEL=architect-model\n"
+            "PLAN_PROVIDER=openai_compatible\nPLAN_API_KEY=plan-key\n"
+            "PLAN_BASE_URL=https://plan.example\nPLAN_MODEL=plan-model\n"
+            "WRITE_PROVIDER=anthropic\nWRITE_API_KEY=write-key\n"
+            "WRITE_MODEL=write-model\n"
+        )
+        self.assertEqual(
+            ("deepseek", "openai_compatible", "anthropic"),
+            tuple(settings.get_model_slot(name).provider for name in (
+                "architect", "plan", "write"
+            )),
+        )
+        self.assertEqual(
+            ("architect-model", "plan-model", "write-model", "system-model"),
+            tuple(settings.get_model_slot(name).model for name in (
+                "architect", "plan", "write", "system"
+            )),
+        )
+
+    def test_max_tokens_defaults_and_overrides(self):
+        settings = self._settings(
+            "SYSTEM_MODEL=system-model\nARCHITECT_MODEL=architect-model\n"
+            "PLAN_MODEL=plan-model\nWRITE_MODEL=write-model\n"
+            "WRITE_MAX_TOKENS=65536\n"
+        )
+        self.assertEqual(
+            (32768, 16384, 65536, 16384),
+            tuple(settings.get_model_slot(name).max_tokens for name in (
+                "architect", "plan", "write", "system"
+            )),
+        )
+
+    def test_invalid_provider_max_tokens_and_auto_interval_fail_fast(self):
         cases = (
             ("SYSTEM_PROVIDER=unknown\n", "SYSTEM_PROVIDER"),
-            ("WRITE_MODEL=\n", "WRITE_MODEL"),
+            ("WRITE_MAX_TOKENS=0\n", "WRITE_MAX_TOKENS"),
+            ("PLAN_MAX_TOKENS=abc\n", "PLAN_MAX_TOKENS"),
             ("AUTO_SAVEPOINT_EVERY=-1\n", "AUTO_SAVEPOINT_EVERY"),
             ("AUTO_SAVEPOINT_EVERY=abc\n", "AUTO_SAVEPOINT_EVERY"),
         )
@@ -128,28 +174,36 @@ class ModelSlotSettingsTests(unittest.TestCase):
 
 
 class ModelProviderTests(unittest.TestCase):
-    def test_deepseek_sends_thinking_but_openai_compatible_does_not(self):
-        for provider, expects_thinking in (
-            ("deepseek", True), ("openai_compatible", False)
-        ):
+    @staticmethod
+    def _slot(
+        provider: str, *, name: str = "write", key: str = "secret",
+        base_url: str = "https://provider.example", model: str = "model-x",
+        max_tokens: int = 4321,
+    ) -> ModelSlot:
+        return ModelSlot(
+            name=name, provider=provider, api_key=key, base_url=base_url,
+            model=model, max_tokens=max_tokens,
+        )
+
+    def test_openai_protocol_providers_use_slot_limit_without_reasoning(self):
+        for provider in ("deepseek", "openai_compatible"):
             with self.subTest(provider=provider):
                 raw_client = MagicMock()
                 raw_client.chat.completions.create.return_value = SimpleNamespace(
                     choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))]
                 )
                 with patch("src.core.model_provider.OpenAI", return_value=raw_client):
-                    client = ModelProviderClient(ModelSlot(
-                        provider=provider, api_key="secret",
-                        base_url="https://provider.example", model="model-x",
-                    ))
+                    client = ModelProviderClient(self._slot(provider))
                     self.assertEqual(
-                        "ok", client.complete(
-                            [{"role": "user", "content": "hello"}],
-                            temperature=0.3, thinking=True,
-                        )
+                        "ok", client.complete([
+                            {"role": "user", "content": "hello"}
+                        ])
                     )
                 kwargs = raw_client.chat.completions.create.call_args.kwargs
-                self.assertEqual(expects_thinking, "extra_body" in kwargs)
+                self.assertEqual(4321, kwargs["max_tokens"])
+                self.assertEqual(
+                    {"model", "messages", "max_tokens"}, set(kwargs)
+                )
 
     def test_anthropic_messages_adapter(self):
         raw_client = MagicMock()
@@ -158,18 +212,61 @@ class ModelProviderTests(unittest.TestCase):
         )
         constructor = MagicMock(return_value=raw_client)
         with patch("src.core.model_provider.Anthropic", constructor):
-            client = ModelProviderClient(ModelSlot(
-                provider="anthropic", api_key="secret",
-                base_url="https://anthropic.example", model="claude-x",
+            client = ModelProviderClient(self._slot(
+                "anthropic", base_url="", model="claude-x", max_tokens=8765
             ))
             result = client.complete([
                 {"role": "system", "content": "rules"},
                 {"role": "user", "content": "hello"},
-            ], temperature=0.7, thinking=True)
+            ])
         self.assertEqual("anthropic-ok", result)
         kwargs = raw_client.messages.create.call_args.kwargs
         self.assertEqual("rules", kwargs["system"])
+        self.assertEqual(8765, kwargs["max_tokens"])
         self.assertNotIn("thinking", kwargs)
+        self.assertNotIn("temperature", kwargs)
+
+    def test_preflight_reports_current_slot_fields_before_sdk(self):
+        slot = self._slot(
+            "openai_compatible", key="", base_url="", model="",
+        )
+        with patch("src.core.model_provider.OpenAI") as constructor:
+            with self.assertRaisesRegex(ValueError, "WRITE slot") as raised:
+                ModelProviderClient(slot).complete([])
+        message = str(raised.exception)
+        for variable in ("WRITE_API_KEY", "WRITE_BASE_URL", "WRITE_MODEL"):
+            self.assertIn(variable, message)
+        self.assertNotIn("secret", message)
+        constructor.assert_not_called()
+
+    def test_model_does_not_inherit_from_system(self):
+        settings = ModelSlotSettingsTests()._settings(
+            "SYSTEM_API_KEY=system-key\nSYSTEM_MODEL=system-model\n"
+            "ARCHITECT_MODEL=\nPLAN_MODEL=plan-model\nWRITE_MODEL=write-model\n"
+        )
+        with patch("src.core.model_provider.OpenAI") as constructor:
+            with self.assertRaisesRegex(ValueError, "ARCHITECT_MODEL"):
+                ModelProviderClient(
+                    settings.get_model_slot("architect")
+                ).complete([])
+        constructor.assert_not_called()
+
+
+class CliEnvPreflightTests(unittest.TestCase):
+    def test_missing_project_env_stops_before_command_dispatch(self):
+        root = Path(tempfile.mkdtemp(prefix="missing-project-env-"))
+        self.addCleanup(shutil.rmtree, root, True)
+        output = io.StringIO()
+        with patch.object(cli, "PROJECT_ROOT", root), patch.object(
+            cli, "cmd_status"
+        ) as command, patch.object(
+            sys, "argv", ["main.py", "status", "novel-a"]
+        ), redirect_stdout(output):
+            cli.main()
+        command.assert_not_called()
+        text = output.getvalue()
+        self.assertIn("未找到项目配置文件 .env", text)
+        self.assertIn("copy .env.example .env", text)
 
 
 class AutoSavepointTests(unittest.TestCase):

@@ -83,10 +83,7 @@ class ClaudeStylist:
         return "\n\n".join(parts)
 
     def _call_write_slot(self, user_msg: str) -> str:
-        return self.provider_client.complete(
-            [
-                {"role": "system", "content": self._prompt},
-                {"role": "user", "content": user_msg},
-            ],
-            temperature=0.7,
-        )
+        return self.provider_client.complete([
+            {"role": "system", "content": self._prompt},
+            {"role": "user", "content": user_msg},
+        ])

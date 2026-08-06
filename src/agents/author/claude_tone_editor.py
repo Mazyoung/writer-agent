@@ -85,13 +85,10 @@ class ClaudeToneEditor:
 
     def _edit_via_api(self, user_msg: str, save_prefix: str) -> str:
         """Call the configured WRITE provider."""
-        result = self.provider_client.complete(
-            [
-                {"role": "system", "content": self._prompt},
-                {"role": "user", "content": user_msg},
-            ],
-            temperature=0.7,
-        )
+        result = self.provider_client.complete([
+            {"role": "system", "content": self._prompt},
+            {"role": "user", "content": user_msg},
+        ])
         self.file_store.save("chapters", save_prefix, result)
         return result
 

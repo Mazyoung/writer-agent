@@ -164,41 +164,53 @@ python -m pip install -r requirements.txt
 
 ## 2. 配置模型
 
-在项目根目录创建 `.env`。LLM 使用四个职责槽位：
+项目根目录的 `.env` 是正式配置入口，所有正常 CLI 命令执行前都会检查该文件。首次使用请运行：
+
+```bat
+copy .env.example .env
+```
+
+如果 `.env` 不存在，CLI 会在 Settings、LLM、Embedding 和任何小说状态写入之前直接退出。LLM 使用四个职责槽位：
 
 - `ARCHITECT`：全书、世界观和分卷规划
 - `PLAN`：章节规划与规划审阅
 - `WRITE`：正文创作、风格处理、agent_edit 和 regenerate
 - `SYSTEM`：正文审阅、连续性检查、Derivation 和状态管理
 
-`ARCHITECT`、`PLAN`、`WRITE` 的 `PROVIDER / API_KEY / BASE_URL` 留空时继承 `SYSTEM`。支持 `deepseek`、`openai_compatible` 和 `anthropic`。`MODEL` 必须明确解析为非空值。
+每个 slot 都包含 `PROVIDER / API_KEY / BASE_URL / MODEL / MAX_TOKENS`。支持 `deepseek`、`openai_compatible` 和 `anthropic`。
+
+`ARCHITECT`、`PLAN`、`WRITE` 的 connection 字段留空时继承 `SYSTEM`。如果显式填写某个 slot 的 `PROVIDER`，该 slot 使用自己的 connection，不再继承 SYSTEM 的 Key 或 Base URL。每个 slot 的 `MODEL` 必须单独填写，绝不继承 `SYSTEM_MODEL`。
 
 例如：
 
 ```dotenv
 # ----- System / shared default -----
 SYSTEM_PROVIDER=deepseek
-SYSTEM_API_KEY=your_key
+SYSTEM_API_KEY=your-key
 SYSTEM_BASE_URL=https://api.deepseek.com
-SYSTEM_MODEL=deepseek-v4-flash
+SYSTEM_MODEL=<system-model>
+SYSTEM_MAX_TOKENS=16384
 
 # ----- Large-scale planning -----
 ARCHITECT_PROVIDER=
 ARCHITECT_API_KEY=
 ARCHITECT_BASE_URL=
-ARCHITECT_MODEL=deepseek-v4-pro
+ARCHITECT_MODEL=<architect-model>
+ARCHITECT_MAX_TOKENS=32768
 
 # ----- Chapter planning -----
 PLAN_PROVIDER=
 PLAN_API_KEY=
 PLAN_BASE_URL=
-PLAN_MODEL=deepseek-v4-flash
+PLAN_MODEL=<plan-model>
+PLAN_MAX_TOKENS=16384
 
 # ----- Prose creation -----
 WRITE_PROVIDER=
 WRITE_API_KEY=
 WRITE_BASE_URL=
-WRITE_MODEL=deepseek-v4-pro
+WRITE_MODEL=<write-model>
+WRITE_MAX_TOKENS=32768
 
 # ----- Embedding for NEW novels only -----
 EMBEDDING_MODE=local
@@ -213,7 +225,26 @@ RAG_TOP_K=5
 AUTO_SAVEPOINT_EVERY=50
 ```
 
-旧的 `DEEPSEEK_API_KEY / DEEPSEEK_BASE_URL` 仅作为 `SYSTEM` 缺失时的兼容 fallback；新配置统一使用上述 slot 变量。Stylist 不再根据某个 Key 自动切换 Claude，Writer 与 Stylist 始终共同使用 `WRITE`。
+普通用户只需配置一套 SYSTEM connection，再分别填写四个 model 和 max_tokens。四个默认输出上限分别为 ARCHITECT `32768`、PLAN `16384`、WRITE `32768`、SYSTEM `16384`，都可在 `.env` 中覆盖且必须为正整数。
+
+多 Provider 也可以同时使用，例如：
+
+```dotenv
+SYSTEM_PROVIDER=deepseek
+SYSTEM_API_KEY=your-deepseek-key
+SYSTEM_BASE_URL=https://api.deepseek.com
+SYSTEM_MODEL=<system-model>
+
+ARCHITECT_MODEL=<architect-model>
+PLAN_MODEL=<plan-model>
+
+WRITE_PROVIDER=anthropic
+WRITE_API_KEY=your-anthropic-key
+WRITE_BASE_URL=
+WRITE_MODEL=<write-model>
+```
+
+Writer 与 Stylist 始终共同使用 `WRITE`。Writer-Agent 不发送 Thinking、Extended Thinking、`reasoning_effort` 或其他 provider-specific reasoning 参数，模型使用当前 API/model 的默认推理行为。每次真正调用 LLM 前，系统只对本次需要的 slot 执行 preflight；错误会以中文列出 slot、缺失字段和对应环境变量，不输出 API Key 内容。
 
 ### Embedding 与 LLM 不同
 
