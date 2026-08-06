@@ -78,11 +78,10 @@ Agent 会把它作为当前章节的重要创作要求。
 | 操作 | 含义 |
 |---|---|
 | `approve` | 接受当前正文 |
-| `agent_edit` | 告诉 Agent 哪里需要修改 |
-| `manual_edit` | 自己直接修改 |
-| `regenerate` | 保留这一章的方向，重新生成正文 |
-| `pause` | 暂停，之后继续 |
-| `discard` | 放弃本次生成 |
+| `agent_edit` | Agent 根据 Review 的具体问题修改当前内容 |
+| `human_edit` | 作者直接修改当前 Plan 或 Prose |
+| `regenerate_prose` | 保留 Approved Plan，只重新生成正文 |
+| `restart` | 保留 Chapter Intent，放弃本章全部 Pre-Canonical 内容并重新规划 |
 
 因此，Agent 负责提供方案和执行创作，但最终采用什么内容仍然由作者决定。
 
@@ -174,7 +173,7 @@ copy .env.example .env
 
 - `ARCHITECT`：全书、世界观和分卷规划
 - `PLAN`：章节规划与规划审阅
-- `WRITE`：正文创作、风格处理、agent_edit 和 regenerate
+- `WRITE`：正文创作、风格处理、`agent_edit` 和 `regenerate_prose`
 - `SYSTEM`：正文审阅、连续性检查、Derivation 和状态管理
 
 每个 slot 都包含 `PROVIDER / API_KEY / BASE_URL / MODEL / MAX_TOKENS`。支持 `deepseek`、`openai_compatible` 和 `anthropic`。
@@ -221,6 +220,7 @@ EMBEDDING_DIMENSIONS=
 
 # ----- Runtime -----
 CHAPTER_MODE=agent
+AGENT_EXECUTION=supervised
 RAG_TOP_K=5
 AUTO_SAVEPOINT_EVERY=50
 ```
@@ -308,6 +308,28 @@ python main.py write my_novel --chapter 1 \
 
 不提供 `--intent` 也可以，Agent 会根据当前故事自行规划。
 
+运行体验由两个现有配置组合得到，不会建立第三套 Chapter Workflow：
+
+- 自主创作：`CHAPTER_MODE=agent` + `AGENT_EXECUTION=autonomous`。正常 PASS 自动完成 Canonical、Derivation，并只在有限自动修复仍失败时等待作者。
+- 监督模式：`CHAPTER_MODE=agent` + `AGENT_EXECUTION=supervised`。固定在 Plan Review 和 Prose Review 后等待作者检查，即使 Review 为 PASS。
+- 数据管理模式：`CHAPTER_MODE=human`。作者提供 Intent 和正文，系统负责 Writing Context、Consistency、Canonical 与长期状态管理；`AGENT_EXECUTION` 不会让系统代写。
+
+不知道当前该执行哪个命令时，使用统一状态入口：
+
+```bash
+python main.py continue my_novel
+```
+
+`continue` 会优先恢复现有 checkpoint、显示当前人工等待、修复未完成 Derivation，或选择下一章；它每次只推进当前确定步骤，不会自动无限写作。
+
+只有自主创作模式可以显式连续写到目标章节：
+
+```bash
+python main.py run my_novel --to-chapter 10
+```
+
+`run` 与 `continue` 共用同一状态路由，已达到 `DERIVED_READY` 的章节不会被覆盖。
+
 ---
 
 ## 5. 单独控制章节规划
@@ -344,20 +366,22 @@ python main.py write my_novel --chapter 1 --action approve
 # 要求 Agent 修改
 python main.py write my_novel --chapter 1 \
   --action agent_edit \
-  --resume "减少解释性对白，让人物通过动作表现紧张感"
+  --feedback "减少解释性对白，让人物通过动作表现紧张感"
 
 # 自己修改后继续
-python main.py write my_novel --chapter 1 --action manual_edit
+python main.py write my_novel --chapter 1 --action human_edit
 
-# 重新生成
-python main.py write my_novel --chapter 1 --action regenerate
+# 保留 Approved Plan，只重新生成正文
+python main.py write my_novel --chapter 1 --action regenerate_prose
 
-# 暂停
-python main.py write my_novel --chapter 1 --action pause
+# 放弃本章全部 Pre-Canonical 内容，从 Planning 重来
+python main.py write my_novel --chapter 1 --action restart
 
-# 放弃本次生成
-python main.py write my_novel --chapter 1 --action discard
+# 也可在任何 Pre-Canonical 阶段使用同一底层 restart
+python main.py restart my_novel --chapter 1
 ```
+
+Plan Review 未通过时可用 `agent_edit / human_edit / restart`；Prose Review 未通过时额外提供 `regenerate_prose`。CLI 会先列出完整 Review 问题。普通程序中断不使用这些 action：重新执行原 `write`，或执行 `continue`，都会从已有 checkpoint 恢复。
 
 ---
 
@@ -406,13 +430,7 @@ python main.py new-volume my_novel \
 
 你可以直接修改生成的分卷规划。
 
-确认后：
-
-```bash
-python main.py approve-volume my_novel
-```
-
-然后继续下一卷的章节创作。
+确认当前规划可用后，直接开始下一卷 Chapter Planning；系统会在 Planning 入口完成必要的内部 ACTIVE 状态转换，不需要额外 approval 命令。
 
 ---
 
@@ -423,11 +441,13 @@ python main.py approve-volume my_novel
 | `init` | 创建小说 |
 | `plan` | 生成章节规划 |
 | `write` | 创作章节 |
+| `continue` | 检查小说当前状态并从唯一合法位置继续 |
+| `run --to-chapter N` | 自主模式连续创作到目标章节 |
+| `restart` | 放弃指定章的 Pre-Canonical 内容并重新规划 |
 | `status` | 查看当前状态 |
 | `repair-derivation` | 完成未完成的章节信息整理 |
 | `close-volume` | 完成当前卷 |
 | `new-volume` | 创建下一卷规划 |
-| `approve-volume` | 确认下一卷规划 |
 
 查看完整帮助：
 

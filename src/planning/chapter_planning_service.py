@@ -27,6 +27,9 @@ class ChapterPlanningService:
         extra_instructions: str = "",
     ) -> ChapterPlan:
         """Generate a Chapter Plan while preserving retrieval observability."""
+        from src.workflows.chapter_progress import ensure_chapter_can_start
+
+        ensure_chapter_can_start(self.novel_id, chapter_index)
         print(f"\n{'=' * 60}")
         print(f"第 {chapter_index} 章规划")
         print(f"{'=' * 60}\n")

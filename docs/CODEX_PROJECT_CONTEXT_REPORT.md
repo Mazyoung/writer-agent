@@ -102,7 +102,7 @@ START → preflight
 
 ### 3.1 生产内容
 
-- Proposal：小说根目录 `proposal.md`；人工修改使用 `proposal_edited.md`，读取优先级为 edited > canonical > legacy。
+- Proposal：小说根目录 `proposal.md`；作者直接审阅和编辑该文件，`init --confirm` 读取其当前内容。
 - World Setting：`settings/world_setting.md`，canonical Markdown。
 - Book Plan：`tracking/book_plan.md`，战略层、长期稳定。
 - Volume Plan：`tracking/volume_plan.md`，当前 ACTIVE 战术层；历史卷归档至 `tracking/volumes/volume_NN.md`。

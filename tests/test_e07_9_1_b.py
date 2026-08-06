@@ -95,7 +95,7 @@ class TestAClosure(E0791Case):
                 "value": {
                     "type": "human_writing",
                     "writing_context_path": "tracking/writing_context_ch0002.md",
-                    "allowed_actions": ["submit", "pause", "discard"],
+                    "allowed_actions": ["submit", "restart"],
                 },
             }],
         }
@@ -233,7 +233,7 @@ class HumanFlowCase(E0791Case):
             self.manager_class.return_value.review_consistency.call_count, 1
         )
 
-    def test_warn_manual_edit_forces_new_consistency_check(self):
+    def test_warn_human_edit_forces_new_consistency_check(self):
         self.manager_class.return_value.review_consistency.side_effect = [
             {"raw_analysis": WARN, "filepath": None},
             {"raw_analysis": CLEAN, "filepath": None},
@@ -243,7 +243,7 @@ class HumanFlowCase(E0791Case):
         edit_path = self.fs.root / first["interrupts"][0]["value"]["edit_path"]
         edit_path.write_text("修正后的人工正文。", encoding="utf-8")
 
-        second = self.runner.resume({"action": "manual_edit"})
+        second = self.runner.resume({"action": "human_edit"})
         self.assertEqual(second["workflow_status"], "WAITING_HUMAN")
         self.assertEqual(second["candidate_text"], "修正后的人工正文。")
         self.assertEqual(second["consistency_verdict"], "CLEAN")
@@ -362,8 +362,8 @@ class TestConsistencyInfrastructure(E0791Case):
         self.assertFalse(any((self.fs.root / "outlines").glob("chapter_plan*")))
 
 
-class TestAgentOverride(E0791Case):
-    def test_non_pass_approve_requires_override_without_rerunning_review(self):
+class TestAgentReviewActions(E0791Case):
+    def test_non_pass_exposes_specific_actions_without_approve(self):
         self.settings.chapter_mode = "agent"
         self.fs.save_canonical("settings", "world_setting", "# 世界观")
         retrieval = patch(
@@ -406,22 +406,20 @@ class TestAgentOverride(E0791Case):
 
         runner = ChapterWorkflowRunner("human-mode", 1)
         first = runner.run()
-        self.assertEqual(first["verdict"], "NEEDS_REVISION")
-        self.assertIn("approve", first["interrupts"][0]["value"]["allowed_actions"])
-
-        override = runner.resume({"action": "approve"})
         self.assertEqual(
-            override["interrupts"][0]["value"]["type"],
-            "review_override_confirmation",
+            first["interrupts"][0]["value"]["type"], "plan_review"
         )
+        first = runner.resume({"action": "approve"})
+        self.assertEqual(first["verdict"], "NEEDS_REVISION")
+        payload = first["interrupts"][0]["value"]
+        self.assertEqual(payload["type"], "chapter_review")
+        self.assertEqual(
+            payload["allowed_actions"],
+            ["agent_edit", "human_edit", "regenerate_prose", "restart"],
+        )
+        self.assertIn("门锁状态与历史事实冲突", payload["reasons"])
+        self.assertNotIn("approve", payload["allowed_actions"])
         self.assertFalse(self.fs.canonical_chapter_path(1).exists())
-        self.assertEqual(manager.review_chapter.call_count, 1)
-
-        result = runner.resume({"action": "confirm_override"})
-        self.assertEqual(result["workflow_status"], "DERIVATION_ERROR")
-        self.assertEqual(result["verdict"], "NEEDS_REVISION")
-        self.assertTrue(result["review_override_confirmed"])
-        self.assertEqual(self.fs.load_canonical_chapter(1), "agent candidate")
         self.assertEqual(manager.review_chapter.call_count, 1)
 
 

@@ -100,6 +100,14 @@ class Settings:
                 "CHAPTER_MODE 只支持 agent 或 human，"
                 f"当前值为 {self.chapter_mode!r}"
             )
+        self.agent_execution = os.getenv(
+            "AGENT_EXECUTION", "supervised"
+        ).strip().lower()
+        if self.agent_execution not in {"autonomous", "supervised"}:
+            raise ValueError(
+                "AGENT_EXECUTION 只支持 autonomous 或 supervised，"
+                f"当前值为 {self.agent_execution!r}"
+            )
 
         self.rag_chunk_size = 800
         self.rag_chunk_overlap = 100

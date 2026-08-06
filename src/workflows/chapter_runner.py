@@ -136,6 +136,22 @@ class ChapterWorkflowRunner:
         finally:
             connection.close()
 
+    def inspect(self) -> dict[str, Any]:
+        """Return durable checkpoint state without advancing it."""
+        connection, _checkpointer, graph = self._open_graph()
+        try:
+            snapshot = graph.get_state(self.config)
+            return {
+                "values": dict(snapshot.values),
+                "next": list(snapshot.next),
+                "interrupts": [
+                    {"id": item.id, "value": item.value}
+                    for item in snapshot.interrupts
+                ],
+            }
+        finally:
+            connection.close()
+
     @_novel_mutation_locked
     def run(
         self,
@@ -144,16 +160,11 @@ class ChapterWorkflowRunner:
         chapter_intent: str = "",
     ) -> dict[str, Any]:
         """Start, continue, or report a paused chapter execution."""
+        from src.workflows.chapter_progress import ensure_chapter_can_start
+
+        ensure_chapter_can_start(self.novel_id, self.chapter_index)
         connection, checkpointer, graph = self._open_graph()
         try:
-            if self.file_store.canonical_chapter_path(self.chapter_index).exists():
-                return {
-                    "workflow_status": "error",
-                    "error": (
-                        f"ERROR_ALREADY_EXISTS: 第{self.chapter_index}章已完成，"
-                        "普通 Generate 禁止覆盖"),
-                }
-
             snapshot = graph.get_state(self.config)
             if snapshot.interrupts:
                 print("  [LangGraph] 章节工作流正在等待人工输入。")
@@ -190,6 +201,7 @@ class ChapterWorkflowRunner:
                 # Freeze the resolved mode into the first checkpoint. Resume never
                 # consults later environment/config changes for this execution.
                 "chapter_mode": get_settings().chapter_mode,
+                "agent_execution": get_settings().agent_execution,
                 "workflow_status": "running",
                 "warnings": [],
             }
@@ -264,12 +276,18 @@ class ChapterWorkflowRunner:
     def _discard_candidate(self, checkpointer: SqliteSaver) -> list[str]:
         """Delete only this pre-canonical execution; preserve Chapter Intent."""
         if self.file_store.canonical_chapter_path(self.chapter_index).exists():
-            raise ValueError("Canonical commit 后禁止 discard")
+            raise ValueError("Canonical commit 后禁止 restart")
         removed = []
         patterns = [
+            f"chapters/chapter_{self.chapter_index:04d}_draft*.md",
+            f"chapters/chapter_{self.chapter_index:04d}_revision*.md",
             f"chapters/chapter_{self.chapter_index:04d}_styled*.md",
             f"chapters/chapter_{self.chapter_index:04d}_human_candidate*.md",
+            f"chapters/scene_ch{self.chapter_index:04d}_*.md",
             f"outlines/chapter_plan_ch{self.chapter_index:04d}*.md",
+            f"outlines/scene_plan_ch{self.chapter_index:04d}*.md",
+            f"tracking/writing_context_ch{self.chapter_index:04d}.md",
+            f"tracking/rag_traces/retrieval_trace_ch{self.chapter_index:04d}_*.json",
             f"states/review_ch{self.chapter_index:04d}_*.md",
             f"states/consistency_review_ch{self.chapter_index:04d}_*.md",
             f"states/derivation_ch{self.chapter_index:04d}_*.md",
@@ -303,20 +321,14 @@ class ChapterWorkflowRunner:
                 or pending.get("chapter_index", self.chapter_index) != self.chapter_index
             ):
                 raise ValueError("待处理 checkpoint 与当前 novel/chapter 不匹配")
-            if action == "edit" and pending.get("type") in {
-                "chapter_review", "final_author_approval"
-            }:
-                action = "manual_edit"
             allowed = set(pending.get("allowed_actions", []))
             if action not in allowed:
                 raise ValueError(
                     f"操作 '{action}' 不适用于 {pending.get('type', 'interrupt')}"
                 )
-            if action == "pause":
-                return self._waiting_result(snapshot)
-            if action == "discard":
+            if action == "restart":
                 return {
-                    "workflow_status": "DISCARDED",
+                    "workflow_status": "RESTARTED",
                     "removed_candidates": self._discard_candidate(checkpointer),
                     "chapter_intent_preserved": True,
                 }
@@ -326,7 +338,7 @@ class ChapterWorkflowRunner:
             }
             # Validate before Command(resume=...) so a bad/missing edit does not
             # consume the pending checkpoint interrupt.
-            if action in {"edit", "manual_edit"}:
+            if action == "human_edit":
                 command_value["edited_text"] = self._load_human_edit(pending)
             if action == "submit":
                 command_value["candidate_text"] = self._load_candidate_file(
@@ -343,6 +355,20 @@ class ChapterWorkflowRunner:
                 config=self.config,
             )
             return self._result_or_interrupt(graph, result)
+        finally:
+            connection.close()
+
+
+    @_novel_mutation_locked
+    def restart(self) -> dict[str, Any]:
+        """Discard one pre-Canonical execution using the shared reset primitive."""
+        connection, checkpointer, _graph = self._open_graph()
+        try:
+            return {
+                "workflow_status": "RESTARTED",
+                "removed_candidates": self._discard_candidate(checkpointer),
+                "chapter_intent_preserved": True,
+            }
         finally:
             connection.close()
 
@@ -411,3 +437,7 @@ def resume_chapter_workflow(
 
 def repair_chapter_derivation(novel_id: str, chapter_index: int) -> dict[str, Any]:
     return ChapterWorkflowRunner(novel_id, chapter_index).repair_derivation()
+
+
+def restart_chapter_workflow(novel_id: str, chapter_index: int) -> dict[str, Any]:
+    return ChapterWorkflowRunner(novel_id, chapter_index).restart()

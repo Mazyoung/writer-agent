@@ -30,6 +30,7 @@ class ChapterWorkflowState(TypedDict, total=False):
     extra_instructions: str
     chapter_intent: str
     chapter_mode: str
+    agent_execution: str
 
     chapter_plan_text: str
     historical_evidence: str
@@ -52,6 +53,7 @@ class ChapterWorkflowState(TypedDict, total=False):
     plan_t1_issues: list[str]
     plan_planning_level: str
     plan_review_attempt: int
+    plan_revision_count: int
 
     raw_analysis: str
     verdict: str
@@ -281,7 +283,7 @@ def await_human_writing(state: ChapterWorkflowState) -> dict[str, Any]:
         "chapter_index": chapter_index,
         "writing_context_path": state.get("writing_context_path", ""),
         "message": "相关历史写作上下文已准备完成，正在等待作者提交正文 Candidate。",
-        "allowed_actions": ["submit", "pause", "discard"],
+        "allowed_actions": ["submit", "restart"],
     })
     if not isinstance(resume_value, dict):
         return _error_result("人工正文提交必须是一个决策对象")
@@ -504,11 +506,56 @@ def parse_plan_decision(state: ChapterWorkflowState) -> dict[str, Any]:
 def _route_after_plan_decision(state: ChapterWorkflowState) -> str:
     if state.get("workflow_status") == "error":
         return END
+    supervised = state.get("agent_execution", "supervised") == "supervised"
     if state.get("plan_verdict") == "PASS":
-        return "write_draft"
+        return "await_human_plan" if supervised else "write_draft"
     if state.get("plan_verdict") in ("NEEDS_REVISION", "HALT"):
+        if (
+            not supervised
+            and state.get("plan_revision_count", 0) < 2
+        ):
+            return "agent_edit_plan"
         return "await_human_plan"
     return END
+
+
+@_guard_node
+def agent_edit_plan(state: ChapterWorkflowState) -> dict[str, Any]:
+    """Revise only the issues identified by the latest Plan Review."""
+    from src.agents.author.chapter_planner import ChapterPlanner
+
+    fs = FileStore(state["novel_id"], get_settings().data_dir)
+    issues = [
+        *state.get("plan_t1_issues", []),
+        *state.get("plan_review_reasons", []),
+    ]
+    planning_context = "\n\n".join([
+        "## World Setting\n"
+        + (fs.load_canonical("settings", "world_setting") or "无"),
+        "## Book Plan\n"
+        + (fs.load_tracking_doc("book_plan") or "无"),
+        "## Volume Plan\n"
+        + (fs.load_tracking_doc("volume_plan") or "无"),
+        "## Current State\n"
+        + (state.get("current_state_text", "") or "无"),
+        "## Historical Evidence\n"
+        + (state.get("historical_evidence", "") or "无"),
+    ])
+    revised = ChapterPlanner(state["novel_id"]).revise_plan(
+        chapter_index=state["chapter_index"],
+        current_plan=state.get("chapter_plan_text", ""),
+        review_issues=issues,
+        planning_context=planning_context,
+        chapter_intent=state.get("chapter_intent", ""),
+        human_feedback=state.get("human_feedback", ""),
+    )
+    return {
+        "chapter_plan_text": revised,
+        "plan_verdict": "",
+        "plan_raw_analysis": "",
+        "plan_revision_count": state.get("plan_revision_count", 0) + 1,
+        "workflow_status": "PLAN_AGENT_EDITED",
+    }
 
 
 
@@ -701,7 +748,8 @@ def agent_edit_chapter(state: ChapterWorkflowState) -> dict[str, Any]:
     from src.agents.author.deepseek_writer import DeepSeekWriter
     from src.storage.document_formats import ChapterPlan
 
-    if state.get("human_decision") != "agent_edit":
+    autonomous = state.get("agent_execution") == "autonomous"
+    if state.get("human_decision") != "agent_edit" and not autonomous:
         return _error_result("agent_edit 需要明确的人工决定")
 
     plan = ChapterPlan.from_markdown(state.get("chapter_plan_text", ""))
@@ -720,10 +768,6 @@ def agent_edit_chapter(state: ChapterWorkflowState) -> dict[str, Any]:
         "verdict": "",
         "workflow_status": "AGENT_EDITED",
     }
-
-
-# Compatibility import only; the Graph never invokes revision automatically.
-auto_revise_chapter = agent_edit_chapter
 
 
 @_guard_node
@@ -795,13 +839,20 @@ def parse_chapter_decision(state: ChapterWorkflowState) -> dict[str, Any]:
         }
     print(f"  [parse_chapter_decision] Review #{state.get('review_round', 1)}: "
           f"{decision.verdict}")
-    return {
+    result = {
         "verdict": decision.verdict,
         "review_reasons": decision.reasons,
         "t1_issues": decision.t1_issues,
         "planning_level": decision.planning_level,
         "workflow_status": f"DECISION_{decision.verdict}",
     }
+    if (
+        state.get("chapter_mode", "agent") == "agent"
+        and state.get("agent_execution") == "autonomous"
+        and decision.verdict == "PASS"
+    ):
+        result["final_author_approved"] = True
+    return result
 
 
 # Compatibility name for existing callers that import the E07.5 node directly.
@@ -811,19 +862,21 @@ parse_decision = parse_chapter_decision
 def _route_after_chapter_decision(state: ChapterWorkflowState) -> str:
     if state.get("workflow_status") == "error":
         return END
-    if state.get("verdict") in ("PASS", "NEEDS_REVISION", "HALT"):
+    if state.get("chapter_mode", "agent") == "human":
+        return "await_human_chapter"
+    autonomous = state.get("agent_execution") == "autonomous"
+    if not autonomous:
+        return "await_human_chapter"
+    if state.get("verdict") == "PASS":
+        return "commit_canonical_prose"
+    if (
+        state.get("verdict") in ("NEEDS_REVISION", "HALT")
+        and state.get("review_round", 1) <= 2
+    ):
+        return "agent_edit_chapter"
+    if state.get("verdict") in ("NEEDS_REVISION", "HALT"):
         return "await_human_chapter"
     return END
-
-
-def _stop_after_human(state: ChapterWorkflowState) -> dict[str, Any]:
-    verdict = state.get("verdict", state.get("plan_verdict", "UNKNOWN"))
-    return {
-        "human_decision": "stop",
-        "commit_success": False,
-        "commit_error": f"Human stopped non-PASS execution: {verdict}",
-        "workflow_status": "STOPPED_NON_PASS",
-    }
 
 
 def await_human_plan(state: ChapterWorkflowState) -> dict[str, Any]:
@@ -839,19 +892,32 @@ def await_human_plan(state: ChapterWorkflowState) -> dict[str, Any]:
         "reasons": state.get("plan_review_reasons", []),
         "t1_issues": state.get("plan_t1_issues", []),
         "edit_path": edit_path,
-        "allowed_actions": ["edit", "stop"],
+        "allowed_actions": (
+            ["approve", "human_edit", "restart"]
+            if state.get("plan_verdict") == "PASS"
+            else ["agent_edit", "human_edit", "restart"]
+        ),
     })
     if not isinstance(resume_value, dict):
         return _error_result("Human resume value 必须是 decision object")
     action = str(resume_value.get("action", "")).strip().lower()
-    if action == "stop":
-        return _stop_after_human(state)
+    if action == "approve" and state.get("plan_verdict") == "PASS":
+        return {
+            "human_decision": "approve",
+            "workflow_status": "PLAN_APPROVED",
+        }
+    if action == "agent_edit":
+        return {
+            "human_decision": "agent_edit",
+            "human_feedback": str(resume_value.get("feedback", "")).strip(),
+            "workflow_status": "PLAN_AGENT_EDIT_REQUESTED",
+        }
     edited = str(resume_value.get("edited_text", "")).strip()
-    if action != "edit" or not edited:
-        return _error_result("Plan resume 需要非空的人工编辑内容")
+    if action != "human_edit" or not edited:
+        return _error_result("human_edit 需要非空的 Chapter Plan")
     return {
         "chapter_plan_text": edited,
-        "human_decision": "edit",
+        "human_decision": "human_edit",
         "human_feedback": str(resume_value.get("feedback", "")).strip(),
         "plan_verdict": "",
         "workflow_status": "HUMAN_PLAN_EDITED",
@@ -892,12 +958,14 @@ def await_human_chapter(state: ChapterWorkflowState) -> dict[str, Any]:
     )
     if human_mode:
         interrupt_type = "human_final_approval"
-        allowed_actions = ["manual_edit", "pause", "discard", "approve"]
+        allowed_actions = ["human_edit", "restart", "approve"]
     else:
         interrupt_type = "final_author_approval" if passed else "chapter_review"
-        allowed_actions = [
-            "agent_edit", "manual_edit", "regenerate", "pause", "discard", "approve"
-        ]
+        allowed_actions = (
+            ["approve", "human_edit", "restart"]
+            if passed else
+            ["agent_edit", "human_edit", "regenerate_prose", "restart"]
+        )
     resume_value = interrupt({
         "type": interrupt_type,
         "novel_id": state.get("novel_id", ""),
@@ -932,10 +1000,10 @@ def await_human_chapter(state: ChapterWorkflowState) -> dict[str, Any]:
             "review_override_confirmed": False,
             "workflow_status": "AGENT_EDIT_REQUESTED",
         }
-    if action == "manual_edit":
+    if action == "human_edit":
         edited = str(resume_value.get("edited_text", "")).strip()
         if not edited:
-            return _error_result("manual_edit 需要非空正文")
+            return _error_result("human_edit 需要非空正文")
         common = {
             "human_decision": action,
             "human_feedback": feedback,
@@ -954,7 +1022,7 @@ def await_human_chapter(state: ChapterWorkflowState) -> dict[str, Any]:
                 "consistency_warnings": [],
             }
         return {**common, "styled_text": edited, "verdict": ""}
-    if action == "regenerate" and not human_mode:
+    if action == "regenerate_prose" and not human_mode:
         return {
             "human_decision": action,
             "human_feedback": feedback,
@@ -978,7 +1046,7 @@ def await_review_override(state: ChapterWorkflowState) -> dict[str, Any]:
         "message": (
             "当前审阅尚未通过。原审阅结论不会被修改；继续将记录为作者在已知警告后的主动提交。"
         ),
-        "allowed_actions": ["confirm_override", "back", "pause", "discard"],
+        "allowed_actions": ["confirm_override", "back"],
     })
     if not isinstance(resume_value, dict):
         return _error_result("审阅 override 确认必须是一个决策对象")
@@ -1006,7 +1074,11 @@ await_human_review = await_human_chapter
 def _route_after_human_plan(state: ChapterWorkflowState) -> str:
     if state.get("workflow_status") == "error":
         return END
-    return "review_plan" if state.get("human_decision") == "edit" else END
+    return {
+        "approve": "write_draft",
+        "agent_edit": "agent_edit_plan",
+        "human_edit": "review_plan",
+    }.get(state.get("human_decision", ""), END)
 
 
 def _route_after_human_chapter(state: ChapterWorkflowState) -> str:
@@ -1018,14 +1090,14 @@ def _route_after_human_chapter(state: ChapterWorkflowState) -> str:
             "commit_canonical_prose"
             if _normal_review_passed(state) else "await_review_override"
         )
-    if decision == "manual_edit":
+    if decision == "human_edit":
         return (
             "review_consistency"
             if state.get("chapter_mode", "agent") == "human" else "save_styled"
         )
     return {
         "agent_edit": "agent_edit_chapter",
-        "regenerate": "write_draft",
+        "regenerate_prose": "write_draft",
     }.get(decision, END)
 
 
@@ -1323,6 +1395,7 @@ def build_chapter_workflow(checkpointer: Any = None) -> Any:
         ("plan_chapter", plan_chapter),
         ("review_plan", review_plan),
         ("parse_plan_decision", parse_plan_decision),
+        ("agent_edit_plan", agent_edit_plan),
         ("await_human_plan", await_human_plan),
         ("write_draft", write_draft),
         ("style_edit", style_edit),
@@ -1386,16 +1459,33 @@ def build_chapter_workflow(checkpointer: Any = None) -> Any:
 
     graph.add_conditional_edges(
         "parse_plan_decision", _route_after_plan_decision,
-        {"write_draft": "write_draft", "await_human_plan": "await_human_plan", END: END},
+        {
+            "write_draft": "write_draft",
+            "agent_edit_plan": "agent_edit_plan",
+            "await_human_plan": "await_human_plan",
+            END: END,
+        },
+    )
+    graph.add_conditional_edges(
+        "agent_edit_plan",
+        lambda state: _route_after_node(state, "review_plan"),
+        {"review_plan": "review_plan", END: END},
     )
     graph.add_conditional_edges(
         "await_human_plan", _route_after_human_plan,
-        {"review_plan": "review_plan", END: END},
+        {
+            "write_draft": "write_draft",
+            "agent_edit_plan": "agent_edit_plan",
+            "review_plan": "review_plan",
+            END: END,
+        },
     )
     graph.add_conditional_edges(
         "parse_chapter_decision", _route_after_chapter_decision,
         {
             "await_human_chapter": "await_human_chapter",
+            "agent_edit_chapter": "agent_edit_chapter",
+            "commit_canonical_prose": "commit_canonical_prose",
             END: END,
         },
     )

@@ -5,16 +5,23 @@
 E07 Story Savepoint + Load Savepoint、自动 Savepoint、四模型槽位与小说级
 Embedding 配置已完成。
 
-正式支持两种完整章节创作模式：
+正式支持两条底层章节创作链与三种用户运行体验：
 
 ~~~text
-agent: Intent(optional) → Current State / Historical RAG → Planner → Plan Review
-       → Writer → Stylist → Full Prose Review → Final Human Approval
-       → Canonical → existing Derivation → DERIVED_READY
+agent + autonomous:
+       Intent(optional) → Planner → Plan Review → finite agent edit
+       → Writer → Stylist → Prose Review → finite agent edit
+       → Canonical → Derivation → DERIVED_READY
 
-human: Intent(required) → Current State / Historical RAG → Writing Context
+agent + supervised:
+       Intent(optional) → Planner → Plan Review → Human Checkpoint
+       → Writer → Stylist → Prose Review → Human Checkpoint
+       → Canonical → Derivation → DERIVED_READY
+
+human / data management:
+       Intent(required) → Current State / Historical RAG → Writing Context
        → Human Candidate → Consistency-only Review → Final Human Approval
-       → Canonical → existing Derivation → DERIVED_READY
+       → Canonical → Derivation → DERIVED_READY
 ~~~
 
 作者拥有最终决定权。系统 Review/Consistency 是决策辅助：非 PASS/WARN 不会自动提交，但作者可以在看到明确警告后通过独立二次确认 override。原始 verdict 保持不变，不会伪造成 PASS/CLEAN。
@@ -76,17 +83,27 @@ The push/PR gate is frozen around stable functional contracts and safety invaria
 - canonical create-once/overwrite protection and canonical-only historical reading;
 - canonical commit followed by derivation, visible derivation failure, idempotent repair, and DERIVED_READY;
 - deterministic Current State, Fact Digest / Atomic Fact RAG, and Author RAG fail-closed behavior;
-- advisory VolumeProgress, close-volume consistency guard, next-volume, approve-volume, and non-chapterized Volume Plans.
+- advisory VolumeProgress, close-volume consistency guard, next-volume, implicit DRAFT-to-ACTIVE activation, and non-chapterized Volume Plans.
 
 Tests tied to the retired src.core.orchestrator, automatic revision, PASS-to-direct-commit, styled-as-canonical, E07.2 graph node names/topology, and old multi-Markdown tracking rollback behavior were removed. Reusable parser, storage, RAG, FakeLLM, mock, and fixture coverage was retained or updated to current entry points.
 
+## Real Smoke Test Workflow Closure
+
+- Proposal 初始化只使用当前 `proposal.md`；作者直接编辑原文件。Volume Plan 生成后只提示直接审阅并进入 Chapter Planning，不再提供或要求 `approve-volume` CLI。
+- 初始化和新卷全局规划向下游传递完整的 proposal、world setting 与 Book Plan。简单 token guard 按字符数保守估算输入，并与当前 ARCHITECT slot 的 `MAX_TOKENS` 合并判断；达到 100,000-token 安全预算时在 LLM 调用前中文拒绝，列出各正式文档估算值，绝不静默截断或摘要。
+- `AGENT_EXECUTION=autonomous|supervised` 只调整 Agent workflow 的人工检查策略；`CHAPTER_MODE=human` 继续复用同一 Canonical/Derivation seam。
+- Review payload 与 CLI 显示完整 issues/reasons。Plan failure 使用 `agent_edit / human_edit / restart`；Prose failure额外支持 `regenerate_prose`。自主模式只做有限 `agent_edit`，不会自动 restart 或 regenerate。
+- `restart` CLI 与 Review action 共用 `ChapterWorkflowRunner.restart()`：保留 Canonical Chapter Intent 和既有正式历史，删除本章 Plan、Prose、Review、Writing Context、RAG trace 与 checkpoint；Canonical 已存在时 fail closed。
+- `plan`、`write`、`continue` 和 continuous `run` 共用章节进度/Derivation gate。Canonical 尚未达到 `DERIVED_READY` 时禁止后续章节。
+- `python main.py continue <novel>` 是统一当前状态入口：优先返回 WAITING_HUMAN、恢复现有 Pre-Canonical checkpoint、调用同一 Derivation repair、处理 Volume/Human 边界，最后才创建下一章。
+- `python main.py run <novel> --to-chapter N` 仅用于 Agent + autonomous，循环复用同一 continuation router；目标明确、可重复执行，并跳过已完成章节。
+
 ## Verification
 
-- Story Savepoint、自动 Savepoint、模型槽位和 Embedding 新增覆盖已纳入完整回归。
-- 模型配置 focused tests：26 passed。
-- 完整 unittest suite：186 passed。
-- `py_compile` 与 `git diff --check` 通过。
+- Smoke closure focused tests：18 passed。
+- 完整 unittest suite：205 passed。
+- `py_compile`、workflow graph build 与 `git diff --check` 通过。
 
 ## Next Task
 
-E07 Real End-to-End Smoke Test。未经明确任务，不调用真实 API。
+使用真实模型凭证执行 Real End-to-End Smoke Test。未经明确任务，不调用真实 API。

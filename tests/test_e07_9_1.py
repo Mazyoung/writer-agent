@@ -54,6 +54,10 @@ class E0791Case(unittest.TestCase):
         self.addCleanup(setattr, settings, "rag_top_k", old_top_k)
         self.settings = settings
         self.fs = FileStore("human-mode", settings.data_dir)
+        self.progress_guard = patch(
+            "src.workflows.chapter_progress.ensure_chapter_can_start"
+        ).start()
+        self.addCleanup(self.progress_guard.stop)
 
     @staticmethod
     def retrieval_outcome() -> RetrievalOutcome:

@@ -50,6 +50,20 @@ class ChapterPlanner(BaseAgent):
                 "\n旧数据: 运行 python scripts/migrate_legacy_data.py <小说名> "
                 "从 plot_structure.md 迁移。")
         active = VolumePlan.from_markdown(volume_plan)
+        if active.status.upper() == "DRAFT":
+            pattern = r'(\*\*状态\*\*\s*[:：]\s*)DRAFT\b'
+            volume_plan = re.sub(
+                pattern, r'\g<1>ACTIVE', volume_plan, count=1,
+                flags=re.IGNORECASE,
+            )
+            (self.fs.root / "tracking" / "volume_plan.md").write_text(
+                volume_plan, encoding="utf-8"
+            )
+            active = VolumePlan.from_markdown(volume_plan)
+            print(
+                f"  [Volume] 第{active.volume_number}卷已在 Chapter Planning "
+                "开始时确认为 ACTIVE。"
+            )
         if active.status.upper() != "ACTIVE":
             raise ValueError(
                 "章节规划需要 ACTIVE 状态的 volume_plan.md；"
@@ -199,6 +213,45 @@ class ChapterPlanner(BaseAgent):
             use_canonical=True,
         )
         return ChapterPlan.from_markdown(result.content)
+
+    def revise_plan(
+        self,
+        *,
+        chapter_index: int,
+        current_plan: str,
+        review_issues: list[str],
+        planning_context: str,
+        chapter_intent: str = "",
+        human_feedback: str = "",
+    ) -> str:
+        issues = "\n".join(
+            f"- {issue}" for issue in review_issues if str(issue).strip()
+        )
+        prompt = f"""## 当前 Chapter Plan
+{current_plan}
+
+## Plan Review 明确问题
+{issues or "- 未提供结构化问题；请保持原规划并修复 Review 指出的缺陷"}
+
+## 原 Planning Context
+{planning_context}
+
+## Chapter Intent
+{chapter_intent or "无"}
+
+## 作者补充反馈
+{human_feedback or "无"}
+
+---
+保留当前 Plan 中没有问题的部分，只修改 Review 明确指出的问题。
+输出完整修订版 Chapter Plan，不写解释。"""
+        result = self.run(
+            user_message=prompt,
+            save_category="outlines",
+            save_prefix=f"chapter_plan_ch{chapter_index:04d}",
+            use_canonical=True,
+        )
+        return result.content
 
     def assemble_context_package(self, chapter_index: int) -> ContextPackage:
         """从追踪文档组装 Part B 上下文包（无需 LLM 调用）。

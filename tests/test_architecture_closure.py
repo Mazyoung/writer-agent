@@ -189,6 +189,9 @@ class TestSemanticSeparation(ClosureCase):
         waiting = runner.run()
         self.assertEqual(waiting["workflow_status"], "WAITING_HUMAN")
         payload = waiting["interrupts"][0]["value"]
+        self.assertEqual(payload["type"], "plan_review")
+        waiting = runner.resume({"action": "approve"})
+        payload = waiting["interrupts"][0]["value"]
         self.assertEqual(payload["type"], "final_author_approval")
         self.assertIn("approve", payload["allowed_actions"])
         self.assertFalse(self.fs.canonical_chapter_path(1).exists())
@@ -200,14 +203,14 @@ class TestSemanticSeparation(ClosureCase):
         mocks["manager"].return_value.update_tracking_docs.assert_not_called()
 
 
-class TestPauseAndDiscard(ClosureCase):
-    def test_pause_keeps_interrupt_and_discard_preserves_intent(self):
+class TestRestart(ClosureCase):
+    def test_restart_discards_candidates_and_preserves_intent(self):
         runner = ChapterWorkflowRunner("closure", 1)
         pending = MagicMock()
         pending.id = "interrupt-1"
         pending.value = {
             "type": "chapter_review",
-            "allowed_actions": ["pause", "discard"],
+            "allowed_actions": ["restart"],
         }
         snapshot = MagicMock(
             interrupts=[pending], values={"verdict": "NEEDS_REVISION"})
@@ -221,12 +224,8 @@ class TestPauseAndDiscard(ClosureCase):
         self.fs.save("chapters", "chapter_0001_styled", "candidate")
         self.fs.save_canonical("outlines", "chapter_plan_ch0001", PLAN_TEXT)
 
-        paused = runner.resume({"action": "pause"})
-        self.assertEqual(paused["workflow_status"], "WAITING_HUMAN")
-        graph.invoke.assert_not_called()
-
-        discarded = runner.resume({"action": "discard"})
-        self.assertEqual(discarded["workflow_status"], "DISCARDED")
+        restarted = runner.resume({"action": "restart"})
+        self.assertEqual(restarted["workflow_status"], "RESTARTED")
         self.assertEqual(
             self.fs.load_canonical("briefs", "chapter_intent_ch0001"),
             "preserve me",

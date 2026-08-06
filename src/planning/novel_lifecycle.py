@@ -5,6 +5,7 @@ import re
 from src.agents.architect.plot_designer import PlotDesigner
 from src.agents.architect.world_builder import WorldBuilder
 from src.config.settings import get_settings
+from src.core.token_guard import guard_planning_context
 from src.core.novel_status import NovelStatusService
 from src.planning.models import PlanRevision, PlanType, RevisionStatus
 from src.planning.store import PlanningStore
@@ -103,7 +104,8 @@ class NovelLifecycleService:
             use_canonical=True,
         )
         print(f"\n提案已生成 -> data/novels/{self.novel_id}/proposal.md")
-        print(f"请编辑后保存为 proposal_edited.md，然后运行: python main.py init {self.novel_id} --confirm")
+        print("请直接审阅并编辑 proposal.md，然后运行：")
+        print(f"python main.py init {self.novel_id} --confirm")
         return result.content
 
     def initialize_novel(self, proposal: str) -> dict:
@@ -119,6 +121,10 @@ class NovelLifecycleService:
         print(f"{'='*60}\n")
 
         print("[1/3] 世界观构建师工作中...")
+        guard_planning_context(
+            get_settings().get_model_slot("architect"),
+            {"proposal.md": proposal},
+        )
         world_prompt = f"""## 已确认的创作提案
 {proposal}
 
@@ -138,11 +144,15 @@ class NovelLifecycleService:
         ws = self.file_store.load_canonical("settings", "world_setting") or world_setting
 
         print("[2/3] 情节设计师工作中...（Book Plan v1 / 战略层）")
+        guard_planning_context(
+            get_settings().get_model_slot("architect"),
+            {"proposal.md": proposal, "world_setting.md": ws},
+        )
         book_prompt = f"""## 已确认的创作提案
 {proposal}
 
 ## 世界观设定
-{ws[:5000]}
+{ws}
 
 ---
 请根据以上内容，生成全书战略规划（Book Plan）。本次输出格式以本消息为准。
@@ -191,14 +201,25 @@ Book Plan 是整本书的长期战略，只写长期有效的内容：
         print(f"  Book Plan 已解析: 《{bp.title}》v{bp.version}，{len(bp.volumes)} 卷框架")
 
         print("[3/3] 情节设计师工作中...（Volume 1 Plan v1 / 战术层）")
+        # Parsing above is validation only. The next stage must receive the
+        # complete canonical document, including author-added sections.
+        book_plan_markdown = book_plan
+        guard_planning_context(
+            get_settings().get_model_slot("architect"),
+            {
+                "proposal.md": proposal,
+                "world_setting.md": ws,
+                "book_plan.md": book_plan_markdown,
+            },
+        )
         volume_prompt = f"""## 已确认的创作提案
 {proposal}
 
 ## World Setting
-{ws[:4000]}
+{ws}
 
 ## Book Plan
-{bp.to_markdown()[:5000]}
+{book_plan_markdown}
 
 ---
 生成第一卷的卷级大故事路径。不要规定章节范围，不要把事件分配到具体章节，
@@ -239,8 +260,11 @@ Book Plan 是整本书的长期战略，只写长期有效的内容：
         print(f"  tracking/book_plan.md   (Book Plan v1 / 战略层)")
         print(f"  tracking/volume_plan.md (Volume 1 Plan v1 / DRAFT)")
         print(f"  tracking/current_state.md (generated present state)")
-        print(f"\n下一步: 直接审阅并编辑上述原文件，然后 approve-volume，")
-        print(f"        确认 ACTIVE 后运行: python main.py plan {self.novel_id} --chapter 1")
+        print("\nVolume Plan 已生成。")
+        print("\n请直接审阅并编辑：")
+        print(f"{self.file_store.root / 'tracking' / 'volume_plan.md'}")
+        print("\n确认当前规划可用后，运行：")
+        print(f"\npython main.py plan {self.novel_id} --chapter 1")
         return {"world_setting": world_setting, "book_plan": book_plan,
                 "volume_plan": volume_plan}
 
@@ -308,17 +332,26 @@ Book Plan 是整本书的长期战略，只写长期有效的内容：
         if new_index <= previous.volume_number:
             raise ValueError("下一卷编号必须大于已关闭卷的编号")
 
+        guard_planning_context(
+            get_settings().get_model_slot("architect"),
+            {
+                "world_setting.md": world_setting,
+                "book_plan.md": book_plan,
+                "previous_volume_plan.md": previous_text,
+                "current_state.md": current_state,
+            },
+        )
         prompt = f"""## World Setting
-{world_setting[:5000]}
+{world_setting}
 
 ## Book Plan
-{book_plan[:5000]}
+{book_plan}
 
 ## Previous Volume Plan (COMPLETED)
-{previous_text[:5000]}
+{previous_text}
 
 ## Current State after Previous Volume
-{current_state[:5000]}
+{current_state}
 
 ## Optional User Next-Volume Intent
 {notes or "（无）"}
@@ -350,7 +383,10 @@ per-chapter outline. Output exactly this Markdown structure:
         ).content
         self._validate_volume_candidate(candidate, new_index, expected_status="DRAFT")
         self.file_store.save_canonical("tracking", "volume_plan", candidate)
-        print("  [Next Volume] tracking/volume_plan.md 已生成，状态 DRAFT；请直接编辑原文件后 approve-volume。")
+        print("\nVolume Plan 已生成。")
+        print("\n请直接审阅并编辑：")
+        print(self.file_store.root / "tracking" / "volume_plan.md")
+        print("\n确认当前规划可用后，直接运行下一章 plan 命令。")
         return candidate
 
     def approve_volume(self) -> str:

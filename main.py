@@ -11,7 +11,7 @@
     python main.py plan <小说名> --chapter N --instructions "..."  # 额外指示
 
     # 新卷（Rolling Horizon）
-    python main.py new-volume <小说名>              # 人工 close 后生成下一卷 DRAFT，直接编辑后 approve
+    python main.py new-volume <小说名>              # 人工 close 后生成下一卷 DRAFT，直接审阅编辑
     python main.py new-volume <小说名> --volume 3 --notes "..."  # 指定卷号 + 补充指示
 
     # 写作
@@ -49,9 +49,11 @@ from src.storage.story_savepoint import SavepointError, StorySavepointManager
 from src.workflows.chapter_editing import ChapterEditingService
 from src.workflows.chapter_runner import (
     repair_chapter_derivation,
+    restart_chapter_workflow,
     resume_chapter_workflow,
     run_chapter_workflow,
 )
+from src.workflows.continuation import NovelContinuationService
 
 
 def _safe_print(text: str, max_len: int = 500):
@@ -148,24 +150,15 @@ def cmd_init(args):
             return
         lifecycle = NovelLifecycleService(args.name)
         novel_dir = lifecycle.file_store.root
-        edited_path = novel_dir / "proposal_edited.md"
         canonical_path = novel_dir / "proposal.md"
 
-        if edited_path.exists():
-            proposal = edited_path.read_text(encoding="utf-8")
-            print("使用 proposal_edited.md [HUMAN OVERRIDE]")
-        elif canonical_path.exists():
+        if canonical_path.exists():
             proposal = canonical_path.read_text(encoding="utf-8")
-            print("使用 proposal.md [AI CANONICAL]")
+            print("使用当前 proposal.md")
         else:
-            proposal = lifecycle.file_store.load_latest("", "proposal")
-            if proposal:
-                print("使用 legacy proposal [COMPAT]")
-            else:
-                print("未找到创作提案。先运行: python main.py init <小说名>")
-                return
+            print("未找到 proposal.md。请先运行: python main.py init <小说名>")
+            return
         lifecycle.initialize_novel(proposal)
-        print(f"\n下一步: python main.py plan {args.name} --chapter 1")
         return
 
     # Phase 1: 生成创作提案
@@ -177,7 +170,7 @@ def cmd_init(args):
         proposal_path = novel_dir / "proposal.md"
         if proposal_path.exists():
             print(f"小说 '{args.name}' 已存在。")
-            print(f"  编辑 proposal.md 后保存为 proposal_edited.md，然后: python main.py init {args.name} --confirm")
+            print(f"  请直接编辑 proposal.md，然后运行: python main.py init {args.name} --confirm")
             print(f"  或 --force 重新生成提案")
             return
     lifecycle = NovelLifecycleService(args.name)
@@ -265,11 +258,85 @@ def _cmd_plan_interactive(planning, args):
     print(f"\n  下一步: python main.py write {args.name} --chapter {args.chapter}")
 
 
+def _print_chapter_result(name: str, chapter: int, result: dict) -> None:
+    status = result.get("workflow_status", "error")
+    if status == "DERIVED_READY":
+        print(f"\n第 {chapter} 章已完整完成（DERIVED_READY）。")
+        return
+    if status == "DERIVATION_ERROR":
+        print(
+            f"\n第 {chapter} 章正文已经 Canonical Commit，"
+            "但派生过程尚未完成。"
+        )
+        print(
+            f"请执行：python main.py repair-derivation {name} "
+            f"--chapter {chapter}"
+        )
+        return
+    if status == "RESTARTED":
+        print(f"\n第 {chapter} 章的 Pre-Canonical 内容已放弃，Chapter Intent 已保留。")
+        return
+    if status == "BLOCKED":
+        print(f"\n{result.get('error', '当前没有合法的下一步。')}")
+        return
+    if status != "WAITING_HUMAN":
+        print(f"\n章节工作流已中止：{result.get('error', status)}")
+        return
+
+    pending = result.get("interrupts", [])
+    payload = pending[0].get("value", {}) if pending else {}
+    kind = payload.get("type", "unknown")
+    if kind == "human_writing":
+        print("\n【人工创作模式】")
+        print(f"\n第 {chapter} 章正在等待作者提交正文。")
+        print(f"Writing Context：{payload.get('writing_context_path', '')}")
+        print(
+            f"python main.py write {name} --chapter {chapter} "
+            "--action submit --file <正文文件>"
+        )
+        return
+
+    labels = {
+        "plan_review": "Plan Review",
+        "chapter_review": "Prose Review",
+        "final_author_approval": "Prose Review",
+        "human_final_approval": "Consistency Review",
+        "review_override_confirmation": "Review Override",
+    }
+    print(f"\n第 {chapter} 章正在等待人工处理。")
+    print(f"\n{labels.get(kind, kind)}：{payload.get('verdict', 'UNKNOWN')}")
+    issues = []
+    for item in [
+        *payload.get("t1_issues", []),
+        *payload.get("reasons", []),
+    ]:
+        if item and item not in issues:
+            issues.append(item)
+    if issues:
+        print("\n具体问题：")
+        for index, issue in enumerate(issues, 1):
+            print(f"{index}. {issue}")
+    print("\n可选操作：")
+    display = {
+        "agent_edit": "agent edit",
+        "human_edit": "human edit",
+        "regenerate_prose": "regenerate prose",
+        "restart": "restart",
+        "approve": "approve",
+        "confirm_override": "confirm override",
+        "back": "back",
+    }
+    for action in payload.get("allowed_actions", []):
+        print(f"  {display.get(action, action)}")
+    if payload.get("edit_path"):
+        print(f"\n编辑文件：{payload['edit_path']}")
+
+
 def cmd_write(args):
     if not _get_novel_dir(args.name):
         return
 
-    resume_feedback = getattr(args, "resume", None)
+    feedback = getattr(args, "feedback", "") or ""
     requested_action = getattr(args, "action", None)
     try:
         if requested_action:
@@ -278,21 +345,9 @@ def cmd_write(args):
                 args.chapter,
                 {
                     "action": requested_action,
-                    "feedback": resume_feedback or "",
+                    "feedback": feedback,
                     "candidate_file": getattr(args, "candidate_file", "") or "",
                 },
-            )
-        elif getattr(args, "stop", False):
-            result = resume_chapter_workflow(
-                args.name,
-                args.chapter,
-                {"action": "stop", "feedback": resume_feedback or ""},
-            )
-        elif resume_feedback is not None:
-            result = resume_chapter_workflow(
-                args.name,
-                args.chapter,
-                {"action": "edit", "feedback": resume_feedback},
             )
         else:
             result = run_chapter_workflow(
@@ -305,85 +360,13 @@ def cmd_write(args):
         print(f"\n  章节工作流恢复请求被拒绝：{exc}")
         return
 
-    status = result.get("workflow_status", "error")
-    verdict = (
-        result.get("consistency_verdict")
-        or result.get("verdict", "UNKNOWN")
-    )
-    if status == "DERIVED_READY":
-        print(f"\n  章节工作流已完成：审阅结论={verdict}")
-        for warning in result.get("derived_state_errors", []):
-            print(f"  [派生状态错误] {warning}")
-        return
-    if status == "DERIVATION_ERROR":
-        print("\n  Canonical 章节已提交；派生失败，可使用 repair-derivation 重试。")
-        for warning in result.get("derived_state_errors", []):
-            print(f"  [派生错误] {warning}")
-        return
-    if status == "DISCARDED":
-        print("\n  Candidate/checkpoint 已放弃；Chapter Intent 已保留。")
-        return
-    if status == "WAITING_HUMAN":
-        pending_items = result.get("interrupts", [])
-        payload = pending_items[0].get("value", {}) if pending_items else {}
-        interrupt_type = payload.get("type", "unknown")
-        if interrupt_type == "human_writing":
-            print("\n【人工创作模式】")
-            print("\n本章相关历史信息已经整理完成：")
-            print(f"\nWriting Context：\n{payload.get('writing_context_path', '')}")
-            print("\n请根据上述资料自行完成正文。")
-            print("完成后提交 Candidate 继续一致性检查：")
-            print(
-                f"  python main.py write {args.name} --chapter {args.chapter} "
-                "--action submit --file <正文文件>"
-            )
-            return
-        if interrupt_type == "human_final_approval":
-            consistency = payload.get("verdict", "UNKNOWN")
-            if consistency == "CLEAN":
-                print("\n一致性检查完成，未发现明确的历史事实或状态冲突。")
-            else:
-                print("\n⚠ 一致性警告")
-                print("\n系统发现以下可能的连续性问题：")
-                for reason in payload.get("reasons", []) or ["未提供具体说明"]:
-                    print(f"  - {reason}")
-                print("\n这些提示不会自动否决作者的设定。")
-                print("你可以修改正文，也可以确认这是有意设计后继续提交。")
-            print(f"\n人工修改文件：{payload.get('edit_path', '')}")
-            print("操作：--action approve|manual_edit|pause|discard")
-            return
-        if interrupt_type == "review_override_confirmation":
-            print("\n⚠ 当前审阅尚未通过")
-            print(f"\n当前审阅结论：{payload.get('verdict', 'UNKNOWN')}")
-            for reason in payload.get("reasons", []):
-                print(f"  - {reason}")
-            print("\n如果继续，本章将按当前版本正式提交。")
-            print("原审阅结论不会被修改，并会记录本次提交是作者主动确认的结果。")
-            print("\n请再次确认你仍然希望提交当前版本：")
-            print("  --action confirm_override")
-            print("返回上一审批步骤：--action back")
-            return
-
-        print(f"\n章节工作流正在等待人工处理：审阅结论={verdict}")
-        print(f"  Interrupt ID：{pending_items[0].get('id', '') if pending_items else ''}")
-        print(f"  类型：{interrupt_type}")
-        print(f"  规划层级：{payload.get('planning_level', 'L1')}")
-        print(f"  编辑文件：{payload.get('edit_path', '')}")
-        for reason in payload.get("reasons", [])[:5]:
-            print(f"    - {reason}")
-        print(
-            "  可用操作：--action approve|agent_edit|manual_edit|regenerate|"
-            "pause|discard（manual_edit 会读取上方 Edit file）。"
+    if result.get("workflow_status") == "RESTARTED":
+        result = run_chapter_workflow(
+            args.name,
+            args.chapter,
+            chapter_intent=getattr(args, "chapter_intent", "") or "",
         )
-        print(
-            "  或停止本次执行：python main.py write "
-            f"{args.name} --chapter {args.chapter} --stop"
-        )
-        return
-    if status == "STOPPED_NON_PASS":
-        print(f"\n  章节工作流已在人工审阅后停止：审阅结论={verdict}")
-        return
-    print(f"\n  章节工作流已中止：{result.get('error', status)}")
+    _print_chapter_result(args.name, args.chapter, result)
 
 
 def cmd_style(args):
@@ -405,6 +388,45 @@ def cmd_repair_derivation(args):
     print(f"Derivation 修复结果：{result.get('workflow_status', 'ERROR')}")
 
 
+def cmd_restart(args):
+    if not _get_novel_dir(args.name):
+        return
+    try:
+        restart_chapter_workflow(args.name, args.chapter)
+        result = run_chapter_workflow(args.name, args.chapter)
+    except ValueError as exc:
+        print(f"restart 被拒绝：{exc}")
+        return
+    _print_chapter_result(args.name, args.chapter, result)
+
+
+def cmd_continue(args):
+    if not _get_novel_dir(args.name):
+        return
+    try:
+        result = NovelContinuationService(args.name).continue_once()
+    except ValueError as exc:
+        print(f"continue 被拒绝：{exc}")
+        return
+    chapter = int(result.get("chapter_index", 0) or 0)
+    _print_chapter_result(args.name, chapter, result)
+
+
+def cmd_run(args):
+    if not _get_novel_dir(args.name):
+        return
+    try:
+        result = NovelContinuationService(args.name).run_to_chapter(
+            args.to_chapter
+        )
+    except ValueError as exc:
+        print(f"run 被拒绝：{exc}")
+        return
+    _print_chapter_result(
+        args.name, int(result.get("chapter_index", args.to_chapter)), result
+    )
+
+
 def cmd_close_volume(args):
     if not _get_novel_dir(args.name):
         return
@@ -413,14 +435,6 @@ def cmd_close_volume(args):
     except (FileNotFoundError, ValueError) as exc:
         print(str(exc))
 
-
-def cmd_approve_volume(args):
-    if not _get_novel_dir(args.name):
-        return
-    try:
-        NovelLifecycleService(args.name).approve_volume()
-    except (FileNotFoundError, ValueError) as exc:
-        print(str(exc))
 
 def cmd_new_volume(args):
     if not _get_novel_dir(args.name):
@@ -530,17 +544,26 @@ def main():
         "--intent", "--instructions", dest="chapter_intent",
         help="可选 Chapter Intent（--instructions 为兼容别名）",
     )
-    p.add_argument("--resume", help="提交人工编辑并记录反馈")
+    p.add_argument("--feedback", help="提供给 agent edit 的可选人工反馈")
     p.add_argument("--file", dest="candidate_file", help="人工正文 Candidate 文件路径")
     p.add_argument(
         "--action",
         choices=[
             "submit", "approve", "confirm_override", "back",
-            "agent_edit", "manual_edit", "regenerate", "pause", "discard",
+            "agent_edit", "human_edit", "regenerate_prose", "restart",
         ],
-        help="恢复当前章节工作流 interrupt 的操作 token",
+        help="处理当前章节工作流人工检查点",
     )
-    p.add_argument("--stop", action="store_true", help="停止当前等待人工处理的执行")
+
+    # continue / autonomous run / restart
+    p = subparsers.add_parser("continue", help="从小说当前唯一合法状态继续")
+    p.add_argument("name")
+    p = subparsers.add_parser("run", help="自主模式连续创作到明确目标章节")
+    p.add_argument("name")
+    p.add_argument("--to-chapter", type=int, required=True)
+    p = subparsers.add_parser("restart", help="放弃本章 Pre-Canonical 内容并重新规划")
+    p.add_argument("name")
+    p.add_argument("--chapter", type=int, required=True)
 
     # style
     p = subparsers.add_parser("style", help="Claude风格编辑")
@@ -551,10 +574,8 @@ def main():
     p = subparsers.add_parser("repair-derivation", help="恢复 canonical 后未完成的 derivation")
     p.add_argument("name"); p.add_argument("--chapter", type=int, required=True)
 
-    # close/approve volume
+    # volume lifecycle
     p = subparsers.add_parser("close-volume", help="人工关闭当前 ACTIVE 卷")
-    p.add_argument("name")
-    p = subparsers.add_parser("approve-volume", help="批准直接编辑后的 DRAFT volume_plan.md")
     p.add_argument("name")
     # new-volume
     p = subparsers.add_parser("new-volume", help="已人工关闭当前卷后生成下一卷 DRAFT")
@@ -601,8 +622,10 @@ def main():
         "style": cmd_style,
         "new-volume": cmd_new_volume,
         "close-volume": cmd_close_volume,
-        "approve-volume": cmd_approve_volume,
         "repair-derivation": cmd_repair_derivation,
+        "restart": cmd_restart,
+        "continue": cmd_continue,
+        "run": cmd_run,
         "rag-index": cmd_rag_index,
         "savepoint": cmd_savepoint,
     }

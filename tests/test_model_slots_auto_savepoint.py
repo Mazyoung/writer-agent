@@ -44,7 +44,8 @@ MODEL_ENV_KEYS = {
     "PLAN_MODEL", "WRITE_PROVIDER", "WRITE_API_KEY", "WRITE_BASE_URL",
     "WRITE_MODEL", "WRITE_MAX_TOKENS",
     "DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL",
-    "CHAPTER_MODE", "RAG_TOP_K", "AUTO_SAVEPOINT_EVERY", "EMBEDDING_MODE",
+    "CHAPTER_MODE", "AGENT_EXECUTION", "RAG_TOP_K", "AUTO_SAVEPOINT_EVERY",
+    "EMBEDDING_MODE",
     "EMBEDDING_API_KEY", "EMBEDDING_BASE_URL", "EMBEDDING_MODEL",
     "EMBEDDING_DIMENSIONS",
 }
@@ -104,6 +105,13 @@ class ModelSlotSettingsTests(unittest.TestCase):
             {name: AGENT_MODEL_POLICIES[name].slot for name in expected},
         )
         self.assertEqual("local", settings.embedding_mode)
+        self.assertEqual("supervised", settings.agent_execution)
+
+    def test_agent_execution_policy_validation(self):
+        settings = self._settings("AGENT_EXECUTION=autonomous\n")
+        self.assertEqual("autonomous", settings.agent_execution)
+        with self.assertRaisesRegex(ValueError, "AGENT_EXECUTION"):
+            self._settings("AGENT_EXECUTION=unbounded\n")
 
     def test_explicit_provider_uses_own_connection(self):
         settings = self._settings(
