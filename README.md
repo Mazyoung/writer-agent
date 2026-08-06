@@ -1,513 +1,1279 @@
 # Writer-Agent
 
-> 你可以把整本小说交给它尝试生成；  
-> 也可以只给它一章的方向；  
-> 还可以自己完成真正的创作，把繁琐的长期记忆、状态整理和内容管理交给 Agent。
->
-> **自动化到什么程度，由作者决定。**
+Writer-Agent 是一个面向长篇小说创作的本地 Agent 工作流。
 
-**Writer-Agent 是一个面向长篇小说创作的 AI 写作与内容管理工具。**
+它的目标不是单纯“让 AI 自动写小说”，而是让作者自行决定自动化程度：
 
-它既可以作为简单的自动小说生成程序，也可以成为小说爱好者的人机共创工具，或者辅助长期创作者管理人物、事件、伏笔、物品和故事状态。
+| 使用方式 | 谁规划 | 谁写正文 | 系统负责                                     |
+| -------- | ------ | -------- | -------------------------------------------- |
+| 自主创作 | Agent  | Agent    | RAG、规划、写作、审阅、状态维护              |
+| 监督创作 | Agent  | Agent    | 同上，但关键阶段等待作者确认                 |
+| 数据管理 | 作者   | 作者     | 检索历史信息、连续性检查、状态与长期记忆维护 |
 
----
-
-## Writer-Agent 能做什么？
-
-### 一套系统，不同的创作方式
-
-| 使用方式 | 适合谁 | Writer-Agent 可以做什么 |
-|---|---|---|
-| **自动写作** | 想快速生成故事 | 从整体规划到章节写作持续推进 |
-| **轻度参与** | 小说爱好者 | 给某一章提出要求，让 Agent 完成具体创作 |
-| **共同创作** | 希望控制剧情方向的作者 | 审阅规划、修改正文、要求重写或局部调整 |
-| **深度控制** | 有明确创作思路的作者 | 自己维护全书与分卷规划，只让 Agent 辅助执行 |
-| **内容管理** | 长篇作者 | 管理历史事实、人物状态、物品、伏笔和章节连续性 |
-
-你不需要在开始时决定一种固定模式。
-
-同一本小说可以从自动生成开始，之后随时逐渐增加人工参与。
-
----
-
-## 分层控制故事
-
-Writer-Agent 将长篇小说拆成三个层次：
-
-| 层级 | 负责什么 |
-|---|---|
-| **全书规划** | 整本小说的长期方向、核心冲突和总体目标 |
-| **分卷规划** | 当前一卷准备经历怎样的故事过程 |
-| **章节规划** | 根据当前剧情，决定这一章具体发生什么 |
-
-整体关系大致是：
+所有模式最终都共享同一套正式故事状态：
 
 ```text
-全书方向
-   ↓
-当前卷故事路径
-   ↓
-当前故事状态
-   ↓
-这一章应该发生什么
-   ↓
-生成正文
-```
-
-这样，小说不需要在第一天就把几十甚至上百章完全固定下来。
-
-故事可以随着实际创作结果不断向前发展。
-
----
-
-## 你可以随时介入
-
-每一章都可以加入自己的 **Chapter Intent**。
-
-例如：
-
-```text
-这一章增加林默和苏晴之间的信任，
-但不要解释芯片真正的来源。
-```
-
-Agent 会把它作为当前章节的重要创作要求。
-
-在正文生成之后，你还可以决定下一步：
-
-| 操作 | 含义 |
-|---|---|
-| `approve` | 接受当前正文 |
-| `agent_edit` | Agent 根据 Review 的具体问题修改当前内容 |
-| `human_edit` | 作者直接修改当前 Plan 或 Prose |
-| `regenerate_prose` | 保留 Approved Plan，只重新生成正文 |
-| `restart` | 保留 Chapter Intent，放弃本章全部 Pre-Canonical 内容并重新规划 |
-
-因此，Agent 负责提供方案和执行创作，但最终采用什么内容仍然由作者决定。
-
----
-
-## 面向长篇创作的长期记忆
-
-小说越长，需要记住的内容越多：
-
-- 某个人物以前做过什么；
-- 两个人目前是什么关系；
-- 一件重要物品现在在哪里；
-- 某个秘密什么时候被提到过；
-- 哪些伏笔还没有回收；
-- 某段剧情是否和几十章前发生的事情冲突。
-
-Writer-Agent 会持续整理已经确认的故事事实，并在后续创作时重新使用这些信息。
-
-因此，它不只是“写下一段文字”，而是尽量保持整部长篇小说的连续性。
-
----
-
-## 记录故事“现在是什么状态”
-
-除了记住过去发生过什么，Writer-Agent 还会持续维护故事当前状态。
-
-例如：
-
-| 类型 | 示例 |
-|---|---|
-| 人物 | 当前所在地、身份、关系、状态 |
-| 物品 | 当前持有者、所在地、是否已经使用 |
-| 剧情 | 当前主要矛盾、正在推进的任务 |
-| 伏笔 | 已发现、未解决、已回收 |
-| 进度 | 当前章节和当前卷的发展位置 |
-
-这让后面的章节可以直接从“现在”继续，而不必每次重新推断整本小说的状态。
-
----
-
-## 尽量避免长篇项目出现状态不一致
-
-长篇小说不只有正文，还会伴随人物状态、历史事实、伏笔和故事进度等大量信息。
-
-Writer-Agent 会把：
-
-```text
-正文确认
-   ↓
-正式保存
-   ↓
-更新相关故事信息
-   ↓
+创作意图（Intent）
+        ↓
+历史信息召回（RAG）
+        ↓
+章节规划（Plan）
+        ↓
+规划审阅
+        ↓
+正文创作
+        ↓
+正文审阅
+        ↓
+作者确认
+        ↓
+正式章节提交
+        ↓
+更新故事状态与历史记忆
+        ↓
 进入下一章
 ```
 
-作为一个完整流程处理。
+正文只有经过正式批准并完成作者确认后，才属于小说的真正在维护的历史。
 
-如果后续的信息整理出现问题，已经确认的正文仍然保留，并可以单独继续完成尚未完成的整理。
+------
 
-这样可以尽量避免：
+# 1. 核心概念
 
-> 正文已经是新版本，但人物状态还停留在旧版本。
+## Canonical Prose（正式章节）
 
----
+正式章节位于：
 
-# 如何使用
+```text
+data/novels/<novel_id>/chapters/chapter_NNNN.md
+```
 
-## 1. 安装
+Canonical 正文创建后，普通章节生成不能覆盖它。
+
+Canonical Commit 是小说事实成立的边界。
+
+------
+
+## DERIVED_READY
+
+Canonical 成立后，系统继续派生：
+
+```text
+Canonical Prose
+→ Current State
+→ Fact Digest
+→ Atomic Facts
+→ Volume Progress
+→ Chapter Sources
+→ Chroma
+→ DERIVED_READY
+```
+
+只有全部完成后，本章才达到：
+
+```text
+DERIVED_READY
+```
+
+如果正文已经 Canonical，但派生中途失败，正文不会撤销。
+
+会继续或修复 Derivation，而不是重新生成正文。
+
+------
+
+## Story Savepoint
+
+Story Savepoint 是整个小说创作世界的长期存档。
+
+它与 LangGraph 的章节执行 checkpoint 是两个不同概念：
+
+```text
+LangGraph Checkpoint
+= 章节内部执行到哪里
+
+Story Savepoint
+= 整个小说在某个正式章节结束后的完整状态
+```
+
+可以从旧 Savepoint 跳到早期状态，也可以之后再次加载较新的 Savepoint。
+
+------
+
+# 2. 安装
+
+建议使用独立 Python 环境。
+
+安装依赖：
 
 ```bash
-git clone https://github.com/Mazyoung/writer-agent.git
-cd writer-agent
-
 python -m pip install -r requirements.txt
 ```
 
----
+项目正常 CLI 运行要求根目录存在：
 
-## 2. 配置模型
+```text
+.env
+```
 
-项目根目录的 `.env` 是正式配置入口，所有正常 CLI 命令执行前都会检查该文件。首次使用请运行：
+可以从模板复制：
 
-```bat
+Windows：
+
+```powershell
 copy .env.example .env
 ```
 
-如果 `.env` 不存在，CLI 会在 Settings、LLM、Embedding 和任何小说状态写入之前直接退出。LLM 使用四个职责槽位：
+Linux / macOS：
 
-- `ARCHITECT`：全书、世界观和分卷规划
-- `PLAN`：章节规划与规划审阅
-- `WRITE`：正文创作、风格处理、`agent_edit` 和 `regenerate_prose`
-- `SYSTEM`：正文审阅、连续性检查、Derivation 和状态管理
+```bash
+cp .env.example .env
+```
 
-每个 slot 都包含 `PROVIDER / API_KEY / BASE_URL / MODEL / MAX_TOKENS`。支持 `deepseek`、`openai_compatible` 和 `anthropic`。
+然后填写自己的模型配置。
 
-`ARCHITECT`、`PLAN`、`WRITE` 的 connection 字段留空时继承 `SYSTEM`。如果显式填写某个 slot 的 `PROVIDER`，该 slot 使用自己的 connection，不再继承 SYSTEM 的 Key 或 Base URL。每个 slot 的 `MODEL` 必须单独填写，绝不继承 `SYSTEM_MODEL`。
+API Key 不应提交到 Git。
 
-例如：
+------
+
+# 3. 模型配置
+
+Writer-Agent 使用四个主模型槽位。
+
+| Slot        | 主要职责                                        |
+| ----------- | ----------------------------------------------- |
+| `ARCHITECT` | Proposal、World Setting、Book Plan、Volume Plan |
+| `PLAN`      | Chapter Planner、Plan Review                    |
+| `WRITE`     | Writer、Stylist、正文改写                       |
+| `SYSTEM`    | Prose Review、Consistency、Derivation、状态管理 |
+
+支持 Provider：
+
+```text
+deepseek
+openai_compatible
+anthropic
+```
+
+典型配置：
 
 ```dotenv
-# ----- System / shared default -----
 SYSTEM_PROVIDER=deepseek
-SYSTEM_API_KEY=your-key
+SYSTEM_API_KEY=
 SYSTEM_BASE_URL=https://api.deepseek.com
-SYSTEM_MODEL=<system-model>
+SYSTEM_MODEL=
 SYSTEM_MAX_TOKENS=16384
 
-# ----- Large-scale planning -----
 ARCHITECT_PROVIDER=
 ARCHITECT_API_KEY=
 ARCHITECT_BASE_URL=
-ARCHITECT_MODEL=<architect-model>
+ARCHITECT_MODEL=
 ARCHITECT_MAX_TOKENS=32768
 
-# ----- Chapter planning -----
 PLAN_PROVIDER=
 PLAN_API_KEY=
 PLAN_BASE_URL=
-PLAN_MODEL=<plan-model>
+PLAN_MODEL=
 PLAN_MAX_TOKENS=16384
 
-# ----- Query Intent Builder (PLAN sub-configuration) -----
-# 留空时逐字段继承 PLAN_*
+WRITE_PROVIDER=
+WRITE_API_KEY=
+WRITE_BASE_URL=
+WRITE_MODEL=
+WRITE_MAX_TOKENS=32768
+```
+
+正式 World Setting、Book Plan、Volume Plan、Chapter Plan、Current State 等上下文不会为了节省 Token 被静默截断。
+
+如果输入超过安全预算，系统会在模型调用前停止并提示需要精简的内容。
+
+------
+
+# 4. Query Intent 模型
+
+历史 RAG 不再直接把大量原始上下文拼成 Embedding Query。
+
+系统会先生成一个：
+
+```text
+Query Intent
+```
+
+流程：
+
+```text
+Volume Plan
++ 上一章结尾
++ Current State
++ Human Intent（如果存在）
+        ↓
+Query Intent Builder
+        ↓
+Query Intent
+        ↓
+Embedding Retrieval
+```
+
+Query Intent Builder 默认属于 `PLAN`。
+
+如不填写以下配置，则继承 PLAN：
+
+```dotenv
 QUERY_INTENT_PROVIDER=
 QUERY_INTENT_API_KEY=
 QUERY_INTENT_BASE_URL=
 QUERY_INTENT_MODEL=
 QUERY_INTENT_MAX_TOKENS=
+```
 
-# ----- Prose creation -----
-WRITE_PROVIDER=
-WRITE_API_KEY=
-WRITE_BASE_URL=
-WRITE_MODEL=<write-model>
-WRITE_MAX_TOKENS=32768
+也可以单独指定一个更快或更便宜的模型。
 
-# ----- Embedding for NEW novels only -----
+Query Intent 应尽可能简短，只描述：
+
+> 本章最需要检索哪些历史事实。
+
+通常应在 1000～3000 字以内，越短越好。
+
+只有出现严重异常的超长输出时，系统才会要求 Query Intent Builder 自动重新压缩。
+
+------
+
+# 5. Embedding 配置
+
+Embedding 与 LLM Slot 独立。
+
+支持：
+
+```dotenv
 EMBEDDING_MODE=local
+```
+
+或：
+
+```dotenv
+EMBEDDING_MODE=api
 EMBEDDING_API_KEY=
 EMBEDDING_BASE_URL=
 EMBEDDING_MODEL=
 EMBEDDING_DIMENSIONS=
-
-# ----- Runtime -----
-CHAPTER_MODE=agent
-AGENT_EXECUTION=supervised
-RAG_TOP_K=5
-AUTO_SAVEPOINT_EVERY=50
 ```
 
-普通用户只需配置一套 SYSTEM connection，再分别填写四个 model 和 max_tokens。四个默认输出上限分别为 ARCHITECT `32768`、PLAN `16384`、WRITE `32768`、SYSTEM `16384`，都可在 `.env` 中覆盖且必须为正整数。
+初始化新小说时，系统会显示：
 
-多 Provider 也可以同时使用，例如：
-
-```dotenv
-SYSTEM_PROVIDER=deepseek
-SYSTEM_API_KEY=your-deepseek-key
-SYSTEM_BASE_URL=https://api.deepseek.com
-SYSTEM_MODEL=<system-model>
-
-ARCHITECT_MODEL=<architect-model>
-PLAN_MODEL=<plan-model>
-
-WRITE_PROVIDER=anthropic
-WRITE_API_KEY=your-anthropic-key
-WRITE_BASE_URL=
-WRITE_MODEL=<write-model>
+```text
+Embedding Mode
+Embedding Model
+Embedding Dimensions
 ```
 
-Writer 与 Stylist 始终共同使用 `WRITE`。Writer-Agent 不发送 Thinking、Extended Thinking、`reasoning_effort` 或其他 provider-specific reasoning 参数，模型使用当前 API/model 的默认推理行为。每次真正调用 LLM 前，系统只对本次需要的 slot 执行 preflight；错误会以中文列出 slot、缺失字段和对应环境变量，不输出 API Key 内容。
+并要求人工确认。
 
-Query Intent Builder 属于 PLAN 职责，不是第五个主槽位。`QUERY_INTENT_*` 每个空字段分别继承对应的 `PLAN_*`；如需使用更便宜的快速模型，可单独填写 provider、connection、model 和 max_tokens。
+## 重要
 
-章节检索只把 Query Intent 发送给 Embedding。Builder 输入完整 Volume Plan、上一章末尾约 1500 字的完整段落窗口、完整 Current State 和原始 Human Intent；Human Intent 仍会原样直接交给 Planner。Query Intent 通常应在 3000 字以内，5000–9999 字仍接受；达到 10000 字时仅自动压缩重写一次，再次严重超长则 fail-closed，绝不静默截断。
+Embedding Model 和 Dimensions 属于小说长期数据身份。
 
-### Embedding 与 LLM 不同
+小说初始化后：
 
-LLM slot 的 provider、API 和 model 可以随时修改。Embedding vector space 则在 `init` 时确认并永久绑定当前小说：
+> 不要随意更换 Embedding 模型或向量维度。
 
-- `local`：默认方式，继续使用 Chroma 内置本地 Embedding，无需额外 API。
-- `api`：使用任意 OpenAI-compatible Embedding API，例如 Qwen Embedding。
+API Key 和连接地址可以改变，但必须继续访问兼容的同一 Embedding 模型。
 
-API 模式示例：
+------
 
-```dotenv
-EMBEDDING_MODE=api
-EMBEDDING_API_KEY=your_embedding_key
-EMBEDDING_BASE_URL=https://your-compatible-endpoint/v1
-EMBEDDING_MODEL=qwen3-embedding-0.6b
-EMBEDDING_DIMENSIONS=
-```
+# 6. 初始化小说
 
-`EMBEDDING_DIMENSIONS` 推荐留空，由 `init` 前的最小 probe 根据实际返回向量自动确定；如明确填写，probe 会验证实际维度是否一致。
-
-确认 `init` 后，小说的 Embedding Mode、Model、Dimensions 永久固定。以后修改 `.env` 中这三个值只影响下一本新小说，不影响已有小说；API Key 和 Base URL 属于运行时连接信息，可以轮换，但必须继续访问同一个模型/vector space。内部配置不保存 API Key，也不会随 Story Savepoint Load 改变。
-
-`AUTO_SAVEPOINT_EVERY=0` 关闭自动 Savepoint；正整数 `N` 表示每当正式章节达到 `DERIVED_READY` 且章节号可被 `N` 整除时，自动创建与手动 Savepoint 完全相同的 READY Savepoint。
-
-`DERIVED_READY` 由小说 creative state 内的最终 marker 持久记录。它只在 Canonical、Current State、Fact Digest、Volume Progress、chapter_sources 和 Chroma 同步全部成功后写入，不依赖历史 LangGraph checkpoint，因此 Savepoint Load 后仍可正确选择下一章。
-
----
-
-## 3. 创建一本小说
-
-给它一个最初的故事想法：
+第一步：
 
 ```bash
-python main.py init my_novel "近未来，一名记忆修复师发现了一枚不属于任何人的存储芯片"
+python main.py init my_novel "一句话故事前提"
 ```
 
-Writer-Agent 会先生成故事提案。
+系统生成：
 
-你可以阅读、修改，然后确认：
+```text
+data/novels/my_novel/proposal.md
+```
+
+先人工阅读并直接编辑：
+
+```text
+proposal.md
+```
+
+不需要创建其他 proposal 副本。
+
+确认后执行：
 
 ```bash
 python main.py init my_novel --confirm
 ```
 
-确认之后，小说的基础设定和整体规划就建立好了。
+系统生成主要长期规划：
 
----
+```text
+settings/world_setting.md
+tracking/book_plan.md
+tracking/volume_plan.md
+tracking/current_state.md
+```
 
-## 4. 开始写章节
+建议在正式开始第一章前人工检查：
 
-最简单的方式：
+```text
+World Setting
+Book Plan
+Volume Plan
+```
+
+其中 Volume Plan 是卷级故事路线，不要求提前规定每一章发生什么。
+
+第一章真正开始规划时，当前 DRAFT Volume Plan 会进入正式使用状态。
+
+不需要执行 `approve-volume`。
+
+------
+
+# 7. 三种运行方式
+
+## 7.1 自主创作模式
+
+由于本系统的回退完全依赖存档功能，所以如果想认真创作一本小说的话不要使用该模式，很可能会错误操作而自动化推进不给你审阅正文的机会。
+
+`.env`：
+
+```dotenv
+CHAPTER_MODE=agent
+AGENT_EXECUTION=autonomous
+```
+
+流程：
+
+```text
+Query Intent
+→ RAG
+→ Chapter Plan
+→ Plan Review
+→ Writer
+→ Stylist
+→ Prose Review
+→ Canonical
+→ Derivation
+```
+
+正常 PASS 会自动继续。
+
+如果 Review 发现问题，系统会使用现有的有限 Agent Edit；如果有限修改后仍无法解决，则停止并等待人工。
+
+适合：
+
+- 自动连续创作；
+- 大批量章节测试；
+- 作者主要负责高层方向。
+
+------
+
+## 7.2 监督创作模式
+
+`.env`：
+
+```dotenv
+CHAPTER_MODE=agent
+AGENT_EXECUTION=supervised
+```
+
+Agent 仍负责规划和正文，但会在两个主要位置等待作者：
+
+```text
+Plan Review（核查写作计划）
+→ Human Checkpoint
+
+Prose Review（核查正文质量）
+→ Human Checkpoint
+```
+
+适合日常精细创作。
+
+------
+
+## 7.3 数据管理模式
+
+`.env`：
+
+```dotenv
+CHAPTER_MODE=human
+```
+
+流程：
+
+```text
+Human Intent
+→ Query Intent
+→ Historical RAG
+→ Writing Context
+→ 作者写正文
+→ Consistency Review
+→ Author Approval
+→ Canonical
+→ Derivation
+```
+
+系统不负责 Chapter Plan、Writer 或 Stylist。
+
+它主要负责：
+
+```text
+历史检索
+连续性检查
+正式正文提交
+Current State
+Fact Digest
+Atomic Facts
+RAG
+Savepoint
+```
+
+Human Mode 必须提供 Chapter Intent。
+
+------
+
+# 8. 开始一章
+
+Agent Mode：
 
 ```bash
 python main.py write my_novel --chapter 1
 ```
 
-如果你对这一章有自己的想法：
+也可以提供作者 Intent：
 
 ```bash
 python main.py write my_novel --chapter 1 \
-  --intent "这一章建立两人的信任，但不要揭露芯片真正的来源"
+  --intent "本章推进两人的信任，但不能揭露幕后主使"
 ```
 
-不提供 `--intent` 也可以，Agent 会根据当前故事自行规划。
+强烈建议在使用本工具时给出每章的创作意图（不一定要很具体），这不仅能让剧情按照你需要的方式发展，还可以帮助系统实现历史数据的查询，更有的放矢的查找所需数据。同时在人工创作过程中这是必须输入的内容，没有这个内容则无法准确给出你需要的历史信息。
 
-运行体验由两个现有配置组合得到，不会建立第三套 Chapter Workflow：
+------
 
-- 自主创作：`CHAPTER_MODE=agent` + `AGENT_EXECUTION=autonomous`。正常 PASS 自动完成 Canonical、Derivation，并只在有限自动修复仍失败时等待作者。
-- 监督模式：`CHAPTER_MODE=agent` + `AGENT_EXECUTION=supervised`。固定在 Plan Review 和 Prose Review 后等待作者检查，即使 Review 为 PASS。
-- 数据管理模式：`CHAPTER_MODE=human`。作者提供 Intent 和正文，系统负责 Writing Context、Consistency、Canonical 与长期状态管理；`AGENT_EXECUTION` 不会让系统代写。
+# 9. Supervised Mode 监督创作模式
 
-不知道当前该执行哪个命令时，使用统一状态入口：
+工作流暂停时，CLI 会显示：
+
+```text
+当前 Review
+具体问题
+可执行操作
+需要编辑的文件
+```
+
+## Plan Review
+
+PASS 时可以：
+
+```text
+approve
+agent_edit
+human_edit
+restart
+```
+
+未通过时可以：
+
+```text
+agent_edit
+human_edit
+restart
+```
+
+### 系统审核未通过你的文章可以使用下面的命令强行通过
+
+```bash
+python main.py write my_novel --chapter 1 --action confirm_override
+```
+
+### agent_edit
+
+如果 Review 已经 PASS，但作者仍要求修改，必须给出反馈：
+
+```bash
+python main.py write my_novel --chapter 1 \
+  --action agent_edit \
+  --feedback "第二场不要这么快确认两人的合作关系"
+```
+
+修改后会重新 Review。
+
+### human_edit
+
+CLI 会显示需要编辑的 Markdown 文件。
+
+人工修改并保存以后：
+
+```bash
+python main.py write my_novel --chapter 1 --action human_edit
+```
+
+系统会读取该编辑文件，然后重新 Review。
+
+------
+
+# 10. Prose Review
+
+Agent Mode 的 Prose Review 可以：
+
+```text
+approve
+agent_edit
+human_edit
+regenerate_prose
+restart
+```
+
+### approve
+
+Review PASS 后：
+
+```bash
+python main.py write my_novel --chapter 1 --action approve
+```
+
+随后才能 Canonical Commit。
+
+### agent_edit
+
+```bash
+python main.py write my_novel --chapter 1 \
+  --action agent_edit \
+  --feedback "减少说明性文字，让冲突主要通过动作表达"
+```
+
+### regenerate_prose
+
+```bash
+python main.py write my_novel --chapter 1 \
+  --action regenerate_prose
+```
+
+它会：
+
+```text
+保留 Approved Chapter Plan
+→ 丢弃当前 Candidate Prose
+→ Writer 从头生成
+→ Stylist
+→ Review
+```
+
+不会重新规划本章。
+
+------
+
+# 11. Human Mode 提交正文
+
+首先：
+
+```bash
+python main.py write my_novel --chapter 1 \
+  --intent "本章让主角第一次进入旧城区，并发现仓库已经被人提前搜过"
+```
+
+系统生成 Writing Context 后会等待作者。
+
+作者完成正文，例如：
+
+```text
+my_chapter_1.md
+```
+
+提交：
+
+```bash
+python main.py write my_novel --chapter 1 \
+  --action submit \
+  --file ./my_chapter_1.md
+```
+
+随后执行：
+
+```text
+Consistency Review
+→ Author Approval
+→ Canonical
+→ Derivation
+```
+
+如果 Consistency 出现 WARN，作者仍可以在明确看到警告后主动批准。
+
+第一次：
+
+```bash
+python main.py write my_novel --chapter 1 --action approve
+```
+
+系统进入独立的 override 确认。
+
+确认：
+
+```bash
+python main.py write my_novel --chapter 1 \
+  --action confirm_override
+```
+
+原始 WARN 不会被篡改成 CLEAN。
+
+------
+
+# 12. continue：从当前状态继续
+
+命令：
 
 ```bash
 python main.py continue my_novel
 ```
 
-`continue` 会优先恢复现有 checkpoint、显示当前人工等待、修复未完成 Derivation，或选择下一章；它每次只推进当前确定步骤，不会自动无限写作。
+`continue` 会自动判断小说当前真正的下一步。
 
-只有自主创作模式可以显式连续写到目标章节：
+可能执行：
 
-```bash
-python main.py run my_novel --to-chapter 10
+```text
+存在 WAITING_HUMAN
+→ 显示当前人工检查点
+
+Pre-Canonical workflow 未完成
+→ 从 checkpoint 恢复
+
+Canonical 已提交但 Derivation 未完成
+→ 从未完成的 Derivation 阶段继续
+
+最新章节已经 DERIVED_READY
+→ 进入下一章
+
+当前卷已经结束
+→ 停在 Volume Boundary
 ```
 
-`run` 与 `continue` 共用同一状态路由，已达到 `DERIVED_READY` 的章节不会被覆盖。
+## ⚠️ 重要：continue 不是状态查询命令
 
----
+如果当前最新章节已经完全达到：
 
-## 5. 单独控制章节规划
-
-如果你希望先看这一章准备写什么：
-
-```bash
-python main.py plan my_novel --chapter 1
+```text
+DERIVED_READY
 ```
 
-也可以直接给出自己的章节方向：
+而当前卷仍然可以继续：
 
 ```bash
-python main.py plan my_novel --chapter 1 \
-  --outline "林默第一次尝试读取芯片，并发现其中有一段属于自己的记忆"
+python main.py continue my_novel
 ```
 
-然后再开始写：
+会把：
 
-```bash
-python main.py write my_novel --chapter 1
+```text
+最新完成章节 N
 ```
 
----
+解释为：
 
-## 6. 处理人工审阅
-
-当 Writer-Agent 等待你的决定时，可以根据需要选择：
-
-```bash
-# 接受当前结果
-python main.py write my_novel --chapter 1 --action approve
-
-# 要求 Agent 修改
-python main.py write my_novel --chapter 1 \
-  --action agent_edit \
-  --feedback "减少解释性对白，让人物通过动作表现紧张感"
-
-# 自己修改后继续
-python main.py write my_novel --chapter 1 --action human_edit
-
-# 保留 Approved Plan，只重新生成正文
-python main.py write my_novel --chapter 1 --action regenerate_prose
-
-# 放弃本章全部 Pre-Canonical 内容，从 Planning 重来
-python main.py write my_novel --chapter 1 --action restart
-
-# 也可在任何 Pre-Canonical 阶段使用同一底层 restart
-python main.py restart my_novel --chapter 1
+```text
+下一合法动作 = 开始 Chapter N+1
 ```
 
-Plan Review 未通过时可用 `agent_edit / human_edit / restart`；Prose Review 未通过时额外提供 `regenerate_prose`。CLI 会先列出完整 Review 问题。普通程序中断不使用这些 action：重新执行原 `write`，或执行 `continue`，都会从已有 checkpoint 恢复。
+并直接进入下一章工作流。
 
----
+### 因此不要用 continue 查看当前状态
 
-## 7. 查看小说状态
+如果只是想看看小说目前写到哪里：
 
 ```bash
 python main.py status my_novel
 ```
 
-你也可以直接打开小说目录中的 Markdown 文件阅读和修改内容。
+使用：
 
----
-
-## 8. 如果章节已经确认，但后续整理没有完成
-
-可以继续完成该章节的状态整理：
-
-```bash
-python main.py repair-derivation my_novel --chapter 1
+```text
+status
 ```
 
-不需要重新生成已经确认的正文。
+而不是：
 
----
+```text
+continue
+```
 
-## 9. 完成一卷并开始下一卷
+### 特别注意
 
-完成当前卷：
+如果误执行 `continue` 并已经进入下一章：
+
+> 不要因为想“返回上一章”而批准新的 Plan 或 Prose。
+
+Canonical 前的内容仍只是候选工作状态；Canonical 一旦成立，就进入正式小说历史。
+
+`restart` 的含义是“重新开始当前章”，不是“退回上一章”。
+
+------
+
+# 13. restart：重新开始当前章
+
+命令：
+
+```bash
+python main.py restart my_novel --chapter 5
+```
+
+仅允许：
+
+```text
+Pre-Canonical
+```
+
+它会删除当前章的候选执行内容，例如：
+
+```text
+Chapter Plan
+Candidate Prose
+Review
+Writing Context
+RAG Trace
+Workflow Checkpoint
+```
+
+但保留：
+
+```text
+Chapter Intent
+```
+
+然后重新开始本章 Planning。
+
+## Canonical 后禁止 restart
+
+一旦：
+
+```text
+chapters/chapter_0005.md
+```
+
+已经正式存在：
+
+```text
+restart
+```
+
+会被拒绝。
+
+------
+
+# 14. Canonical 后 Derivation 失败
+
+如果系统显示：
+
+```text
+Canonical Commit 已完成
+Derivation 尚未完成
+```
+
+不要重新生成正文。
+
+可以直接：
+
+```bash
+python main.py continue my_novel
+```
+
+或者显式执行：
+
+```bash
+python main.py repair-derivation my_novel --chapter 5
+```
+
+系统会从第一个未完成的派生阶段继续。
+
+已经成功的阶段不会故意重新执行。
+
+------
+
+# 15. Autonomous 连续创作
+
+只有：
+
+```dotenv
+CHAPTER_MODE=agent
+AGENT_EXECUTION=autonomous
+```
+
+可以使用：
+
+```bash
+python main.py run my_novel --to-chapter 20
+```
+
+含义：
+
+> 从当前小说真实状态继续，一直运行到 Chapter 20。
+
+它与 `continue` 使用同一个状态路由。
+
+遇到：
+
+```text
+Human Boundary
+Volume Boundary
+无法自动解决的 Review
+错误
+```
+
+会停止。
+
+使用目标章节而不是“再写 N 章”，可以保证中断后重新执行时目标保持不变。
+
+------
+
+# 16. Volume Lifecycle
+
+Volume Plan 负责卷级故事路线。
+
+它不需要提前指定：
+
+```text
+Chapter 1 做什么
+Chapter 2 做什么
+Chapter 3 做什么
+```
+
+章节细节由 Chapter Planner 根据当前故事状态决定。
+
+卷的生命周期：
+
+```text
+DRAFT
+→ ACTIVE
+→ COMPLETED
+```
+
+初始化或 `new-volume` 后，新卷从 DRAFT 开始。
+
+第一次真正进行章节规划时，它进入当前创作流程。
+
+------
+
+## 关闭当前卷
 
 ```bash
 python main.py close-volume my_novel
 ```
 
-生成下一卷规划：
+关闭是显式人工决定。
+
+`Volume Progress` 中：
+
+```text
+CONTINUE
+READY_TO_CLOSE
+UNKNOWN
+```
+
+都只是系统建议。
+
+它不会自动关闭卷。
+
+关闭前要求最新 Canonical Chapter 已完成 Derivation。
+
+------
+
+## 生成下一卷
+
+当前卷关闭后：
 
 ```bash
 python main.py new-volume my_novel
 ```
 
-也可以加入下一卷的要求：
+也可以提供额外方向：
 
 ```bash
 python main.py new-volume my_novel \
-  --notes "扩大外部冲突，但继续保留芯片来源这个核心悬念"
+  --notes "下一卷加强政治压力，并开始让两条支线汇合"
 ```
 
-你可以直接修改生成的分卷规划。
+下一卷规划主要依据：
 
-确认当前规划可用后，直接开始下一卷 Chapter Planning；系统会在 Planning 入口完成必要的内部 ACTIVE 状态转换，不需要额外 approval 命令。
+```text
+World Setting
+Book Plan
+Current State
+上一卷卷级结果
+```
 
----
+其中 Current State 告诉 ARCHITECT：
 
-# 常用命令
+> 故事现在实际上停在哪里。
 
-| 命令 | 用途 |
-|---|---|
-| `init` | 创建小说 |
-| `plan` | 生成章节规划 |
-| `write` | 创作章节 |
-| `continue` | 检查小说当前状态并从唯一合法位置继续 |
-| `run --to-chapter N` | 自主模式连续创作到目标章节 |
-| `restart` | 放弃指定章的 Pre-Canonical 内容并重新规划 |
-| `status` | 查看当前状态 |
-| `repair-derivation` | 完成未完成的章节信息整理 |
-| `close-volume` | 完成当前卷 |
-| `new-volume` | 创建下一卷规划 |
+------
 
-查看完整帮助：
+# 17. Historical RAG
+
+章节 RAG 当前流程：
+
+```text
+Volume Plan
++ Previous Chapter End
++ Current State
++ Human Intent
+        ↓
+Query Intent Builder
+        ↓
+Query Intent
+        ↓
+Embedding
+        ↓
+Atomic Facts Top-K
+        ↓
+Canonical Paragraph Expansion
+        ↓
+Planner / Human Writing Context
+```
+
+上一章结尾使用：
+
+```text
+约 1500 中文字符
+完整段落
+```
+
+不会从段落中间硬切。
+
+Atomic Fact 命中后，系统找到对应 Canonical 原文，并展开：
+
+```text
+事实对应 paragraph range
++ 前一段
++ 后一段
+```
+
+Planner 最终决定哪些历史事实真正用于本章。
+
+------
+
+# 18. Chapter Sources
+
+每章都会生成：
+
+```text
+sources/chapter_NNNN/chapter_sources.md
+```
+
+其中记录：
+
+```text
+Chapter Intent
+Retrieval Query Intent
+Retrieved Atomic Facts
+Expanded Canonical Sources
+Review / Approval Audit
+```
+
+因此以后可以追踪：
+
+```text
+这一章为什么检索这些资料
+→ 找到了什么事实
+→ 展开了什么历史正文
+→ 最终进入了什么章节
+```
+
+------
+
+# 19. RAG Top-K
+
+配置：
+
+```dotenv
+RAG_TOP_K=5
+```
+
+控制 Query Intent 从 Atomic Fact RAG 中初步召回多少历史事实。
+
+值越大：
+
+```text
+召回范围更广
+上下文更多
+噪声也可能更多
+```
+
+值越小：
+
+```text
+上下文更集中
+但可能漏掉弱相关历史事实
+```
+
+------
+
+# 20. Story Savepoint
+
+## 创建
+
+只有当前故事处于合法正式状态时才能创建：
+
+```bash
+python main.py savepoint create my_novel
+```
+
+例如 Chapter 40：
+
+```text
+S0040
+```
+
+------
+
+## 查看
+
+```bash
+python main.py savepoint list my_novel
+```
+
+------
+
+## 验证
+
+```bash
+python main.py savepoint verify my_novel S0040
+```
+
+------
+
+## Load Savepoint
+
+```bash
+python main.py savepoint load my_novel S0040
+```
+
+Load 是破坏性操作。
+
+系统会要求：
+
+1. 输入小说名称；
+2. 再输入准确的 `LOAD Sxxxx`。
+
+Load 后：
+
+```text
+整个当前创作世界
+→ 恢复为 Savepoint 对应状态
+```
+
+其他 READY Savepoint 不会因此消失。
+
+因此可以：
+
+```text
+Load S0040
+→ 测试另一条路线
+→ 之后重新 Load S0080
+```
+
+前提是 S0080 本身仍是有效 READY Savepoint。
+
+------
+
+# 21. 自动 Savepoint
+
+配置：
+
+```dotenv
+AUTO_SAVEPOINT_EVERY=0
+```
+
+`0`：
+
+```text
+关闭自动 Savepoint
+```
+
+例如：
+
+```dotenv
+AUTO_SAVEPOINT_EVERY=50
+```
+
+表示：
+
+```text
+Chapter 50 DERIVED_READY → S0050
+Chapter 100 DERIVED_READY → S0100
+Chapter 150 DERIVED_READY → S0150
+```
+
+自动 Savepoint 只在章节达到 `DERIVED_READY` 后执行。
+
+------
+
+# 22. status：只查看，不执行
+
+```bash
+python main.py status my_novel
+```
+
+如果你的目的只是：
+
+- 看写到第几章；
+- 看当前卷；
+- 看当前状态；
+- 确认是否完成；
+
+优先使用：
+
+```text
+status
+```
+
+它和：
+
+```text
+continue
+```
+
+的区别非常重要：
+
+```text
+status
+= 查看
+
+continue
+= 执行当前合法的下一步
+```
+
+------
+
+# 23. 常用 CLI
+
+| 命令                | 作用                                    |
+| ------------------- | --------------------------------------- |
+| `init`              | 创建 Proposal / 初始化小说              |
+| `status`            | 查看状态，不推进工作流                  |
+| `plan`              | 单独生成 Chapter Plan                   |
+| `write`             | 开始或恢复指定章节                      |
+| `continue`          | 从当前小说状态执行下一合法步骤          |
+| `run --to-chapter`  | Autonomous 连续运行到目标章节           |
+| `restart`           | 删除当前章 Pre-Canonical 工作并重新规划 |
+| `repair-derivation` | 恢复 Canonical 后未完成的派生           |
+| `style`             | 独立风格编辑                            |
+| `close-volume`      | 人工关闭当前卷                          |
+| `new-volume`        | 创建下一卷规划                          |
+| `rag-index`         | 补齐或重建 RAG 索引                     |
+| `savepoint create`  | 创建故事存档                            |
+| `savepoint list`    | 查看存档                                |
+| `savepoint verify`  | 验证存档                                |
+| `savepoint load`    | 加载故事存档                            |
+
+查看完整参数：
 
 ```bash
 python main.py --help
-```
-
-或者：
-
-```bash
 python main.py write --help
-python main.py plan --help
-python main.py new-volume --help
+python main.py savepoint --help
 ```
 
----
+------
 
-# 小说文件在哪里？
-
-每一本小说都有独立目录：
+# 24. 数据目录
 
 ```text
 data/novels/<novel_id>/
+├── proposal.md
+├── chapters/
+│   ├── chapter_0001.md
+│   └── ...
+├── outlines/
+├── briefs/
+├── settings/
+│   └── world_setting.md
+├── tracking/
+│   ├── book_plan.md
+│   ├── volume_plan.md
+│   ├── current_state.md
+│   ├── volume_progress.md
+│   └── volumes/
+├── states/
+├── sources/
+├── story_savepoints/
+├── state.db
+└── workflow_checkpoints.sqlite
 ```
 
-常用内容包括：
+其中：
 
-| 内容 | 位置 |
-|---|---|
-| 小说正文 | `chapters/` |
-| 世界观 | `settings/world_setting.md` |
-| 全书规划 | `tracking/book_plan.md` |
-| 当前卷规划 | `tracking/volume_plan.md` |
-| 当前故事状态 | `tracking/current_state.md` |
-| 作者补充知识 | `tracking/author_rag.md` |
-| 章节意图 | `briefs/` |
-| 章节规划 | `outlines/` |
+```text
+chapters/chapter_NNNN.md
+```
 
-这些内容大多可以直接使用 VS Code、Typora 或其他 Markdown 编辑器阅读和修改。
+是正式正文。
 
----
+不要把 Candidate、Review 或临时文件当成小说正式历史。
 
-# 更多信息
+------
 
-README 主要介绍 **Writer-Agent 能做什么，以及怎样开始使用**。
+# 25. 安全边界
 
-如果你希望进一步了解项目内部的工作方式和设计思路，请阅读：
+整个系统最重要的边界：
 
-**[ARCHITECTURE.md](ARCHITECTURE.md)**
+```text
+Pre-Canonical
+→ 可以修改、重写、restart
+
+Canonical
+→ 正文已经正式成立
+
+Post-Canonical
+→ 只能继续 Derivation
+→ 或通过 Story Savepoint 恢复历史世界
+```
+
+如果不确定当前处于什么状态：
+
+```bash
+python main.py status my_novel
+```
+
+不要用 `continue` 做试探。
+
+------
+
+# 26. 测试
+
+运行完整测试：
+
+```bash
+python -m pytest -q
+```
+
+开发测试默认不应依赖真实收费 API。
+
+真实模型与真实 Embedding 的端到端验证应使用独立 smoke-test 小说进行。
+
+------
+
+# 27. 当前设计原则
+
+Writer-Agent 当前遵循几个简单原则：
+
+```text
+作者决定自动化程度。
+
+Canonical 是正文事实边界。
+
+Current State 描述现在。
+
+Atomic Facts 保存历史。
+
+Query Intent 决定查什么。
+
+RAG 找回历史证据。
+
+Planner 决定怎么写。
+
+Savepoint 保存整个故事世界。
+
+所有关键失败默认 fail-closed，而不是悄悄继续。
+```
