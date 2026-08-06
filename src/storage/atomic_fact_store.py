@@ -10,6 +10,7 @@ import chromadb
 from chromadb.config import Settings as ChromaSettings
 
 from src.storage.document_formats import AtomicFact
+from src.storage.embedding_config import load_embedding_runtime
 
 
 COLLECTION_NAME = "atomic_facts_v2"
@@ -53,6 +54,15 @@ class AtomicFactStore:
         self._persist_dir = persist_dir
         self._client: Optional[chromadb.PersistentClient] = None
         self._collection: Optional[chromadb.Collection] = None
+        self._collections: dict[str, chromadb.Collection] = {}
+        self._runtimes = {}
+
+    def _runtime(self, novel_id: str):
+        if novel_id not in self._runtimes:
+            self._runtimes[novel_id] = load_embedding_runtime(
+                self._persist_dir.parent, novel_id
+            )
+        return self._runtimes[novel_id]
 
     @property
     def client(self) -> chromadb.PersistentClient:
@@ -67,13 +77,16 @@ class AtomicFactStore:
     def is_initialized(self) -> bool:
         return self._client is not None
 
-    def _ensure_collection(self) -> chromadb.Collection:
-        if self._collection is None:
-            self._collection = self.client.get_or_create_collection(
+    def _ensure_collection(self, novel_id: str) -> chromadb.Collection:
+        if self._collection is not None:  # explicit test/compatibility injection
+            return self._collection
+        self._runtime(novel_id)
+        if novel_id not in self._collections:
+            self._collections[novel_id] = self.client.get_or_create_collection(
                 name=COLLECTION_NAME,
                 metadata={"schema": "atomic-fact-v2"},
             )
-        return self._collection
+        return self._collections[novel_id]
 
     @staticmethod
     def _chapter_where(novel_id: str, branch_id: str, chapter_index: int) -> dict:
@@ -100,7 +113,7 @@ class AtomicFactStore:
         digest_path: str,
     ) -> int:
         """Replace one chapter's facts; documents are Fact Text, never prose."""
-        coll = self._ensure_collection()
+        coll = self._ensure_collection(novel_id)
         existing = coll.get(where=self._chapter_where(
             novel_id, branch_id, chapter_index))
         if existing and existing.get("ids"):
@@ -129,7 +142,13 @@ class AtomicFactStore:
                 "source_path": source_path,
                 "digest_path": digest_path,
             })
-        coll.add(ids=ids, documents=documents, metadatas=metadatas)
+        add_kwargs = {
+            "ids": ids, "documents": documents, "metadatas": metadatas,
+        }
+        runtime = self._runtime(novel_id)
+        if runtime.is_api:
+            add_kwargs["embeddings"] = runtime.embed(documents)
+        coll.add(**add_kwargs)
         return len(usable)
 
     def search(
@@ -140,17 +159,23 @@ class AtomicFactStore:
         chapter_index: int,
         top_k: int,
     ) -> list[FactSearchResult]:
-        coll = self._ensure_collection()
+        coll = self._ensure_collection(novel_id)
         where = {"$and": [
             {"novel_id": {"$eq": novel_id}},
             {"branch_id": {"$eq": branch_id}},
             {"chapter_index": {"$lt": chapter_index}},
             {"source_type": {"$eq": SOURCE_TYPE}},
         ]}
-        raw = coll.query(
-            query_texts=[query], where=where, n_results=top_k,
-            include=["documents", "metadatas", "distances"],
-        )
+        query_kwargs = {
+            "where": where, "n_results": top_k,
+            "include": ["documents", "metadatas", "distances"],
+        }
+        runtime = self._runtime(novel_id)
+        if runtime.is_api:
+            query_kwargs["query_embeddings"] = runtime.embed([query])
+        else:
+            query_kwargs["query_texts"] = [query]
+        raw = coll.query(**query_kwargs)
         parsed = []
         ids = raw.get("ids", [[]])[0] if raw else []
         docs = raw.get("documents", [[]])[0] if raw and raw.get("documents") else []
@@ -173,7 +198,8 @@ class AtomicFactStore:
         return parsed
 
     def rebuild_branch(self, novel_id: str, branch_id: str) -> bool:
-        coll = self._ensure_collection()
+        self._runtime(novel_id)
+        coll = self._ensure_collection(novel_id)
         existing = coll.get(where=self._branch_where(novel_id, branch_id))
         if existing and existing.get("ids"):
             coll.delete(ids=existing["ids"])

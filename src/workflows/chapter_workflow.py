@@ -125,24 +125,24 @@ def preflight(state: ChapterWorkflowState) -> dict[str, Any]:
     """Validate generation prerequisites before any production side effect."""
     novel_id = state.get("novel_id")
     if not isinstance(novel_id, str) or not novel_id.strip():
-        return _error_result("Invalid novel_id: a non-empty string is required")
+        return _error_result("novel_id 无效：必须是非空字符串")
 
     chapter_index = state.get("chapter_index")
     if (isinstance(chapter_index, bool)
             or not isinstance(chapter_index, int)
             or chapter_index <= 0):
-        return _error_result("Invalid chapter_index: a positive integer is required")
+        return _error_result("chapter_index 无效：必须是正整数")
 
     branch_id = state.get("branch_id", "main")
     if branch_id != "main":
         return _error_result(
-            f"Unsupported branch_id '{branch_id}': E07 currently supports only 'main'"
+            f"不支持 branch_id '{branch_id}'：E07 当前仅支持 main"
         )
 
     chapter_mode = state.get("chapter_mode", "agent")
     if chapter_mode not in {"agent", "human"}:
         return _error_result(
-            f"Invalid chapter_mode {chapter_mode!r}: expected 'agent' or 'human'"
+            f"chapter_mode {chapter_mode!r} 无效：应为 agent 或 human"
         )
 
     fs = FileStore(novel_id, get_settings().data_dir)
@@ -213,7 +213,7 @@ def prepare_human_context(state: ChapterWorkflowState) -> dict[str, Any]:
     intent = state.get("chapter_intent", "").strip()
     if not intent:
         return _error_result(
-            "Human Mode requires a non-empty Chapter Intent for historical retrieval."
+            "Human Mode 执行历史检索前必须提供非空 Chapter Intent。"
         )
     retrieval = ChapterRetrievalService(state["novel_id"]).retrieve(
         state["chapter_index"],
@@ -223,7 +223,7 @@ def prepare_human_context(state: ChapterWorkflowState) -> dict[str, Any]:
     )
     if not retrieval.trace.success:
         return _error_result(
-            "Historical retrieval failed: " + retrieval.trace.error_message
+            "历史检索失败：" + retrieval.trace.error_message
         )
     if retrieval.warnings:
         return _error_result("; ".join(retrieval.warnings))
@@ -402,7 +402,7 @@ def plan_chapter(state: ChapterWorkflowState) -> dict[str, Any]:
     )
     if not retrieval.trace.success:
         return _error_result(
-            "Historical retrieval failed: " + retrieval.trace.error_message
+            "历史检索失败：" + retrieval.trace.error_message
         )
     if retrieval.warnings:
         return _error_result("; ".join(retrieval.warnings))
@@ -702,7 +702,7 @@ def agent_edit_chapter(state: ChapterWorkflowState) -> dict[str, Any]:
     from src.storage.document_formats import ChapterPlan
 
     if state.get("human_decision") != "agent_edit":
-        return _error_result("agent_edit requires an explicit human decision")
+        return _error_result("agent_edit 需要明确的人工决定")
 
     plan = ChapterPlan.from_markdown(state.get("chapter_plan_text", ""))
     revised = DeepSeekWriter(state["novel_id"]).revise_chapter(
@@ -842,13 +842,13 @@ def await_human_plan(state: ChapterWorkflowState) -> dict[str, Any]:
         "allowed_actions": ["edit", "stop"],
     })
     if not isinstance(resume_value, dict):
-        return _error_result("Human resume value must be a decision object")
+        return _error_result("Human resume value 必须是 decision object")
     action = str(resume_value.get("action", "")).strip().lower()
     if action == "stop":
         return _stop_after_human(state)
     edited = str(resume_value.get("edited_text", "")).strip()
     if action != "edit" or not edited:
-        return _error_result("Plan resume requires a non-empty human edit")
+        return _error_result("Plan resume 需要非空的人工编辑内容")
     return {
         "chapter_plan_text": edited,
         "human_decision": "edit",
@@ -1101,7 +1101,7 @@ def derive_semantics(state: ChapterWorkflowState) -> dict[str, Any]:
     from src.agents.state_manager.state_manager import StateManager
 
     if state.get("commit_success") is not True:
-        return _derived_failure(state, "Derivation requires canonical prose")
+        return _derived_failure(state, "Derivation 需要 Canonical 正文")
     fs = FileStore(state["novel_id"], get_settings().data_dir)
     canonical = fs.load_canonical_chapter(state["chapter_index"]) or ""
     if not canonical:
@@ -1164,7 +1164,7 @@ def persist_current_state(state: ChapterWorkflowState) -> dict[str, Any]:
             )
     except Exception as exc:
         return _derived_failure(
-            state, f"Current State persistence failed: {type(exc).__name__}: {exc}"
+            state, f"Current State 持久化失败：{type(exc).__name__}: {exc}"
         )
     finally:
         sqlite.close()

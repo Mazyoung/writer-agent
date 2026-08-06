@@ -52,8 +52,8 @@ class ChapterPlanner(BaseAgent):
         active = VolumePlan.from_markdown(volume_plan)
         if active.status.upper() != "ACTIVE":
             raise ValueError(
-                "Chapter planning requires an ACTIVE volume_plan.md; "
-                f"current status is {active.status}"
+                "章节规划需要 ACTIVE 状态的 volume_plan.md；"
+                f"当前状态为 {active.status}"
             )
         return book_plan, volume_plan
 

@@ -39,6 +39,11 @@ from src.core.novel_status import NovelStatusService
 from src.planning.chapter_planning_service import ChapterPlanningService
 from src.planning.novel_lifecycle import NovelLifecycleService
 from src.storage.file_store import FileStore
+from src.storage.embedding_config import (
+    NovelEmbeddingConfigStore,
+    NovelEmbeddingRuntime,
+    probe_new_embedding,
+)
 from src.storage.rag_maintenance_v2 import RAGMaintenanceService
 from src.storage.story_savepoint import SavepointError, StorySavepointManager
 from src.workflows.chapter_editing import ChapterEditingService
@@ -61,11 +66,71 @@ def _get_novel_dir(novel_id: str):
     if not novel_dir.exists():
         print(f"小说 '{novel_id}' 不存在。请先运行 init。")
         return None
+    try:
+        NovelEmbeddingConfigStore(settings.data_dir).load(novel_id)
+    except ValueError as exc:
+        print(f"错误：{exc}")
+        return None
     file_store = FileStore(novel_id, settings.data_dir)
     migrated = file_store.migrate_legacy_canonical_if_needed()
     if migrated:
-        print(f"  [migration] canonical copies created: {list(migrated.keys())}")
+        print(f"  [迁移] 已创建 Canonical 副本：{list(migrated.keys())}")
     return novel_dir
+
+
+def _confirm_and_bind_embedding(novel_id: str) -> bool:
+    settings = get_settings()
+    store = NovelEmbeddingConfigStore(settings.data_dir)
+    try:
+        candidate = probe_new_embedding(novel_id, settings)
+    except ValueError as exc:
+        print(str(exc))
+        return False
+    print("\nEmbedding 配置\n")
+    if candidate.embedding_mode == "local":
+        print("当前 Embedding 方式：")
+        print("  Chroma 内置 Embedding（本地）\n")
+    else:
+        print("当前 Embedding 方式：")
+        print("  OpenAI-compatible Embedding API\n")
+    print("模型：")
+    print(f"  {candidate.embedding_model}\n")
+    print("向量维度：")
+    print(f"  {candidate.embedding_dimensions}\n")
+    print("该 Embedding 模型及向量维度将在小说初始化后永久绑定，")
+    print("之后无法修改。\n")
+    if candidate.embedding_mode == "local":
+        print("如果希望使用更好的网络 API Embedding，")
+        print("请在初始化前按照 README 修改配置。\n")
+    else:
+        print("API Key 和 API 地址属于运行时连接配置，")
+        print("以后可以修改，但必须继续访问相同的 Embedding 模型。\n")
+    prompt = "是否使用当前 Embedding 配置继续初始化？[y/N]: "
+    try:
+        confirmed = input(prompt).strip().lower() == "y"
+    except (EOFError, KeyboardInterrupt):
+        confirmed = False
+    if not confirmed:
+        print("已取消初始化；未创建小说或内部 Embedding 配置。")
+        return False
+    store.create(candidate)
+    print(
+        f"已固定 Embedding 配置：{candidate.embedding_mode} / "
+        f"{candidate.embedding_model} / {candidate.embedding_dimensions}"
+    )
+    return True
+
+
+def _validate_existing_embedding(novel_id: str) -> bool:
+    settings = get_settings()
+    store = NovelEmbeddingConfigStore(settings.data_dir)
+    try:
+        config = store.load(novel_id)
+        NovelEmbeddingRuntime(config, settings)
+    except ValueError as exc:
+        print(f"错误：{exc}")
+        return False
+    return True
 
 
 # ═══ 命令实现 ════════════════════════════════════════════════
@@ -79,6 +144,8 @@ def cmd_init(args):
         if not novel_dir.exists():
             print(f"小说 '{args.name}' 尚未创建。先运行: python main.py init {args.name}")
             return
+        if not _validate_existing_embedding(args.name):
+            return
         lifecycle = NovelLifecycleService(args.name)
         novel_dir = lifecycle.file_store.root
         edited_path = novel_dir / "proposal_edited.md"
@@ -86,14 +153,14 @@ def cmd_init(args):
 
         if edited_path.exists():
             proposal = edited_path.read_text(encoding="utf-8")
-            print("Using proposal_edited.md [HUMAN OVERRIDE]")
+            print("使用 proposal_edited.md [HUMAN OVERRIDE]")
         elif canonical_path.exists():
             proposal = canonical_path.read_text(encoding="utf-8")
-            print("Using proposal.md [AI CANONICAL]")
+            print("使用 proposal.md [AI CANONICAL]")
         else:
             proposal = lifecycle.file_store.load_latest("", "proposal")
             if proposal:
-                print("Using legacy proposal [COMPAT]")
+                print("使用 legacy proposal [COMPAT]")
             else:
                 print("未找到创作提案。先运行: python main.py init <小说名>")
                 return
@@ -102,6 +169,10 @@ def cmd_init(args):
         return
 
     # Phase 1: 生成创作提案
+    if not novel_dir.exists() and not _confirm_and_bind_embedding(args.name):
+        return
+    if novel_dir.exists() and not _validate_existing_embedding(args.name):
+        return
     if novel_dir.exists() and not args.force:
         proposal_path = novel_dir / "proposal.md"
         if proposal_path.exists():
@@ -189,7 +260,7 @@ def _cmd_plan_interactive(planning, args):
         print(str(e))
         return
 
-    print(f"  Part A: {len(plan.scenes)} 个场景")
+    print(f"  场景规划：{len(plan.scenes)} 个场景")
     print(f"  已保存: outlines/chapter_plan_ch{args.chapter:04d}.md")
     print(f"\n  下一步: python main.py write {args.name} --chapter {args.chapter}")
 
@@ -240,7 +311,7 @@ def cmd_write(args):
         or result.get("verdict", "UNKNOWN")
     )
     if status == "DERIVED_READY":
-        print(f"\n  章节工作流已完成：review={verdict}")
+        print(f"\n  章节工作流已完成：审阅结论={verdict}")
         for warning in result.get("derived_state_errors", []):
             print(f"  [派生状态错误] {warning}")
         return
@@ -293,11 +364,11 @@ def cmd_write(args):
             print("返回上一审批步骤：--action back")
             return
 
-        print(f"\n章节工作流正在等待人工处理：review={verdict}")
-        print(f"  Interrupt ID: {pending_items[0].get('id', '') if pending_items else ''}")
-        print(f"  Type: {interrupt_type}")
-        print(f"  Planning level: {payload.get('planning_level', 'L1')}")
-        print(f"  Edit file: {payload.get('edit_path', '')}")
+        print(f"\n章节工作流正在等待人工处理：审阅结论={verdict}")
+        print(f"  Interrupt ID：{pending_items[0].get('id', '') if pending_items else ''}")
+        print(f"  类型：{interrupt_type}")
+        print(f"  规划层级：{payload.get('planning_level', 'L1')}")
+        print(f"  编辑文件：{payload.get('edit_path', '')}")
         for reason in payload.get("reasons", [])[:5]:
             print(f"    - {reason}")
         print(
@@ -310,7 +381,7 @@ def cmd_write(args):
         )
         return
     if status == "STOPPED_NON_PASS":
-        print(f"\n  章节工作流已在人工审阅后停止：review={verdict}")
+        print(f"\n  章节工作流已在人工审阅后停止：审阅结论={verdict}")
         return
     print(f"\n  章节工作流已中止：{result.get('error', status)}")
 
@@ -329,9 +400,9 @@ def cmd_repair_derivation(args):
     try:
         result = repair_chapter_derivation(args.name, args.chapter)
     except ValueError as exc:
-        print(f"Repair Derivation rejected: {exc}")
+        print(f"Derivation 修复请求被拒绝：{exc}")
         return
-    print(f"Derivation repair result: {result.get('workflow_status', 'error')}")
+    print(f"Derivation 修复结果：{result.get('workflow_status', 'ERROR')}")
 
 
 def cmd_close_volume(args):
@@ -406,14 +477,15 @@ def cmd_savepoint(args):
             return
         if args.savepoint_action == "load":
             savepoint_id = args.savepoint_id.upper()
-            print("\n警告：加载该 Savepoint 会覆盖当前创作工作区。")
-            print("当前未另行保存的修改会丢失。")
-            print("其他已经 READY 的 Story Savepoint 不受影响，之后仍可重新加载。")
-            novel_confirmation = input("\n第一次确认：请输入小说名：").strip()
+            print(f"\n即将加载 Savepoint {savepoint_id}。\n")
+            print("此操作会将当前小说恢复到该 Savepoint 对应的完整状态。")
+            print("请确认需要保留的当前内容已经另行保存。")
+            print("其他 READY Story Savepoint 不受影响，之后仍可重新加载。")
+            novel_confirmation = input("\n请输入小说名称进行确认：").strip()
             if novel_confirmation != args.name:
                 print("小说名不匹配，已取消 Load。")
                 return
-            exact = input(f"第二次确认：请输入 LOAD {savepoint_id}：").strip()
+            exact = input(f"请再次输入 LOAD {savepoint_id}：").strip()
             if exact != f"LOAD {savepoint_id}":
                 print("确认文本不匹配，已取消 Load。")
                 return
@@ -522,7 +594,7 @@ def main():
 
     env_file = Path(__file__).parent / ".env"
     if not env_file.exists():
-        print("提示: 创建 .env 文件并设置 DEEPSEEK_API_KEY")
+        print("提示: 创建 .env 文件并设置 SYSTEM_PROVIDER / SYSTEM_API_KEY")
 
     cmds = {
         "init": cmd_init, "status": cmd_status,
@@ -536,7 +608,10 @@ def main():
         "savepoint": cmd_savepoint,
     }
     if args.command in cmds:
-        cmds[args.command](args)
+        try:
+            cmds[args.command](args)
+        except ValueError as exc:
+            print(f"错误：{exc}")
     else:
         parser.print_help()
 

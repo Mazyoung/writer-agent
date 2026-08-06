@@ -245,14 +245,10 @@ class TestStylistEditChapterNoSideEffects(unittest.TestCase):
         self._orig_api_key = self.settings.api_key
         self.settings.data_dir = self.tmp
         self.settings.api_key = "test-key"
-        # ClaudeStylist needs ANTHROPIC_API_KEY to be non-Claude (use DeepSeek)
-        self._orig_anthropic = self.settings.anthropic_api_key
-        self.settings.anthropic_api_key = ""
 
     def tearDown(self):
         self.settings.data_dir = self._orig_data_dir
         self.settings.api_key = self._orig_api_key
-        self.settings.anthropic_api_key = self._orig_anthropic
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def test_edit_chapter_does_not_save(self):
@@ -260,7 +256,7 @@ class TestStylistEditChapterNoSideEffects(unittest.TestCase):
 
         stylist = ClaudeStylist("test_novel")
 
-        with mock.patch.object(stylist, "_call_deepseek",
+        with mock.patch.object(stylist.provider_client, "complete",
                                return_value="编辑后文本" * 30):
             with mock.patch.object(stylist.file_store, "save") as mock_save:
                 result = stylist.edit_chapter(

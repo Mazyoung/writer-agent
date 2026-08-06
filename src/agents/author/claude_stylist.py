@@ -1,20 +1,14 @@
-"""
-Stylist — 风格编辑器（Claude 优先，DeepSeek 替代）。
-
-模式:
-- ANTHROPIC_API_KEY 已设置 → Claude API（更高质量）
-- 无 Anthropic key → DeepSeek API（零配置，质量足够）
-"""
+"""Stylist using the explicit WRITE model slot."""
 
 from pathlib import Path
-from openai import OpenAI
 
 from src.config.settings import get_settings
+from src.core.model_provider import ModelProviderClient
 from src.storage.file_store import FileStore
 
 
 class ClaudeStylist:
-    """风格编辑器 — Claude 优先，DeepSeek 备用"""
+    """Compatibility class name; provider/model are owned by WRITE."""
 
     PROMPT_FILE = "tone_editor_claude.txt"
 
@@ -22,53 +16,39 @@ class ClaudeStylist:
         settings = get_settings()
         self.novel_id = novel_id
         self.file_store = FileStore(novel_id, settings.data_dir)
-        self.settings = settings
-        self.anthropic_key = settings.anthropic_api_key
         self._prompt = self._load_prompt(settings.prompts_dir)
-
-        # DeepSeek client（复用项目配置）
-        self.ds_client = OpenAI(
-            api_key=settings.api_key,
-            base_url=settings.base_url,
-        )
-        self.ds_model = settings.resolve_model_name("deepseek_writer")
+        self.model_slot = settings.get_model_slot("write")
+        self.provider_client = ModelProviderClient(self.model_slot)
 
     def _load_prompt(self, prompts_dir: Path) -> str:
         path = prompts_dir / self.PROMPT_FILE
-        if path.exists():
-            return path.read_text(encoding="utf-8")
-        return ""
+        return path.read_text(encoding="utf-8") if path.exists() else ""
 
-    @property
-    def use_claude(self) -> bool:
-        key = self.anthropic_key or ""
-        return key.startswith("sk-ant-")
+    def edit_chapter(
+        self,
+        draft_text: str,
+        chapter_index: int,
+        emotion_palette: str = "",
+        scene_plan_text: str = "",
+        style_feedback: str = "",
+    ) -> str:
+        user_msg = self._build_message(
+            draft_text,
+            chapter_index,
+            emotion_palette,
+            scene_plan_text,
+            style_feedback,
+        )
+        return self._call_write_slot(user_msg)
 
-    # ── 主入口 ───────────────────────────────────────
-
-    def edit_chapter(self, draft_text: str, chapter_index: int,
-                     emotion_palette: str = "",
-                     scene_plan_text: str = "",
-                     style_feedback: str = "") -> str:
-        """风格编辑 — 只负责 LLM 转换，返回 styled text。
-
-        E05: 不再保存文件、不执行 StyleChecker。
-        调用方负责保存与确定性风格检查。
-        """
-        user_msg = self._build_message(draft_text, chapter_index,
-                                        emotion_palette, scene_plan_text,
-                                        style_feedback)
-
-        if self.use_claude:
-            result = self._call_claude(user_msg)
-        else:
-            result = self._call_deepseek(user_msg)
-
-        return result
-
-    def edit_scene(self, scene_text: str, scene_index: int,
-                   chapter_index: int, emotion_palette: str = "",
-                   style_feedback: str = "") -> str:
+    def edit_scene(
+        self,
+        scene_text: str,
+        scene_index: int,
+        chapter_index: int,
+        emotion_palette: str = "",
+        style_feedback: str = "",
+    ) -> str:
         user_msg = f"""## 第 {chapter_index} 章 场景 {scene_index}
 
 ### 情感调色板
@@ -82,20 +62,15 @@ class ClaudeStylist:
 
 ---
 请调整叙事语气。"""
-        save_prefix = f"scene_ch{chapter_index:04d}_s{scene_index:02d}_styled"
-
-        if self.use_claude:
-            result = self._call_claude(user_msg)
-        else:
-            result = self._call_deepseek(user_msg)
-
-        self.file_store.save("chapters", save_prefix, result)
+        result = self._call_write_slot(user_msg)
+        self.file_store.save(
+            "chapters", f"scene_ch{chapter_index:04d}_s{scene_index:02d}_styled", result
+        )
         return result
 
-    # ── 内部 ─────────────────────────────────────────
-
-    def _build_message(self, draft: str, ch_idx: int,
-                       emotion: str, plan: str, feedback: str) -> str:
+    def _build_message(
+        self, draft: str, ch_idx: int, emotion: str, plan: str, feedback: str
+    ) -> str:
         parts = [f"## 第 {ch_idx} 章"]
         if feedback:
             parts.append(f"### [最高优先级] 人工反馈\n{feedback}")
@@ -107,38 +82,11 @@ class ClaudeStylist:
         parts.append("---\n请调整叙事语气，检查场景规划对齐。")
         return "\n\n".join(parts)
 
-    def _call_claude(self, user_msg: str) -> str:
-        try:
-            import anthropic
-        except ImportError:
-            print("  [Stylist] anthropic 未安装，使用 DeepSeek")
-            return self._call_deepseek(user_msg)
-
-        if not self.anthropic_key:
-            return self._call_deepseek(user_msg)
-
-        client = anthropic.Anthropic(api_key=self.anthropic_key)
-        response = client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=8192,
-            temperature=0.7,
-            system=self._prompt,
-            messages=[{"role": "user", "content": user_msg}],
-        )
-        # 提取文本块（跳过 thinking 块）
-        for block in response.content:
-            if hasattr(block, "text"):
-                return block.text
-        return response.content[0].text
-
-    def _call_deepseek(self, user_msg: str) -> str:
-        """DeepSeek V4 做风格编辑 — 与 Claude 使用完全相同的 prompt。"""
-        response = self.ds_client.chat.completions.create(
-            model=self.ds_model,
-            temperature=0.7,
-            messages=[
+    def _call_write_slot(self, user_msg: str) -> str:
+        return self.provider_client.complete(
+            [
                 {"role": "system", "content": self._prompt},
                 {"role": "user", "content": user_msg},
             ],
+            temperature=0.7,
         )
-        return response.choices[0].message.content

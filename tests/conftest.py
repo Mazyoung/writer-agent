@@ -4,7 +4,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from src.core import agent_base
+from src.core import model_provider
 
 
 @pytest.fixture(autouse=True)
@@ -15,5 +15,5 @@ def fake_openai_client(monkeypatch):
         "Automated tests must mock LLM responses; real API access is forbidden"
     )
     constructor = MagicMock(name="OpenAI", return_value=client)
-    monkeypatch.setattr(agent_base, "OpenAI", constructor)
+    monkeypatch.setattr(model_provider, "OpenAI", constructor)
     return client

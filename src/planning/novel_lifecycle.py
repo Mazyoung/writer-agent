@@ -24,7 +24,7 @@ class NovelLifecycleService:
         self.file_store = FileStore(novel_id, settings.data_dir)
         migrated = self.file_store.migrate_legacy_canonical_if_needed()
         if migrated:
-            print(f"  [migration] canonical copies created: {list(migrated.keys())}")
+            print(f"  [迁移] 已创建 Canonical 副本：{list(migrated.keys())}")
         self.world_builder = WorldBuilder(novel_id)
         self.plot_designer = PlotDesigner(novel_id)
 
@@ -137,7 +137,7 @@ class NovelLifecycleService:
 
         ws = self.file_store.load_canonical("settings", "world_setting") or world_setting
 
-        print("[2/3] 情节设计师工作中... (Book Plan v1 / 战略层)")
+        print("[2/3] 情节设计师工作中...（Book Plan v1 / 战略层）")
         book_prompt = f"""## 已确认的创作提案
 {proposal}
 
@@ -190,7 +190,7 @@ Book Plan 是整本书的长期战略，只写长期有效的内容：
                 "\n请检查 tracking/book_plan.md 后重新运行 init --confirm。")
         print(f"  Book Plan 已解析: 《{bp.title}》v{bp.version}，{len(bp.volumes)} 卷框架")
 
-        print("[3/3] 情节设计师工作中... (Volume 1 Plan v1 / 战术层)")
+        print("[3/3] 情节设计师工作中...（Volume 1 Plan v1 / 战术层）")
         volume_prompt = f"""## 已确认的创作提案
 {proposal}
 
@@ -248,27 +248,27 @@ Book Plan 是整本书的长期战略，只写长期有效的内容：
     def _with_volume_status(text: str, status: str) -> str:
         pattern = r'(\*\*状态\*\*\s*[:：]\s*)\S+'
         if not re.search(pattern, text):
-            raise ValueError("volume_plan.md is missing its status metadata")
+            raise ValueError("volume_plan.md 缺少状态元数据")
         return re.sub(pattern, rf'\g<1>{status}', text, count=1)
 
     def close_volume(self) -> str:
         """Explicitly close the ACTIVE volume; progress advice is irrelevant."""
         text = self.file_store.load_tracking_doc("volume_plan") or ""
         if not text:
-            raise FileNotFoundError("tracking/volume_plan.md does not exist")
+            raise FileNotFoundError("tracking/volume_plan.md 不存在")
         plan = VolumePlan.from_markdown(text)
         if plan.status.upper() == "COMPLETED":
             return text
         if plan.status.upper() != "ACTIVE":
-            raise ValueError(f"Only an ACTIVE volume can close; current status is {plan.status}")
+            raise ValueError(f"只有 ACTIVE 卷可以关闭；当前状态为 {plan.status}")
         chapters = self.file_store.list_chapters()
         if not chapters:
             raise ValueError(
-                "close-volume requires a canonical chapter whose derivation is DERIVED_READY"
+                "close-volume 需要至少一个 Derivation 已达到 DERIVED_READY 的 Canonical 章节"
             )
         match = re.fullmatch(r"chapter_(\d{4})\.md", chapters[-1].name)
         if match is None:
-            raise ValueError("Cannot determine the latest canonical chapter")
+            raise ValueError("无法确定最新 Canonical 章节")
         latest_chapter = int(match.group(1))
         from src.workflows.chapter_runner import ChapterWorkflowRunner
         status = ChapterWorkflowRunner(
@@ -276,8 +276,8 @@ Book Plan 是整本书的长期战略，只写长期有效的内容：
         ).get_workflow_status()
         if status != "DERIVED_READY":
             raise ValueError(
-                f"Latest canonical chapter {latest_chapter} is {status or 'UNKNOWN'}, "
-                "not DERIVED_READY; run derivation repair before close-volume"
+                f"最新 Canonical Chapter {latest_chapter} 当前为 {status or 'UNKNOWN'}，"
+                "尚未达到 DERIVED_READY；请先运行 repair-derivation"
             )
         completed = self._with_volume_status(text, "COMPLETED")
         archive = (
@@ -300,14 +300,13 @@ Book Plan 是整本书的长期战略，只写长期有效的内容：
         current_state = self.file_store.load_generated_tracking_doc("current_state") or ""
         if not all([previous_text, book_plan, world_setting, current_state]):
             raise FileNotFoundError(
-                "Next-volume planning requires World Setting, Book Plan, Previous "
-                "Volume Plan, and Current State")
+                "新卷规划需要 World Setting、Book Plan、上一卷 Volume Plan 和 Current State")
         previous = VolumePlan.from_markdown(previous_text)
         if previous.status.upper() != "COMPLETED":
-            raise ValueError("Close the current volume before planning the next volume")
+            raise ValueError("规划下一卷前必须先关闭当前卷")
         new_index = volume_number or previous.volume_number + 1
         if new_index <= previous.volume_number:
-            raise ValueError("Next volume number must be greater than the closed volume")
+            raise ValueError("下一卷编号必须大于已关闭卷的编号")
 
         prompt = f"""## World Setting
 {world_setting[:5000]}
@@ -358,7 +357,7 @@ per-chapter outline. Output exactly this Markdown structure:
         """Validate the directly edited DRAFT and change only its status token."""
         path = self.file_store.root / "tracking" / "volume_plan.md"
         if not path.exists():
-            raise FileNotFoundError("tracking/volume_plan.md does not exist")
+            raise FileNotFoundError("tracking/volume_plan.md 不存在")
         text = path.read_text(encoding="utf-8")
         plan = VolumePlan.from_markdown(text)
         if plan.status.upper() == "ACTIVE":
@@ -373,25 +372,27 @@ per-chapter outline. Output exactly this Markdown structure:
     def _validate_volume_candidate(text: str, expected_index: int,
                                    expected_status: str = "DRAFT") -> VolumePlan:
         if not text or not text.strip():
-            raise ValueError("Volume Planner returned empty content")
+            raise ValueError("Volume Planner 返回了空内容")
         plan = VolumePlan.from_markdown(text)
         problems = []
         if plan.volume_number != expected_index:
             problems.append(f"expected volume {expected_index}, got {plan.volume_number}")
         if plan.status.upper() != expected_status:
-            problems.append(f"status must be {expected_status}, got {plan.status}")
+            problems.append(
+                f"status 必须为 {expected_status}，当前为 {plan.status}"
+            )
         if not plan.title.strip():
-            problems.append("missing title")
+            problems.append("缺少标题")
         if not plan.starting_state.strip():
-            problems.append("missing starting state")
+            problems.append("缺少起始状态")
         if not plan.volume_goal.strip():
-            problems.append("missing volume goal")
+            problems.append("缺少本卷目标")
         if not plan.core_conflict.strip():
-            problems.append("missing primary conflict")
+            problems.append("缺少主要冲突")
         if not plan.story_path:
-            problems.append("missing story path")
+            problems.append("缺少故事路径")
         if not plan.target_end_state.strip():
-            problems.append("missing target end state")
+            problems.append("缺少目标结束状态")
         structural_patterns = {
             "章节范围": (
                 r"(?:^|\n)\s*(?:#{1,6}\s*章节范围\s*|"
@@ -436,7 +437,7 @@ per-chapter outline. Output exactly this Markdown structure:
                 + ", ".join(dict.fromkeys(found))
             )
         if problems:
-            raise ValueError("Invalid Volume Plan:\n  - " + "\n  - ".join(problems))
+            raise ValueError("Volume Plan 无效：\n  - " + "\n  - ".join(problems))
         return plan
 
     def _recent_fact_digests(self, count: int = 3) -> str:

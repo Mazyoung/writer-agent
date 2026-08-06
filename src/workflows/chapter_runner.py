@@ -14,7 +14,10 @@ from langgraph.types import Command, StateSnapshot
 from src.config.settings import get_settings
 from src.storage.file_store import FileStore
 from src.storage.document_formats import ChapterPlan
-from src.storage.story_savepoint import NovelOperationLock
+from src.storage.story_savepoint import (
+    NovelOperationLock,
+    StorySavepointManager,
+)
 from src.workflows.chapter_workflow import build_chapter_workflow
 
 
@@ -23,8 +26,61 @@ def _novel_mutation_locked(method):
     @wraps(method)
     def wrapped(self, *args, **kwargs):
         with NovelOperationLock(self.file_store.root):
-            return method(self, *args, **kwargs)
+            result = method(self, *args, **kwargs)
+        return _maybe_create_auto_savepoint(self, result)
     return wrapped
+
+
+def _maybe_create_auto_savepoint(
+    runner: "ChapterWorkflowRunner", result: dict[str, Any]
+) -> dict[str, Any]:
+    """Create an interval Savepoint after the chapter operation lock is released."""
+    if not isinstance(result, dict) or str(
+        result.get("workflow_status", "")
+    ).upper() != "DERIVED_READY":
+        return result
+    interval = get_settings().auto_savepoint_every
+    if interval == 0 or runner.chapter_index % interval != 0:
+        return result
+
+    savepoint_id = f"S{runner.chapter_index:04d}"
+    enriched = dict(result)
+    try:
+        manager = StorySavepointManager(runner.novel_id, get_settings().data_dir)
+        target = manager.savepoints_root / savepoint_id
+        if target.exists():
+            manifest = manager.verify(savepoint_id)
+            outcome = "EXISTING_READY"
+        else:
+            manifest = manager.create()
+            outcome = "CREATED"
+    except Exception as exc:
+        # A concurrent creator may have won between exists() and create(). Only
+        # a fully verified READY snapshot is accepted as idempotent success.
+        try:
+            manifest = manager.verify(savepoint_id) if "manager" in locals() else None
+            if manifest is None:
+                raise exc
+            outcome = "EXISTING_READY"
+        except Exception:
+            message = f"{type(exc).__name__}: {exc}"
+            enriched["auto_savepoint"] = {
+                "status": "ERROR",
+                "savepoint_id": savepoint_id,
+                "error": message,
+            }
+            print(f"  [AUTO SAVEPOINT ERROR] {savepoint_id} 创建失败：{message}")
+            return enriched
+
+    enriched["auto_savepoint"] = {
+        "status": outcome,
+        "savepoint_id": manifest["savepoint_id"],
+    }
+    if outcome == "CREATED":
+        print(f"  [AUTO SAVEPOINT] 已创建 {savepoint_id}（READY）。")
+    else:
+        print(f"  [AUTO SAVEPOINT] {savepoint_id} 已是有效 READY，视为完成。")
+    return enriched
 
 
 class ChapterWorkflowRunner:
@@ -147,25 +203,25 @@ class ChapterWorkflowRunner:
     def _load_human_edit(self, interrupt_value: dict[str, Any]) -> str:
         edit_path = str(interrupt_value.get("edit_path", "")).strip()
         if not edit_path:
-            raise ValueError("Pending interrupt does not declare an edit path")
+            raise ValueError("待处理 interrupt 未提供编辑文件路径")
         path = self.file_store.root / edit_path
         if not path.exists():
-            raise ValueError(f"Human edit file does not exist: {edit_path}")
+            raise ValueError(f"人工编辑文件不存在：{edit_path}")
         text = path.read_text(encoding="utf-8").strip()
         if not text:
-            raise ValueError(f"Human edit file is empty: {edit_path}")
+            raise ValueError(f"人工编辑文件为空：{edit_path}")
 
         interrupt_type = interrupt_value.get("type")
         if interrupt_type == "plan_review":
             plan = ChapterPlan.from_markdown(text)
             if plan.chapter_index != self.chapter_index or not plan.scenes:
                 raise ValueError(
-                    "Human-edited Chapter Plan is invalid or targets another chapter"
+                    "人工编辑的 Chapter Plan 无效或指向其他章节"
                 )
         elif interrupt_type not in {
             "chapter_review", "final_author_approval", "human_final_approval"
         }:
-            raise ValueError(f"Unsupported pending interrupt type: {interrupt_type}")
+            raise ValueError(f"不支持的待处理 interrupt 类型：{interrupt_type}")
         return text
 
     def _load_candidate_file(
@@ -208,7 +264,7 @@ class ChapterWorkflowRunner:
     def _discard_candidate(self, checkpointer: SqliteSaver) -> list[str]:
         """Delete only this pre-canonical execution; preserve Chapter Intent."""
         if self.file_store.canonical_chapter_path(self.chapter_index).exists():
-            raise ValueError("discard is forbidden after canonical commit")
+            raise ValueError("Canonical commit 后禁止 discard")
         removed = []
         patterns = [
             f"chapters/chapter_{self.chapter_index:04d}_styled*.md",
@@ -230,16 +286,16 @@ class ChapterWorkflowRunner:
     def resume(self, resume_value: dict[str, Any]) -> dict[str, Any]:
         """Resume the existing interrupt with a validated human edit or stop."""
         if not isinstance(resume_value, dict):
-            raise ValueError("Human resume value must be a decision object")
+            raise ValueError("人工 resume 值必须是决策对象")
         action = str(resume_value.get("action", "")).strip().lower()
 
         connection, checkpointer, graph = self._open_graph()
         try:
             snapshot = graph.get_state(self.config)
             if not snapshot.interrupts:
-                raise ValueError("Chapter workflow has no pending human interrupt to resume")
+                raise ValueError("Chapter workflow 没有可 resume 的待处理人工 interrupt")
             if len(snapshot.interrupts) != 1:
-                raise ValueError("Chapter workflow has an unexpected number of interrupts")
+                raise ValueError("Chapter workflow 的 interrupt 数量异常")
 
             pending = snapshot.interrupts[0].value
             if (
@@ -254,7 +310,7 @@ class ChapterWorkflowRunner:
             allowed = set(pending.get("allowed_actions", []))
             if action not in allowed:
                 raise ValueError(
-                    f"Action '{action}' is not allowed for {pending.get('type', 'interrupt')}"
+                    f"操作 '{action}' 不适用于 {pending.get('type', 'interrupt')}"
                 )
             if action == "pause":
                 return self._waiting_result(snapshot)
@@ -299,13 +355,13 @@ class ChapterWorkflowRunner:
             snapshot = graph.get_state(self.config)
             values = dict(snapshot.values)
             if not self.file_store.canonical_chapter_path(self.chapter_index).exists():
-                raise ValueError("Repair Derivation requires canonical prose")
+                raise ValueError("repair-derivation 需要 Canonical 正文")
             if not values or values.get("commit_success") is not True:
-                raise ValueError("No canonical chapter checkpoint is available for repair")
+                raise ValueError("没有可用于修复的 Canonical chapter checkpoint")
             if values.get("workflow_status") == "DERIVED_READY":
                 return values
             if values.get("workflow_status") != "DERIVATION_ERROR":
-                raise ValueError("Chapter checkpoint is not in DERIVATION_ERROR")
+                raise ValueError("Chapter checkpoint 当前不是 DERIVATION_ERROR")
 
             if not values.get("derivation_raw_analysis"):
                 as_node, status = "commit_canonical_prose", "CANONICAL_COMMITTED"

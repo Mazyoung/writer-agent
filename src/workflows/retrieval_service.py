@@ -157,10 +157,10 @@ class ChapterRetrievalService:
         query_mode: str = "agent",
     ) -> str:
         if query_mode not in {"agent", "human"}:
-            raise ValueError(f"Unsupported retrieval query mode: {query_mode}")
+            raise ValueError(f"不支持的 retrieval query mode：{query_mode}")
         if query_mode == "human" and not chapter_intent.strip():
             raise ValueError(
-                "Human Mode requires a non-empty Chapter Intent for historical retrieval."
+                "Human Mode 执行历史检索前必须提供非空 Chapter Intent。"
             )
 
         parts: list[str] = []

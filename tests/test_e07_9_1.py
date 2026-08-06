@@ -113,7 +113,7 @@ class TestSettings(unittest.TestCase):
                 {"CHAPTER_MODE": "agent", "RAG_TOP_K": value},
                 clear=True,
             ):
-                with self.assertRaisesRegex(ValueError, "positive integer"):
+                with self.assertRaisesRegex(ValueError, "正整数"):
                     Settings(env_file="missing-e0791.env")
 
 
@@ -157,7 +157,7 @@ class TestRetrieval(E0791Case):
         outcome = service.retrieve(2, query_mode="human")
         self.assertFalse(outcome.trace.success)
         self.assertIn(
-            "Human Mode requires a non-empty Chapter Intent",
+            "Human Mode 执行历史检索前必须提供非空 Chapter Intent",
             outcome.trace.error_message,
         )
         service.chroma.search.assert_not_called()
@@ -259,7 +259,7 @@ class TestHumanWorkflow(E0791Case):
         ) as retrieval:
             result = ChapterWorkflowRunner("human-mode", 3).run()
         self.assertEqual(result["workflow_status"], "error")
-        self.assertIn("requires a non-empty Chapter Intent", result["error"])
+        self.assertIn("必须提供非空 Chapter Intent", result["error"])
         retrieval.assert_not_called()
 
 

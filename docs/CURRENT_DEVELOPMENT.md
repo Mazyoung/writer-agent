@@ -2,7 +2,8 @@
 
 ## Current Stage
 
-E07 Story Savepoint + Load Savepoint 已完成。
+E07 Story Savepoint + Load Savepoint、自动 Savepoint、四模型槽位与小说级
+Embedding 配置已完成。
 
 正式支持两种完整章节创作模式：
 
@@ -31,7 +32,18 @@ Story Savepoint 将正式章节完成后的完整小说创作世界保存为 imm
 - Create/Load 与章节 run/resume/repair 共用 novel-level exclusive operation lock。双重恢复失败会写入 `LOAD_ERROR.json`，并由 lock 与 FileStore 阻断后续创作写入。
 - Load 修改工作区前创建隐藏 internal safety snapshot；中途失败自动恢复。成功后删除 safety snapshot，并仅删除当前 novel 中目标章节之后的 LangGraph threads。
 - CLI 提供 `savepoint create|list|verify|load`。Load 没有 `--yes/--force` 绕过，并强制依次输入 novel name 与精确 `LOAD <ID>`。
-- 自动 Savepoint、Branch/Fork/Merge、压缩/去重、云同步和真实 API smoke test 均未扩展。
+- `AUTO_SAVEPOINT_EVERY=N` 可在章节达到 `DERIVED_READY` 且章号整除 N 时复用正式 Create/Verify 路径自动创建；`0` 为关闭。run/resume/repair 一致执行，且自动创建发生在章节 operation lock 释放后。
+- Branch/Fork/Merge、压缩/去重、云同步和真实 API smoke test 均未扩展。
+
+## Runtime Configuration Closure
+
+- LLM 配置拆分为 `ARCHITECT`、`PLAN`、`WRITE`、`SYSTEM` 四个槽位；每个槽位显式固定 model，并支持 `deepseek`、`openai_compatible`、`anthropic` provider 及 provider/key/base 继承。
+- Writer 与 Stylist 共用 WRITE；StateManager 使用 SYSTEM。DeepSeek thinking 参数仅发送给 DeepSeek provider。
+- `EMBEDDING_MODE=local|api` 只决定下一本新小说的初始化方式。local 保留 Chroma 内置 Embedding；api 使用通用 OpenAI-compatible Embedding API。
+- init 在创建小说数据或调用初始化 LLM 前执行实际 probe 并要求显式确认。API Key、地址、model 或 dimensions 错误均 fail fast，拒绝确认不会留下部分初始化状态。
+- mode、model、实际 dimensions 以及是否发送 dimensions 参数保存在小说内部不可变配置中，且位于 Story Savepoint Load 不覆盖的位置；API Key 与 API 地址不持久化。
+- 已初始化小说只读取其内部 Embedding 配置，忽略之后的 `.env EMBEDDING_MODE/MODEL/DIMENSIONS` 变化。缺失内部配置视为不兼容状态，不做 legacy fallback。
+- API 模式由 Writer-Agent 显式生成向量并传给 Chroma `add/query`；写入前校验向量数量和固定维度，失败不会 fallback 到 local。
 ## E07.9 Production Closure
 
 - The Python and Markdown call chain uses canonical_source_path / Canonical Source from Chapter Workflow through StateManager and CurrentStateStore.
@@ -68,9 +80,8 @@ Tests tied to the retired src.core.orchestrator, automatic revision, PASS-to-dir
 
 ## Verification
 
-- Story Savepoint destructive isolated integration / CLI tests：11 passed。
-- Savepoint + existing chapter workflow focused regression：47 passed。
-- 完整保留 unittest suite：160 passed。
+- Story Savepoint、自动 Savepoint、模型槽位和 Embedding 新增覆盖已纳入完整回归。
+- 完整 unittest suite：181 passed。
 - `py_compile` 与 `git diff --check` 通过。
 
 ## Next Task

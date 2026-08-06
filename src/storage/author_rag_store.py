@@ -11,6 +11,7 @@ import chromadb
 from chromadb.config import Settings as ChromaSettings
 
 from src.workflows.context_governance import content_hash
+from src.storage.embedding_config import load_embedding_runtime
 
 COLLECTION_NAME = "author_knowledge_v1"
 SOURCE_TYPE = "author_knowledge"
@@ -37,6 +38,15 @@ class AuthorRAGStore:
         self._persist_dir = persist_dir
         self._client: Optional[chromadb.PersistentClient] = None
         self._collection: Optional[chromadb.Collection] = None
+        self._collections: dict[str, chromadb.Collection] = {}
+        self._runtimes = {}
+
+    def _runtime(self, novel_id: str):
+        if novel_id not in self._runtimes:
+            self._runtimes[novel_id] = load_embedding_runtime(
+                self._persist_dir.parent, novel_id
+            )
+        return self._runtimes[novel_id]
 
     @property
     def client(self) -> chromadb.PersistentClient:
@@ -47,13 +57,16 @@ class AuthorRAGStore:
             )
         return self._client
 
-    def _ensure_collection(self) -> chromadb.Collection:
-        if self._collection is None:
-            self._collection = self.client.get_or_create_collection(
+    def _ensure_collection(self, novel_id: str) -> chromadb.Collection:
+        if self._collection is not None:
+            return self._collection
+        self._runtime(novel_id)
+        if novel_id not in self._collections:
+            self._collections[novel_id] = self.client.get_or_create_collection(
                 name=COLLECTION_NAME,
                 metadata={"schema": "author-knowledge-v1"},
             )
-        return self._collection
+        return self._collections[novel_id]
 
     @staticmethod
     def _where(novel_id: str, branch_id: str) -> dict:
@@ -79,7 +92,9 @@ class AuthorRAGStore:
         return entries
 
     def indexed_hash(self, novel_id: str, branch_id: str) -> str:
-        raw = self._ensure_collection().get(where=self._where(novel_id, branch_id))
+        raw = self._ensure_collection(novel_id).get(
+            where=self._where(novel_id, branch_id)
+        )
         metas = raw.get("metadatas", []) if raw else []
         hashes = {str(meta.get("source_hash", "")) for meta in metas if meta}
         return hashes.pop() if len(hashes) == 1 else ""
@@ -88,7 +103,7 @@ class AuthorRAGStore:
         self, novel_id: str, branch_id: str, markdown: str,
         source_path: str = "tracking/author_rag.md",
     ) -> int:
-        coll = self._ensure_collection()
+        coll = self._ensure_collection(novel_id)
         existing = coll.get(where=self._where(novel_id, branch_id))
         ids = existing.get("ids", []) if existing else []
         if ids:
@@ -97,9 +112,10 @@ class AuthorRAGStore:
         if not entries:
             return 0
         digest = content_hash(markdown)
-        coll.add(
+        documents = [body for _, _, body in entries]
+        add_kwargs = dict(
             ids=[f"{novel_id}_{branch_id}_{entry_id}" for entry_id, _, _ in entries],
-            documents=[body for _, _, body in entries],
+            documents=documents,
             metadatas=[{
                 "novel_id": novel_id,
                 "branch_id": branch_id,
@@ -110,6 +126,10 @@ class AuthorRAGStore:
                 "source_hash": digest,
             } for entry_id, heading, _ in entries],
         )
+        runtime = self._runtime(novel_id)
+        if runtime.is_api:
+            add_kwargs["embeddings"] = runtime.embed(documents)
+        coll.add(**add_kwargs)
         return len(entries)
 
     def ensure_synced(
@@ -128,11 +148,18 @@ class AuthorRAGStore:
     def search(
         self, novel_id: str, branch_id: str, query: str, top_k: int,
     ) -> list[AuthorKnowledgeResult]:
-        coll = self._ensure_collection()
-        raw = coll.query(
-            query_texts=[query], where=self._where(novel_id, branch_id),
-            n_results=top_k, include=["documents", "metadatas", "distances"],
-        )
+        coll = self._ensure_collection(novel_id)
+        query_kwargs = {
+            "where": self._where(novel_id, branch_id),
+            "n_results": top_k,
+            "include": ["documents", "metadatas", "distances"],
+        }
+        runtime = self._runtime(novel_id)
+        if runtime.is_api:
+            query_kwargs["query_embeddings"] = runtime.embed([query])
+        else:
+            query_kwargs["query_texts"] = [query]
+        raw = coll.query(**query_kwargs)
         parsed = []
         docs = raw.get("documents", [[]])[0] if raw and raw.get("documents") else []
         metas = raw.get("metadatas", [[]])[0] if raw and raw.get("metadatas") else []

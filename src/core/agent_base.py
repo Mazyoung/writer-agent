@@ -1,10 +1,9 @@
 from pathlib import Path
 from typing import Optional
 
-from openai import OpenAI
-
-from src.config.settings import get_settings, AgentModelConfig
+from src.config.settings import get_settings, AgentModelPolicy, ModelSlot
 from src.core.interceptor import get_interceptor
+from src.core.model_provider import ModelProviderClient
 from src.storage.file_store import FileStore
 
 
@@ -22,13 +21,11 @@ class BaseAgent:
         settings = get_settings()
         self.name = name
         self.novel_id = novel_id
-        self.config: AgentModelConfig = settings.get_agent_config(name)
-        self.model_name: str = settings.resolve_model_name(name)
-
-        self.client = OpenAI(
-            api_key=settings.api_key,
-            base_url=settings.base_url,
-        )
+        self.config: AgentModelPolicy = settings.get_agent_policy(name)
+        self.model_slot: ModelSlot = settings.get_model_slot(self.config.slot)
+        self.model_name = self.model_slot.model
+        self.provider_client = ModelProviderClient(self.model_slot)
+        self.client = self.provider_client.client
 
         self.file_store = FileStore(novel_id, settings.data_dir)
         self.interceptor = get_interceptor()
@@ -66,17 +63,11 @@ class BaseAgent:
         return AgentOutput(content=intercepted, filepath=filepath)
 
     def _call_llm(self, messages: list[dict]) -> str:
-        kwargs = {
-            "model": self.model_name,
-            "messages": messages,
-            "temperature": self.config.temperature,
-        }
-
-        if self.config.thinking:
-            kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
-
-        response = self.client.chat.completions.create(**kwargs)
-        return response.choices[0].message.content
+        return self.provider_client.complete(
+            messages,
+            temperature=self.config.temperature,
+            thinking=self.config.thinking,
+        )
 
     def _format_context(self, context: dict) -> str:
         """将上下文字典格式化为文本，子类可重写"""

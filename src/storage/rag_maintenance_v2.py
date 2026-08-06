@@ -56,7 +56,7 @@ class RAGMaintenanceService:
                 legacy_removed = self.chroma.purge_legacy_branch(
                     self.novel_id, branch_id)
             except Exception as exc:
-                print(f"  [RAG ERROR] 索引清理失败，重建中止: {exc}")
+                print(f"  [RAG 错误] 索引清理失败，重建中止：{exc}")
                 return {
                     "indexed_chapters": 0, "total_facts": 0,
                     "total_chunks": 0, "errors": 1,
@@ -90,11 +90,11 @@ class RAGMaintenanceService:
                 print(f"  [RAG] 第{chapter_index}章: {count} Atomic Facts")
             except Exception as exc:
                 stats["errors"] += 1
-                print(f"  [RAG WARNING] 第{chapter_index}章索引失败: {exc}")
+                print(f"  [RAG 警告] 第{chapter_index}章索引失败：{exc}")
 
         print(
             f"\n  完成: {stats['indexed_chapters']} 章, "
-            f"{stats['total_facts']} facts"
+            f"{stats['total_facts']} 个 Atomic Facts"
             + (f", {stats['errors']} 错误" if stats["errors"] else "")
         )
         return stats

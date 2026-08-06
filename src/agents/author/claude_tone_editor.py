@@ -1,9 +1,5 @@
 """
-Claude 调性编辑器 — 用 Claude 替代 DeepSeek 做调性编辑。
-
-两种模式:
-1. API 模式: 设置 ANTHROPIC_API_KEY 环境变量，直接调用 Anthropic API
-2. 文件模式 (默认): 保存草稿到临时文件，由 Claude Code 完成编辑后继续
+Legacy tone-editor entry point using the explicit WRITE model slot.
 
 用法:
   from src.agents.author.claude_tone_editor import ClaudeToneEditor
@@ -16,6 +12,7 @@ from pathlib import Path
 from typing import Optional
 
 from src.config.settings import get_settings
+from src.core.model_provider import ModelProviderClient
 from src.storage.file_store import FileStore
 
 
@@ -29,7 +26,8 @@ class ClaudeToneEditor:
         settings = get_settings()
         self.novel_id = novel_id
         self.file_store = FileStore(novel_id, settings.data_dir)
-        self.anthropic_key = settings.anthropic_api_key
+        self.model_slot = settings.get_model_slot("write")
+        self.provider_client = ModelProviderClient(self.model_slot)
         self._prompt = self._load_prompt(settings.prompts_dir)
 
     def _load_prompt(self, prompts_dir: Path) -> str:
@@ -40,8 +38,8 @@ class ClaudeToneEditor:
 
     @property
     def use_api(self) -> bool:
-        """是否可用 API 模式"""
-        return bool(self.anthropic_key)
+        """WRITE slot always selects one explicit API provider."""
+        return True
 
     def edit(self, scene_text: str, scene_spec: str,
              chapter_index: int, scene_index: int = 0) -> str:
@@ -55,10 +53,7 @@ class ClaudeToneEditor:
                                             chapter_index, scene_index)
         save_prefix = f"scene_ch{chapter_index:04d}_s{scene_index:02d}_claude_draft"
 
-        if self.use_api:
-            return self._edit_via_api(user_msg, save_prefix)
-        else:
-            return self._edit_via_file(user_msg, save_prefix, chapter_index)
+        return self._edit_via_api(user_msg, save_prefix)
 
     def edit_chapter_full(self, chapter_text: str, scene_plan_text: str,
                           chapter_index: int) -> str:
@@ -73,10 +68,7 @@ class ClaudeToneEditor:
 请调整叙事语气，检查场景规划对齐。"""
         save_prefix = f"chapter_{chapter_index:04d}_claude_draft"
 
-        if self.use_api:
-            return self._edit_via_api(user_msg, save_prefix)
-        else:
-            return self._edit_via_file(user_msg, save_prefix, chapter_index)
+        return self._edit_via_api(user_msg, save_prefix)
 
     def _build_user_message(self, scene_text: str, scene_spec: str,
                             chapter_index: int, scene_index: int) -> str:
@@ -92,25 +84,14 @@ class ClaudeToneEditor:
 请调整叙事语气，检查场景规划对齐。"""
 
     def _edit_via_api(self, user_msg: str, save_prefix: str) -> str:
-        """通过 Anthropic API 调用 Claude"""
-        try:
-            import anthropic
-        except ImportError:
-            print("  [ClaudeToneEditor] anthropic 未安装。运行: pip install anthropic")
-            print("  [ClaudeToneEditor] 回退到文件模式。")
-            return user_msg  # 返回原始文本
-
-        client = anthropic.Anthropic(api_key=self.anthropic_key)
-        response = client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=8192,
+        """Call the configured WRITE provider."""
+        result = self.provider_client.complete(
+            [
+                {"role": "system", "content": self._prompt},
+                {"role": "user", "content": user_msg},
+            ],
             temperature=0.7,
-            system=self._prompt,
-            messages=[{"role": "user", "content": user_msg}],
         )
-        result = response.content[0].text
-
-        # 保存编辑后的版本
         self.file_store.save("chapters", save_prefix, result)
         return result
 

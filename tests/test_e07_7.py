@@ -9,6 +9,10 @@ from src.agents.state_manager.state_manager import StateManager
 
 from src.config.settings import get_settings
 from src.storage.atomic_fact_store import AtomicFactStore, FactSearchResult
+from src.storage.embedding_config import (
+    NovelEmbeddingConfig,
+    NovelEmbeddingConfigStore,
+)
 from src.storage.document_formats import AtomicFact, ChapterPlan, FactDigest
 from src.storage.file_store import FileStore
 from src.workflows.chapter_workflow import rag_index, save_chapter_sources
@@ -143,6 +147,12 @@ class TestAtomicFactFormat(E077Case):
         self.assertNotIn("## 状态变更", persisted)
 class TestFactOnlyChroma(E077Case):
     def test_embedding_documents_are_fact_text_not_chapter_chunks(self):
+        NovelEmbeddingConfigStore(self.settings.data_dir).create(
+            NovelEmbeddingConfig(
+                novel_id="e077", embedding_mode="local",
+                embedding_model="test-chroma-default", embedding_dimensions=384,
+            )
+        )
         store = AtomicFactStore(self.settings.data_dir / "chroma")
         fake = FakeCollection()
         store._collection = fake

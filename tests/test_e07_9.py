@@ -212,7 +212,7 @@ class TestVolumeLifecycle(E079Case):
                 "get_workflow_status",
                 return_value=status,
             ):
-                with self.assertRaisesRegex(ValueError, "derivation repair"):
+                with self.assertRaisesRegex(ValueError, "repair-derivation"):
                     service.close_volume()
         self.assertIn(
             "**状态**: ACTIVE",

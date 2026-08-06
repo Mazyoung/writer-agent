@@ -164,16 +164,79 @@ python -m pip install -r requirements.txt
 
 ## 2. 配置模型
 
-在项目根目录创建 `.env`，填写你使用的模型 API 信息。
+在项目根目录创建 `.env`。LLM 使用四个职责槽位：
+
+- `ARCHITECT`：全书、世界观和分卷规划
+- `PLAN`：章节规划与规划审阅
+- `WRITE`：正文创作、风格处理、agent_edit 和 regenerate
+- `SYSTEM`：正文审阅、连续性检查、Derivation 和状态管理
+
+`ARCHITECT`、`PLAN`、`WRITE` 的 `PROVIDER / API_KEY / BASE_URL` 留空时继承 `SYSTEM`。支持 `deepseek`、`openai_compatible` 和 `anthropic`。`MODEL` 必须明确解析为非空值。
 
 例如：
 
 ```dotenv
-DEEPSEEK_API_KEY=your_key
-DEEPSEEK_BASE_URL=https://api.deepseek.com
+# ----- System / shared default -----
+SYSTEM_PROVIDER=deepseek
+SYSTEM_API_KEY=your_key
+SYSTEM_BASE_URL=https://api.deepseek.com
+SYSTEM_MODEL=deepseek-v4-flash
+
+# ----- Large-scale planning -----
+ARCHITECT_PROVIDER=
+ARCHITECT_API_KEY=
+ARCHITECT_BASE_URL=
+ARCHITECT_MODEL=deepseek-v4-pro
+
+# ----- Chapter planning -----
+PLAN_PROVIDER=
+PLAN_API_KEY=
+PLAN_BASE_URL=
+PLAN_MODEL=deepseek-v4-flash
+
+# ----- Prose creation -----
+WRITE_PROVIDER=
+WRITE_API_KEY=
+WRITE_BASE_URL=
+WRITE_MODEL=deepseek-v4-pro
+
+# ----- Embedding for NEW novels only -----
+EMBEDDING_MODE=local
+EMBEDDING_API_KEY=
+EMBEDDING_BASE_URL=
+EMBEDDING_MODEL=
+EMBEDDING_DIMENSIONS=
+
+# ----- Runtime -----
+CHAPTER_MODE=agent
+RAG_TOP_K=5
+AUTO_SAVEPOINT_EVERY=50
 ```
 
-具体模型可以根据自己的需求调整。
+旧的 `DEEPSEEK_API_KEY / DEEPSEEK_BASE_URL` 仅作为 `SYSTEM` 缺失时的兼容 fallback；新配置统一使用上述 slot 变量。Stylist 不再根据某个 Key 自动切换 Claude，Writer 与 Stylist 始终共同使用 `WRITE`。
+
+### Embedding 与 LLM 不同
+
+LLM slot 的 provider、API 和 model 可以随时修改。Embedding vector space 则在 `init` 时确认并永久绑定当前小说：
+
+- `local`：默认方式，继续使用 Chroma 内置本地 Embedding，无需额外 API。
+- `api`：使用任意 OpenAI-compatible Embedding API，例如 Qwen Embedding。
+
+API 模式示例：
+
+```dotenv
+EMBEDDING_MODE=api
+EMBEDDING_API_KEY=your_embedding_key
+EMBEDDING_BASE_URL=https://your-compatible-endpoint/v1
+EMBEDDING_MODEL=qwen3-embedding-0.6b
+EMBEDDING_DIMENSIONS=
+```
+
+`EMBEDDING_DIMENSIONS` 推荐留空，由 `init` 前的最小 probe 根据实际返回向量自动确定；如明确填写，probe 会验证实际维度是否一致。
+
+确认 `init` 后，小说的 Embedding Mode、Model、Dimensions 永久固定。以后修改 `.env` 中这三个值只影响下一本新小说，不影响已有小说；API Key 和 Base URL 属于运行时连接信息，可以轮换，但必须继续访问同一个模型/vector space。内部配置不保存 API Key，也不会随 Story Savepoint Load 改变。
+
+`AUTO_SAVEPOINT_EVERY=0` 关闭自动 Savepoint；正整数 `N` 表示每当正式章节达到 `DERIVED_READY` 且章节号可被 `N` 整除时，自动创建与手动 Savepoint 完全相同的 READY Savepoint。
 
 ---
 

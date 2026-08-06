@@ -200,7 +200,7 @@ class HumanFlowCase(E0791Case):
         wrong_chapter.write_text("错误章节正文", encoding="utf-8")
         with self.assertRaisesRegex(ValueError, "指向第 1 章"):
             self._submit(wrong_chapter)
-        with self.assertRaisesRegex(ValueError, "no pending human interrupt"):
+        with self.assertRaisesRegex(ValueError, "没有可 resume"):
             ChapterWorkflowRunner("human-mode", 3).resume({
                 "action": "submit", "candidate_file": str(self._candidate_file())
             })
