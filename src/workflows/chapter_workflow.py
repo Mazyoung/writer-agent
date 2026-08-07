@@ -620,7 +620,7 @@ def plan_chapter(state: ChapterWorkflowState) -> dict[str, Any]:
         return _error_result("; ".join(retrieval.warnings))
 
     planner = ChapterPlanner(novel_id)
-    plan = planner.plan_chapter(
+    planner.plan_chapter(
         chapter_index,
         outline,
         instructions,
@@ -640,7 +640,7 @@ def plan_chapter(state: ChapterWorkflowState) -> dict[str, Any]:
     if not plan_text.strip():
         return _error_result("ChapterPlanner 未生成可审阅的 canonical Chapter Plan")
 
-    print(f"  [plan_chapter] {len(plan.scenes)} scenes planned")
+    print("  [plan_chapter] canonical Chapter Plan 已生成")
     query_events.extend(record_generation_event(
         state,
         "QUERY_INTENT_FINALIZED",
@@ -931,7 +931,6 @@ def save_chapter_sources(state: ChapterWorkflowState) -> dict[str, Any]:
 def write_draft(state: ChapterWorkflowState) -> dict[str, Any]:
     """Write from the approved Chapter Plan, not from future plans."""
     from src.agents.author.deepseek_writer import DeepSeekWriter
-    from src.storage.document_formats import ChapterPlan
 
     if state.get("plan_verdict") != "PASS":
         return _error_result("Writer blocked: latest Plan Review verdict is not PASS")
@@ -939,12 +938,10 @@ def write_draft(state: ChapterWorkflowState) -> dict[str, Any]:
     if not plan_text:
         return _error_result("Chapter Plan 为空，无法写作")
 
-    plan = ChapterPlan.from_markdown(plan_text)
     fs = FileStore(state["novel_id"], get_settings().data_dir)
-    # Writer sees the approved plan's curated Part B, limited world rules, and
-    # previous prose continuity. It does not load Book Plan or Volume Plan.
     draft = DeepSeekWriter(state["novel_id"]).write_chapter(
-        plan,
+        plan_text,
+        state["chapter_index"],
         fs.load_canonical("settings", "world_setting") or "",
         _load_prev_chapter_end(fs, state["chapter_index"]),
     )
@@ -975,18 +972,15 @@ def _load_prev_chapter_end(fs: FileStore, chapter_index: int) -> str:
 def style_edit(state: ChapterWorkflowState) -> dict[str, Any]:
     """Style-edit the initial draft without adding planning context."""
     from src.agents.author.claude_stylist import ClaudeStylist
-    from src.storage.document_formats import ChapterPlan
 
     draft = state.get("draft_text", "")
     if not draft:
         return _error_result("draft_text 为空，无法执行 style_edit")
     plan_text = state.get("chapter_plan_text", "")
-    plan = ChapterPlan.from_markdown(plan_text) if plan_text else None
     styled = ClaudeStylist(state["novel_id"]).edit_chapter(
         draft,
         state["chapter_index"],
-        emotion_palette=plan.context.emotion_palette if plan else "",
-        scene_plan_text=plan_text,
+        chapter_plan_text=plan_text,
     )
     return {"styled_text": styled, "workflow_status": "STYLED"}
 
@@ -995,15 +989,14 @@ def style_edit(state: ChapterWorkflowState) -> dict[str, Any]:
 def agent_edit_chapter(state: ChapterWorkflowState) -> dict[str, Any]:
     """Locally revise current prose only after an explicit human decision."""
     from src.agents.author.deepseek_writer import DeepSeekWriter
-    from src.storage.document_formats import ChapterPlan
 
     autonomous = state.get("agent_execution") == "autonomous"
     if state.get("human_decision") != "agent_edit" and not autonomous:
         return _error_result("agent_edit 需要明确的人工决定")
 
-    plan = ChapterPlan.from_markdown(state.get("chapter_plan_text", ""))
     revised = DeepSeekWriter(state["novel_id"]).revise_chapter(
-        plan,
+        state.get("chapter_plan_text", ""),
+        state["chapter_index"],
         state.get("styled_text", ""),
         [*state.get("review_reasons", []), state.get("human_feedback", "")],
         state.get("t1_issues", []),
@@ -1522,9 +1515,9 @@ def derive_semantics(state: ChapterWorkflowState) -> dict[str, Any]:
         return _derived_failure(state, "Canonical prose missing after commit", stage="semantic")
     volume_plan = fs.load_tracking_doc("volume_plan") or ""
     if volume_plan:
-        from src.storage.document_formats import VolumePlan
+        from src.storage.volume_metadata import read_volume_metadata
         try:
-            if VolumePlan.from_markdown(volume_plan).status.upper() != "ACTIVE":
+            if read_volume_metadata(volume_plan).status != "ACTIVE":
                 volume_plan = ""
         except ValueError:
             volume_plan = ""
@@ -1555,7 +1548,6 @@ def derive_semantics(state: ChapterWorkflowState) -> dict[str, Any]:
 def persist_current_state(state: ChapterWorkflowState) -> dict[str, Any]:
     """Deterministically apply the checkpointed State Delta exactly once."""
     from src.agents.state_manager.state_manager import StateManager
-    from src.storage.document_formats import ChapterPlan
 
     fs = FileStore(state["novel_id"], get_settings().data_dir)
     canonical = fs.load_canonical_chapter(state["chapter_index"]) or ""
@@ -1563,9 +1555,9 @@ def persist_current_state(state: ChapterWorkflowState) -> dict[str, Any]:
     try:
         chapter_title = ""
         if state.get("chapter_mode", "agent") != "human":
-            chapter_title = ChapterPlan.from_markdown(
-                state.get("chapter_plan_text", "")
-            ).title
+            first_line = state.get("chapter_plan_text", "").lstrip().splitlines()[:1]
+            if first_line and first_line[0].startswith("# "):
+                chapter_title = first_line[0][2:].strip()
         changes = StateManager(state["novel_id"], sqlite).update_tracking_docs(
             state["chapter_index"], canonical,
             state.get("derivation_raw_analysis", ""),
@@ -1644,12 +1636,19 @@ def persist_fact_digest(state: ChapterWorkflowState) -> dict[str, Any]:
 
 def _parse_volume_progress(raw: str) -> str:
     section = re.search(
-        r"(?:##\s*)?Volume Progress[^\n]*\n(.*?)(?=\n##\s|\Z)",
-        raw, re.IGNORECASE | re.DOTALL,
+        r"^##\s+Volume Progress\s*$\n(.*?)(?=^##\s|\Z)",
+        raw, re.IGNORECASE | re.DOTALL | re.MULTILINE,
     )
-    candidate = section.group(1) if section else raw
-    matches = re.findall(r"\b(CONTINUE|READY_TO_CLOSE|UNKNOWN)\b", candidate.upper())
-    return matches[-1] if matches else "UNKNOWN"
+    if section is None:
+        return "UNKNOWN"
+    candidate = section.group(1)
+    recommendation = re.search(
+        r"^\s*-?\s*\*\*Recommendation\*\*\s*:\s*"
+        r"(CONTINUE|READY_TO_CLOSE|UNKNOWN)\s*$",
+        candidate,
+        re.IGNORECASE | re.MULTILINE,
+    )
+    return recommendation.group(1).upper() if recommendation else "UNKNOWN"
 
 
 def persist_volume_progress(state: ChapterWorkflowState) -> dict[str, Any]:

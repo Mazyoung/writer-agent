@@ -2,8 +2,8 @@
 
 from src.config.settings import get_settings
 from src.storage.current_state_store import CurrentStateStore
-from src.storage.document_formats import VolumePlan
 from src.storage.file_store import FileStore
+from src.storage.volume_metadata import read_volume_metadata
 from src.storage.sqlite_store import SQLiteStore
 
 
@@ -28,7 +28,7 @@ class NovelStatusService:
             self.file_store.load_tracking_doc("book_plan")
         )
         if volume_plan:
-            active_volume = VolumePlan.from_markdown(volume_plan)
+            active_volume = read_volume_metadata(volume_plan)
             status["active_volume"] = active_volume.volume_number
             status["active_volume_status"] = active_volume.status
 

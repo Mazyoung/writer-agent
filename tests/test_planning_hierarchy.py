@@ -245,7 +245,7 @@ class TestChapterPlannerConsumption(_TmpNovelCase):
         self.assertIn("金手指不得更换", prompt)          # Book Plan 战略约束
         self.assertIn("重返交易站", prompt)              # Current Volume Plan 路径
         self.assertIn("以事实为准", prompt)              # 事实优先于计划声明
-        self.assertEqual(plan.chapter_index, 15)         # E01 round-trip
+        self.assertEqual(plan, CHAPTER_PLAN_MD)          # raw Markdown 直通
 
     def test_missing_plans_raise_clear_error(self):
         from src.agents.author.chapter_planner import ChapterPlanner

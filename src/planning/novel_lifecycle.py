@@ -11,8 +11,8 @@ from src.planning.models import PlanRevision, PlanType, RevisionStatus
 from src.planning.store import PlanningStore
 from src.planning.trigger_policy import ReplanTrigger
 from src.storage.current_state_store import CurrentStateStore
-from src.storage.document_formats import VolumePlan
 from src.storage.file_store import FileStore
+from src.storage.volume_metadata import VolumeMetadata, read_volume_metadata
 from src.storage.sqlite_store import SQLiteStore
 
 
@@ -293,10 +293,10 @@ Book Plan 是整本书的长期战略，只写长期有效的内容：
         text = self.file_store.load_tracking_doc("volume_plan") or ""
         if not text:
             raise FileNotFoundError("tracking/volume_plan.md 不存在")
-        plan = VolumePlan.from_markdown(text)
-        if plan.status.upper() == "COMPLETED":
+        plan = read_volume_metadata(text)
+        if plan.status == "COMPLETED":
             return text
-        if plan.status.upper() != "ACTIVE":
+        if plan.status != "ACTIVE":
             raise ValueError(f"只有 ACTIVE 卷可以关闭；当前状态为 {plan.status}")
         chapters = self.file_store.list_chapters()
         if not chapters:
@@ -335,8 +335,8 @@ Book Plan 是整本书的长期战略，只写长期有效的内容：
         if not all([previous_text, book_plan, world_setting, current_state]):
             raise FileNotFoundError(
                 "新卷规划需要 World Setting、Book Plan、上一卷 Volume Plan 和 Current State")
-        previous = VolumePlan.from_markdown(previous_text)
-        if previous.status.upper() != "COMPLETED":
+        previous = read_volume_metadata(previous_text)
+        if previous.status != "COMPLETED":
             raise ValueError("规划下一卷前必须先关闭当前卷")
         new_index = volume_number or previous.volume_number + 1
         if new_index <= previous.volume_number:
@@ -405,8 +405,8 @@ per-chapter outline. Output exactly this Markdown structure:
         if not path.exists():
             raise FileNotFoundError("tracking/volume_plan.md 不存在")
         text = path.read_text(encoding="utf-8")
-        plan = VolumePlan.from_markdown(text)
-        if plan.status.upper() == "ACTIVE":
+        plan = read_volume_metadata(text)
+        if plan.status == "ACTIVE":
             return text
         self._validate_volume_candidate(text, plan.volume_number, expected_status="DRAFT")
         active = self._with_volume_status(text, "ACTIVE")
@@ -416,18 +416,30 @@ per-chapter outline. Output exactly this Markdown structure:
 
     @staticmethod
     def _validate_volume_candidate(text: str, expected_index: int,
-                                   expected_status: str = "DRAFT") -> VolumePlan:
+                                   expected_status: str = "DRAFT") -> VolumeMetadata:
         if not text or not text.strip():
             raise ValueError("Volume Planner 返回了空内容")
-        plan = VolumePlan.from_markdown(text)
+        try:
+            plan = read_volume_metadata(text)
+        except ValueError as exc:
+            message = str(exc)
+            if "卷号元数据" in message:
+                raise ValueError(
+                    f"Volume Plan 无效：\n  - expected volume {expected_index}, got 0"
+                ) from exc
+            if "状态元数据" in message:
+                raise ValueError(
+                    f"Volume Plan 无效：\n  - status 必须为 {expected_status}，当前为空"
+                ) from exc
+            raise
         problems = []
         if plan.volume_number != expected_index:
             problems.append(f"expected volume {expected_index}, got {plan.volume_number}")
-        if plan.status.upper() != expected_status:
+        if plan.status != expected_status:
             problems.append(
                 f"status 必须为 {expected_status}，当前为 {plan.status}"
             )
-        if plan.status.upper() not in {"DRAFT", "ACTIVE", "COMPLETED"}:
+        if plan.status not in {"DRAFT", "ACTIVE", "COMPLETED"}:
             problems.append(f"非法 status：{plan.status}")
         if problems:
             raise ValueError("Volume Plan 无效：\n  - " + "\n  - ".join(problems))

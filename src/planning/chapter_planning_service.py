@@ -4,7 +4,6 @@ from src.agents.author.chapter_planner import ChapterPlanner
 from src.agents.author.query_intent_builder import QueryIntentBuilder
 from src.config.settings import get_settings
 from src.core.text_windows import previous_chapter_end
-from src.storage.document_formats import ChapterPlan
 from src.storage.file_store import FileStore
 from src.workflows.retrieval_service import ChapterRetrievalService
 
@@ -27,7 +26,7 @@ class ChapterPlanningService:
         chapter_index: int,
         chapter_outline: str = "",
         extra_instructions: str = "",
-    ) -> ChapterPlan:
+    ) -> str:
         """Generate a Chapter Plan while preserving retrieval observability."""
         from src.workflows.chapter_progress import ensure_chapter_can_start
 
@@ -74,20 +73,6 @@ class ChapterPlanningService:
             current_state_text=current_state,
         )
 
-        print(f"  Part A: {len(plan.scenes)} 个场景")
-        context = plan.context
-        has_relationships = bool(
-            context.character_relations and context.character_relations != "暂无"
-        )
-        has_items = bool(context.items_tracking and context.items_tracking != "暂无")
-        has_cultivation = bool(
-            context.cultivation_status and context.cultivation_status != "暂无"
-        )
-        print(
-            "  Part B: "
-            f"角色关系{'Y' if has_relationships else 'N'} "
-            f"物品{'Y' if has_items else 'N'} "
-            f"修炼{'Y' if has_cultivation else 'N'}"
-        )
+        print("  Chapter Plan 已生成。")
         print(f"  已保存: outlines/chapter_plan_ch{chapter_index:04d}.md")
         return plan

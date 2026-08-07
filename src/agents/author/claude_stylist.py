@@ -29,21 +29,21 @@ class ClaudeStylist:
         self,
         draft_text: str,
         chapter_index: int,
-        emotion_palette: str = "",
-        scene_plan_text: str = "",
+        chapter_plan_text: str = "",
         style_feedback: str = "",
+        **legacy_context: str,
     ) -> str:
+        if not chapter_plan_text:
+            chapter_plan_text = legacy_context.get("scene_plan_text", "")
         guard_planning_context(self.model_slot, {
-            "chapter_plan.md": scene_plan_text,
+            "chapter_plan.md": chapter_plan_text,
             "candidate_prose.md": draft_text,
-            "emotion_palette": emotion_palette,
             "human_feedback": style_feedback,
         })
         user_msg = self._build_message(
             draft_text,
             chapter_index,
-            emotion_palette,
-            scene_plan_text,
+            chapter_plan_text,
             style_feedback,
         )
         return self._call_write_slot(user_msg)
@@ -76,15 +76,13 @@ class ClaudeStylist:
         return result
 
     def _build_message(
-        self, draft: str, ch_idx: int, emotion: str, plan: str, feedback: str
+        self, draft: str, ch_idx: int, plan: str, feedback: str
     ) -> str:
         parts = [f"## 第 {ch_idx} 章"]
         if feedback:
             parts.append(f"### [最高优先级] 人工反馈\n{feedback}")
-        if emotion:
-            parts.append(f"### 情感调色板\n{emotion}")
         if plan:
-            parts.append(f"### 场景规划（用于对齐检查）\n{plan}")
+            parts.append(f"### 已通过审阅的 Chapter Plan（完整原文）\n{plan}")
         parts.append(f"### 原始正文\n{draft}")
         parts.append("---\n请调整叙事语气，检查场景规划对齐。")
         return "\n\n".join(parts)

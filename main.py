@@ -6,7 +6,7 @@
     python main.py init <小说名> --confirm          # Phase 2: 确认提案 → 生成大纲
 
     # standalone / 调试规划（不属于正式 ChapterWorkflow，write 不会接续其结果）
-    python main.py plan <小说名> --chapter N        # 独立生成章规划 (Part A + Part B)
+    python main.py plan <小说名> --chapter N        # 独立生成 Chapter Plan
     python main.py plan <小说名> --chapter N --outline "..."  # 指定章大纲
     python main.py plan <小说名> --chapter N --instructions "..."  # 额外指示
 
@@ -254,7 +254,9 @@ def _cmd_plan_interactive(planning, args):
         print(str(e))
         return
 
-    print(f"  场景规划：{len(plan.scenes)} 个场景")
+    if not plan.strip():
+        print("  Chapter Plan 生成失败：返回内容为空。")
+        return
     print(f"  已保存: outlines/chapter_plan_ch{args.chapter:04d}.md")
     print("\n  standalone/debug plan 已完成；正式 write 会重新生成本次章节规划，不接续此结果。")
 

@@ -1,15 +1,14 @@
-"""
-DeepSeekWriter — 接收 ChapterPlan (Part A + Part B) 的创意写手。
+"""DeepSeekWriter — 根据已批准的 Chapter Plan 原文生成或修订正文。"""
 
-与旧 SceneWriter 的关键区别:
-1. 先吸收 Part B 上下文包（角色关系/物品/修炼/伏笔/情感），再写 Part A 场景计划
-2. 支持逐场景写作 (write_scene) 和整章写作 (write_chapter)
-3. 上下文是权威的，不是可选的——角色关系和物品状态不可被写手篡改
-"""
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
 
 from src.core.agent_base import BaseAgent
 from src.core.token_guard import guard_planning_context
-from src.storage.document_formats import ChapterPlan, SceneSpec
+
+if TYPE_CHECKING:
+    from src.storage.document_formats import ChapterPlan, SceneSpec
 
 
 class DeepSeekWriter(BaseAgent):
@@ -18,38 +17,51 @@ class DeepSeekWriter(BaseAgent):
     def __init__(self, novel_id: str):
         super().__init__("deepseek_writer", novel_id, "deepseek_writer.txt")
 
-    def write_chapter(self, chapter_plan: ChapterPlan,
-                      world_setting: str = "",
-                      prev_chapter_end: str = "") -> str:
-        """整章一次性写作。
-
-        Args:
-            chapter_plan: 包含 Part A (场景计划) + Part B (上下文包)
-            world_setting: 完整世界观设定（高优先级约束）
-            prev_chapter_end: 上一章结尾完整段落窗口（用于衔接）
-        """
+    def write_chapter(
+        self,
+        chapter_plan_text: str,
+        chapter_index: int,
+        world_setting: str = "",
+        prev_chapter_end: str = "",
+    ) -> str:
+        """根据完整、已通过审阅的 Chapter Plan 原文生成整章正文。"""
         guard_planning_context(self.model_slot, {
             "world_setting.md": world_setting,
-            "chapter_plan.md": chapter_plan.to_markdown(),
+            "chapter_plan.md": chapter_plan_text,
             "recent_chapter_end": prev_chapter_end,
         })
-        prompt = chapter_plan.build_writer_prompt(world_setting, prev_chapter_end)
+        prompt = f"""## 已通过审阅的 Chapter Plan
+{chapter_plan_text}
 
+## World Setting
+{world_setting or "无"}
+
+## Previous Chapter End
+{prev_chapter_end or "无"}
+
+---
+严格执行完整 Chapter Plan，在 World Setting 与既有正文连续性边界内写出第 {chapter_index} 章完整正文。
+直接输出正文，不写规划、分析或说明。"""
         result = self.run(
             user_message=prompt,
             save_category="chapters",
-            save_prefix=f"chapter_{chapter_plan.chapter_index:04d}_draft",
+            save_prefix=f"chapter_{chapter_index:04d}_draft",
         )
         return result.content
 
-    def revise_chapter(self, chapter_plan: ChapterPlan, chapter_text: str,
-                       review_reasons: list[str],
-                       t1_issues: list[str]) -> str:
+    def revise_chapter(
+        self,
+        chapter_plan_text: str,
+        chapter_index: int,
+        chapter_text: str,
+        review_reasons: list[str],
+        t1_issues: list[str],
+    ) -> str:
         """Apply one L1 prose revision without loading future plans."""
         issues = [*t1_issues, *review_reasons]
         issue_text = "\n".join(f"- {issue}" for issue in issues if issue.strip())
         prompt = f"""## 已通过审阅的 Chapter Plan
-{chapter_plan.to_markdown()}
+{chapter_plan_text}
 
 ## 待修订正文
 {chapter_text}
@@ -64,24 +76,24 @@ class DeepSeekWriter(BaseAgent):
         result = self.run(
             user_message=prompt,
             save_category="chapters",
-            save_prefix=f"chapter_{chapter_plan.chapter_index:04d}_revision",
+            save_prefix=f"chapter_{chapter_index:04d}_revision",
         )
         return result.content
 
-    def write_scene(self, scene: SceneSpec, chapter_plan: ChapterPlan,
+    def write_scene(self, scene: "SceneSpec", chapter_plan: "ChapterPlan",
                     prev_scene_end: str = "",
                     completed_scenes: list[str] | None = None) -> str:
-        """逐场景写作。
+        """Legacy 逐场景写作工具；正式整章路径使用 raw Chapter Plan。
 
         Args:
             scene: 当前场景的写作规格
-            chapter_plan: 整章规划（提供 Part B 上下文 + 全部场景列表）
+            chapter_plan: legacy 结构化整章规划
             prev_scene_end: 上一场景结尾文本
             completed_scenes: 已经完成的场景全文列表
         """
         parts = []
 
-        # Part B 上下文（完整注入每个场景）
+        # Legacy structured-plan context (not used by formal whole-chapter flow).
         if chapter_plan.context.character_relations:
             parts.append("## [必读] 角色关系图\n" + chapter_plan.context.character_relations)
         if chapter_plan.context.items_tracking:

@@ -3,7 +3,6 @@
 from src.agents.author.claude_stylist import ClaudeStylist
 from src.agents.author.style_checker import StyleChecker
 from src.config.settings import get_settings
-from src.storage.document_formats import ChapterPlan
 from src.storage.file_store import FileStore
 
 
@@ -35,8 +34,6 @@ class ChapterEditingService:
         plan_text = self.file_store.load_canonical(
             "outlines", f"chapter_plan_ch{chapter_index:04d}"
         ) or ""
-        plan = ChapterPlan.from_markdown(plan_text) if plan_text else ChapterPlan()
-
         if feedback:
             self.file_store.save_feedback(
                 f"style_feedback_ch{chapter_index:04d}", feedback
@@ -45,8 +42,7 @@ class ChapterEditingService:
         styled = self.stylist.edit_chapter(
             chapter_text,
             chapter_index,
-            emotion_palette=plan.context.emotion_palette,
-            scene_plan_text=plan_text,
+            chapter_plan_text=plan_text,
             style_feedback=feedback,
         )
         self.file_store.save(

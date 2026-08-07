@@ -13,7 +13,6 @@ from langgraph.types import Command, StateSnapshot
 
 from src.config.settings import get_settings
 from src.storage.file_store import FileStore
-from src.storage.document_formats import ChapterPlan
 from src.storage.story_savepoint import (
     NovelOperationLock,
     StorySavepointManager,
@@ -256,14 +255,9 @@ class ChapterWorkflowRunner:
             raise ValueError(f"人工编辑文件为空：{edit_path}")
 
         interrupt_type = interrupt_value.get("type")
-        if interrupt_type == "plan_review":
-            plan = ChapterPlan.from_markdown(text)
-            if plan.chapter_index != self.chapter_index or not plan.scenes:
-                raise ValueError(
-                    "人工编辑的 Chapter Plan 无效或指向其他章节"
-                )
-        elif interrupt_type not in {
-            "chapter_review", "final_author_approval", "human_final_approval"
+        if interrupt_type not in {
+            "plan_review", "chapter_review", "final_author_approval",
+            "human_final_approval",
         }:
             raise ValueError(f"不支持的待处理 interrupt 类型：{interrupt_type}")
         return text

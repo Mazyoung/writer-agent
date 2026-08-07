@@ -2,8 +2,8 @@
 ChapterPlanner — 章规划师（重写版）。
 
 核心变更:
-1. plan_chapter(): 加载全部追踪文档，生成 Part A + Part B 的完整章规划
-2. assemble_context_package(): 从追踪文档组装 Part B 上下文包
+1. plan_chapter(): 加载正式上下文，生成可执行的原始 Markdown Chapter Plan
+2. assemble_context_package(): legacy 兼容工具，组装旧式上下文包
 3. 保留 replan() 用于已写部分场景后的重规划
 """
 
@@ -13,11 +13,12 @@ from src.core.text_windows import previous_chapter_end
 from src.core.token_guard import guard_planning_context
 from src.config.settings import get_settings
 from src.storage.file_store import FileStore
-from src.storage.document_formats import ChapterPlan, ContextPackage, VolumePlan
+from src.storage.document_formats import ContextPackage
+from src.storage.volume_metadata import VolumeMetadata, read_volume_metadata
 
 
 class ChapterPlanner(BaseAgent):
-    """生成含 Part A + Part B 的完整章规划"""
+    """生成可直接交给 Reviewer 与 Writer 的原始 Markdown Chapter Plan。"""
 
     def __init__(self, novel_id: str):
         super().__init__("chapter_planner", novel_id, "chapter_planner.txt")
@@ -26,10 +27,10 @@ class ChapterPlanner(BaseAgent):
 
     # ── 主入口 ─────────────────────────────────────────
 
-    def load_active_volume(self) -> VolumePlan:
-        """加载当前 ACTIVE Volume Plan（Runtime Planning State 的唯一战术层）。"""
-        text = self.fs.load_canonical("tracking", "volume_plan")
-        return VolumePlan.from_markdown(text) if text else VolumePlan()
+    def load_active_volume(self) -> VolumeMetadata:
+        """读取当前 Volume Plan 的卷号与生命周期状态。"""
+        text = self.fs.load_canonical("tracking", "volume_plan") or ""
+        return read_volume_metadata(text)
 
     def _require_long_term_plans(self) -> tuple[str, str]:
         """硬性要求 Book Plan + Active Volume Plan 存在。
@@ -51,8 +52,8 @@ class ChapterPlanner(BaseAgent):
                 "\n新小说: 先运行 python main.py init <小说名> --confirm 生成。"
                 "\n旧数据: 运行 python scripts/migrate_legacy_data.py <小说名> "
                 "从 plot_structure.md 迁移。")
-        active = VolumePlan.from_markdown(volume_plan)
-        if active.status.upper() == "DRAFT":
+        active = read_volume_metadata(volume_plan)
+        if active.status == "DRAFT":
             pattern = r'(\*\*状态\*\*\s*[:：]\s*)DRAFT\b'
             volume_plan = re.sub(
                 pattern, r'\g<1>ACTIVE', volume_plan, count=1,
@@ -61,12 +62,12 @@ class ChapterPlanner(BaseAgent):
             (self.fs.root / "tracking" / "volume_plan.md").write_text(
                 volume_plan, encoding="utf-8"
             )
-            active = VolumePlan.from_markdown(volume_plan)
+            active = read_volume_metadata(volume_plan)
             print(
                 f"  [Volume] 第{active.volume_number}卷已在 Chapter Planning "
                 "开始时确认为 ACTIVE。"
             )
-        if active.status.upper() != "ACTIVE":
+        if active.status != "ACTIVE":
             raise ValueError(
                 "章节规划需要 ACTIVE 状态的 volume_plan.md；"
                 f"当前状态为 {active.status}"
@@ -79,8 +80,8 @@ class ChapterPlanner(BaseAgent):
                      rag_evidence: str = "",
                      query_intent: str = "",
                      chapter_intent: str = "",
-                     current_state_text: str = "") -> ChapterPlan:
-        """生成完整章规划（Part A + Part B）。
+                     current_state_text: str = "") -> str:
+        """生成完整的原始 Markdown Chapter Plan。
 
         消费链：Book Plan + Active Volume Plan + Memory（追踪文档/事实摘要）。
         上下文优先级：World Setting → RAG Evidence → Book 战略约束 → Current Volume Plan
@@ -93,7 +94,7 @@ class ChapterPlanner(BaseAgent):
         book_plan, volume_plan = self._require_long_term_plans()
 
         # 加载上下文
-        active_vp = VolumePlan.from_markdown(volume_plan)
+        active_vp = read_volume_metadata(volume_plan)
         print(f"  [ChapterPlanner] 活跃卷: 第{active_vp.volume_number}卷（{active_vp.status}）")
         world_setting = self.fs.load_canonical("settings", "world_setting") or ""
         prev_chapter_end = previous_chapter_end(self.fs, chapter_index)
@@ -138,8 +139,8 @@ class ChapterPlanner(BaseAgent):
         if chapter_outline:
             parts.append(f"### 作者提供的本章补充意图\n{chapter_outline}")
 
-        # 4. Actual present state — one generated snapshot (Part B material)
-        parts.append("## 当前状态（tracking/current_state.md；Part B 原材料）")
+        # 4. Current present state is passed as raw planning context.
+        parts.append("## 当前状态（tracking/current_state.md）")
         parts.append(current_state_text or "暂无")
         if fact_context:
             parts.append(f"### 前章事实摘要（已发生的实际事实，优先于未来计划）\n{fact_context}")
@@ -155,7 +156,7 @@ class ChapterPlanner(BaseAgent):
             parts.append(f"## 作者额外指示\n{extra_instructions}")
 
         parts.append(
-            "\n---\n请按输出格式生成第 {} 章的完整规划（Part A + Part B）。\n"
+            "\n---\n请生成第 {} 章完整、可执行的 Chapter Plan。\n"
             "重要：若全书规划/卷规划与已发生的事实（事实摘要、上一章结尾）存在冲突，"
             "以事实为准，不得假装事实没有发生；在「关键伏笔节点」中以 "
             "[PLANNING CONFLICT] 标注冲突说明，不要自行重写历史。".format(chapter_index))
@@ -178,11 +179,11 @@ class ChapterPlanner(BaseAgent):
             save_prefix=f"chapter_plan_ch{chapter_index:04d}",
             use_canonical=True,
         )
-        return ChapterPlan.from_markdown(result.content)
+        return result.content
 
     def plan_from_interactive_answers(self, chapter_index: int,
                                        answers: dict,
-                                       context: dict) -> ChapterPlan:
+                                       context: dict) -> str:
         """根据交互式 Q&A 收集的答案生成章规划。
 
         Args:
@@ -211,7 +212,7 @@ class ChapterPlanner(BaseAgent):
                 parts.append(f"### {label}\n{answers[qid]}")
 
         # 追踪文档
-        parts.append("## 追踪文档（Part B 原材料）")
+        parts.append("## 追踪文档（按本章需要使用）")
         if context.get("character_relations"):
             parts.append(f"### character_relationships.md\n{context['character_relations']}")
         if context.get("items_tracking"):
@@ -219,7 +220,7 @@ class ChapterPlanner(BaseAgent):
         if context.get("volume_plan"):
             parts.append(f"### 当前卷大故事路径\n{context['volume_plan']}")
 
-        parts.append("\n---\n请根据以上所有信息（特别是作者的指示），按输出格式生成完整的章规划（Part A + Part B）。作者指示中的内容优先于追踪文档。")
+        parts.append("\n---\n请根据以上信息（特别是作者指示），生成完整、可执行的 Chapter Plan。作者指示中的内容优先于追踪文档。")
 
         user_msg = "\n\n".join(parts)
         guard_planning_context(self.model_slot, {
@@ -235,7 +236,7 @@ class ChapterPlanner(BaseAgent):
             save_prefix=f"chapter_plan_ch{chapter_index:04d}",
             use_canonical=True,
         )
-        return ChapterPlan.from_markdown(result.content)
+        return result.content
 
     def revise_plan(
         self,
@@ -283,7 +284,7 @@ class ChapterPlanner(BaseAgent):
         return result.content
 
     def assemble_context_package(self, chapter_index: int) -> ContextPackage:
-        """从追踪文档组装 Part B 上下文包（无需 LLM 调用）。
+        """Legacy 工具：从追踪文档组装上下文包（无需 LLM 调用）。
 
         适合在交互式规划中快速生成上下文包初稿供人工审阅。
         """

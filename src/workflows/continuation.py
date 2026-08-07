@@ -6,8 +6,8 @@ import re
 from typing import Any
 
 from src.config.settings import get_settings
-from src.storage.document_formats import VolumePlan
 from src.storage.chapter_completion import is_derived_ready
+from src.storage.volume_metadata import read_volume_metadata
 from src.storage.file_store import FileStore
 from src.workflows.chapter_runner import ChapterWorkflowRunner
 
@@ -73,8 +73,8 @@ class NovelContinuationService:
                 "action": "blocked",
                 "message": "缺少 tracking/volume_plan.md，当前没有合法的下一步。",
             }
-        volume = VolumePlan.from_markdown(volume_text)
-        if volume.status.upper() == "COMPLETED":
+        volume = read_volume_metadata(volume_text)
+        if volume.status == "COMPLETED":
             return {
                 "action": "volume_boundary",
                 "message": (
