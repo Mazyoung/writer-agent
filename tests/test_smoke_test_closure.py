@@ -73,6 +73,106 @@ class SmokeClosureCase(unittest.TestCase):
 
 
 class ProposalAndPlanningContextTests(SmokeClosureCase):
+    def test_proposal_prompt_forbids_early_chapter_outlines(self):
+        service = object.__new__(NovelLifecycleService)
+        service.novel_id = "smoke"
+        service.world_builder = MagicMock()
+        service.world_builder.run.return_value = SimpleNamespace(content="PROPOSAL")
+
+        service.generate_proposal("HINT")
+
+        prompt = service.world_builder.run.call_args.kwargs["user_message"]
+        self.assertIn("不得输出或承诺", prompt)
+        self.assertIn("前 N 章", prompt)
+        self.assertIn("世界观、全书规划和第一卷规划", prompt)
+
+    def _lifecycle(self):
+        service = object.__new__(NovelLifecycleService)
+        service.novel_id = "smoke"
+        service.file_store = FileStore("smoke", self.settings.data_dir)
+        service.world_builder = MagicMock()
+        service.plot_designer = MagicMock()
+        return service
+
+    def test_initialize_resumes_from_existing_formal_artifacts(self):
+        cases = (
+            (False, False, False, 1, 2),
+            (True, False, False, 0, 2),
+            (True, True, False, 0, 1),
+            (True, True, True, 0, 0),
+        )
+        for world_exists, book_exists, volume_exists, world_calls, plot_calls in cases:
+            with self.subTest(
+                world=world_exists, book=book_exists, volume=volume_exists
+            ):
+                service = self._lifecycle()
+                if world_exists:
+                    service.file_store.save_canonical(
+                        "settings", "world_setting", "WORLD-DISK-RAW"
+                    )
+                if book_exists:
+                    service.file_store.save_tracking_doc(
+                        "book_plan", "BOOK-DISK-RAW\n自定义完整正文"
+                    )
+                if volume_exists:
+                    service.file_store.save_tracking_doc(
+                        "volume_plan", VOLUME_DRAFT.replace("第2卷", "第1卷")
+                    )
+                service.world_builder.run.return_value = SimpleNamespace(
+                    content="WORLD-GENERATED"
+                )
+                responses = []
+                if not book_exists:
+                    responses.append(SimpleNamespace(content=BOOK_PLAN))
+                if not volume_exists:
+                    responses.append(SimpleNamespace(
+                        content=VOLUME_DRAFT.replace("第2卷", "第1卷")
+                    ))
+                service.plot_designer.run.side_effect = responses
+
+                with patch(
+                    "src.storage.current_state_store.CurrentStateStore.ensure_initialized",
+                    return_value=(SimpleNamespace(), "# Current State", "hash"),
+                ) as ensure:
+                    result = service.initialize_novel("PROPOSAL")
+
+                self.assertEqual(service.world_builder.run.call_count, world_calls)
+                self.assertEqual(service.plot_designer.run.call_count, plot_calls)
+                ensure.assert_called_once_with()
+                if book_exists and not volume_exists:
+                    volume_prompt = service.plot_designer.run.call_args.kwargs[
+                        "user_message"
+                    ]
+                    self.assertIn("BOOK-DISK-RAW\n自定义完整正文", volume_prompt)
+                self.assertTrue(result["world_setting"].strip())
+                self.assertTrue(result["book_plan"].strip())
+                self.assertTrue(result["volume_plan"].strip())
+
+                for child in service.file_store.root.iterdir():
+                    if child.is_dir():
+                        import shutil
+                        shutil.rmtree(child)
+                    else:
+                        child.unlink()
+
+    def test_noncanonical_book_markdown_reaches_volume_planner_raw(self):
+        service = self._lifecycle()
+        service.file_store.save_canonical(
+            "settings", "world_setting", "WORLD-DISK"
+        )
+        raw_book = "任意非 canonical Book Plan 标题\n\n完整作者正文尾部"
+        service.file_store.save_tracking_doc("book_plan", raw_book)
+        service.plot_designer.run.return_value = SimpleNamespace(
+            content=VOLUME_DRAFT.replace("第2卷", "第1卷")
+        )
+
+        service.initialize_novel("PROPOSAL")
+
+        self.assertIn(
+            raw_book,
+            service.plot_designer.run.call_args.kwargs["user_message"],
+        )
+
     def test_confirm_reads_current_proposal_only(self):
         novel = self.settings.data_dir / "novels" / "smoke"
         novel.mkdir(parents=True)

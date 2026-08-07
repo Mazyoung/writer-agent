@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from src.config.settings import get_settings
 from src.core.model_provider import ModelProviderClient
 from src.core.token_guard import guard_planning_context
@@ -63,6 +65,7 @@ class QueryIntentBuilder:
         recent_chapter_end: str,
         current_state: str,
         human_intent: str = "",
+        on_attempt: Callable[[str, int], None] | None = None,
     ) -> str:
         documents = {
             "volume_plan.md": volume_plan,
@@ -81,8 +84,12 @@ class QueryIntentBuilder:
         if not first:
             raise ValueError("Query Intent Builder 返回空内容")
         if len(first) < SEVERE_QUERY_INTENT_CHARS:
+            if on_attempt:
+                on_attempt("finalized", 1)
             return first
 
+        if on_attempt:
+            on_attempt("retried", 2)
         correction = f"""你上一次生成的 Query Intent 严重超长，已经达到 {len(first)} 字。
 
 Query Intent 只是用于 Embedding 历史检索，不是 Chapter Plan，也不是剧情总结。
@@ -115,4 +122,6 @@ Query Intent 只是用于 Embedding 历史检索，不是 Chapter Plan，也不�
                 "检索意图，系统不会静默截断后继续检索。"
                 "请检查 QUERY_INTENT_MODEL 或相关输入后重新执行。"
             )
+        if on_attempt:
+            on_attempt("finalized", 2)
         return second

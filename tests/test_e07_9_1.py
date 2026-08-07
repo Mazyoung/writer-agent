@@ -179,12 +179,16 @@ class TestHumanWorkflow(E0791Case):
             "src.workflows.retrieval_service.ChapterRetrievalService"
         ) as retrieval:
             retrieval.return_value.retrieve.return_value = self.retrieval_outcome()
-            result = prepare_human_context({
-                "novel_id": "human-mode",
-                "chapter_index": 2,
-                "chapter_intent": "调查门锁，不揭露幕后人。",
-                "current_state_text": "# Current State\n林默在旧宅。",
-            })
+            with patch(
+                "src.agents.author.query_intent_builder.QueryIntentBuilder.build",
+                return_value="intent",
+            ):
+                result = prepare_human_context({
+                    "novel_id": "human-mode",
+                    "chapter_index": 2,
+                    "chapter_intent": "调查门锁，不揭露幕后人。",
+                    "current_state_text": "# Current State\n林默在旧宅。",
+                })
 
         self.assertEqual(result["workflow_status"], "HUMAN_CONTEXT_READY")
         call = retrieval.return_value.retrieve.call_args
@@ -218,6 +222,10 @@ class TestHumanWorkflow(E0791Case):
         ).start()
         self.addCleanup(patch.stopall)
         retrieval.return_value.retrieve.return_value = self.retrieval_outcome()
+        query_intent = patch(
+            "src.agents.author.query_intent_builder.QueryIntentBuilder.build",
+            return_value="intent",
+        ).start()
         with patch(
             "src.storage.current_state_store.CurrentStateStore.ensure_initialized",
             return_value=(SimpleNamespace(), "# Current State\n林默在旧宅。", "hash"),

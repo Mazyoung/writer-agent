@@ -310,8 +310,8 @@ PASS
         self.assertEqual(rd.verdict, "UNKNOWN",
                          "E06.1: 缺失审阅决策 section 时即使分析看起来 clean 也不能自动 PASS")
 
-    def test_severity_from_quality_review(self):
-        """E06.1: 质量审阅 MAJOR 但无审阅决策 section → UNKNOWN (fail-closed)"""
+    def test_quality_review_does_not_set_severity(self):
+        """质量审阅 MAJOR 只保留诊断，不设置机器 severity。"""
         analysis = """# 复盘
 ## 一致性检查
 ### T1（硬错误）
@@ -324,8 +324,8 @@ PASS
         # E06.1 contract: 无审阅决策 section → UNKNOWN，即使质量 MAJOR 也不推断
         self.assertEqual(rd.verdict, "UNKNOWN",
                          "E06.1: 缺少审阅决策 section → UNKNOWN (fail-closed)")
-        # Severity should still be parsed
-        self.assertEqual(rd.severity, "MAJOR")
+        # 质量审阅 prose 不参与 severity 或 verdict 机器判断
+        self.assertEqual(rd.severity, "PASS")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -611,20 +611,20 @@ PASS
         self.assertEqual(rd.verdict, "PASS",
                          "显式合法 PASS 决策应返回 PASS")
 
-    def test_explicit_pass_with_t1_promotes_to_needs_revision(self):
-        """Safety override: 显式 PASS 但 T1 硬错误存在 → NEEDS_REVISION。"""
+    def test_explicit_pass_with_t1_keeps_explicit_verdict(self):
+        """T1 仅作 diagnostics，不推翻显式 PASS。"""
         rd = ReviewDecision.from_analysis(MOCK_RAW_ANALYSIS_PASS_WITH_T1_E06_1)
-        self.assertEqual(rd.verdict, "NEEDS_REVISION",
-                         "LLM 声明 PASS 但 parser 发现 T1 → 必须提升为 NEEDS_REVISION")
+        self.assertEqual(rd.verdict, "PASS")
+        self.assertEqual(rd.t1_issues, ["徽章数量与第1章矛盾"])
 
-    def test_explicit_pass_with_major_quality_promotes(self):
-        """Safety override: 显式 PASS 但 MAJOR 质量 → NEEDS_REVISION。"""
+    def test_quality_prose_does_not_override_explicit_verdict_or_severity(self):
+        """质量 prose 的 MAJOR/MINOR 文本不参与机器决策。"""
         analysis = """## 一致性检查
 ### T1（硬错误）
 无
 ## 质量审阅
 - **情节逻辑**: MAJOR — 严重逻辑断裂
-- **节奏评估**: PASS
+- **节奏评估**: MINOR
 - **大纲符合度**: PASS
 - **角色塑造**: PASS
 ## 审阅决策
@@ -632,8 +632,9 @@ PASS
 - **严重性**: PASS
 """
         rd = ReviewDecision.from_analysis(analysis)
-        self.assertEqual(rd.verdict, "NEEDS_REVISION",
-                         "LLM 声明 PASS 但质量有 MAJOR → 必须提升为 NEEDS_REVISION")
+        self.assertEqual(rd.verdict, "PASS")
+        self.assertEqual(rd.severity, "PASS")
+        self.assertEqual(len(rd.quality_issues), 4)
 
 
 # ═══════════════════════════════════════════════════════════════

@@ -15,7 +15,7 @@
     python main.py new-volume <小说名> --volume 3 --notes "..."  # 指定卷号 + 补充指示
 
     # 写作
-    python main.py write <小说名> --chapter N       # DeepSeekWriter → ClaudeStylist → StyleChecker
+    python main.py write <小说名> --chapter N       # DeepSeekWriter → ClaudeStylist → Prose Review
 
     # 风格修改
     python main.py style <小说名> --chapter N       # 对已写章节做风格编辑

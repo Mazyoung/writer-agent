@@ -142,6 +142,10 @@ class HumanFlowCase(E0791Case):
             "src.storage.current_state_store.CurrentStateStore.ensure_initialized",
             return_value=(SimpleNamespace(), "# Current State\n林默在旧宅。", "hash"),
         ).start()
+        self.query_intent = patch(
+            "src.agents.author.query_intent_builder.QueryIntentBuilder.build",
+            return_value="intent",
+        ).start()
         self.addCleanup(patch.stopall)
         self.retrieval.return_value.retrieve.return_value = self.retrieval_outcome()
         self.runner = ChapterWorkflowRunner("human-mode", 2)
@@ -285,10 +289,10 @@ class HumanFlowCase(E0791Case):
         self.assertTrue((self.fs.root / "tracking" / "volume_progress.md").is_file())
         sources = self.fs.root / result["chapter_sources_path"]
         report = sources.read_text(encoding="utf-8")
-        self.assertIn("## Human Writing Context Sources", report)
-        self.assertIn("## Retrieved Atomic Facts", report)
-        self.assertIn("provided-context", report)
-        self.assertNotIn("Adopted Historical Facts", report)
+        self.assertIn("## 2. 历史内容来源", report)
+        self.assertIn("## 4. 关键生成过程", report)
+        self.assertNotIn("adopted", report)
+        self.assertNotIn("candidate-only", report)
 
 
 class TestConsistencyInfrastructure(E0791Case):
@@ -355,10 +359,10 @@ class TestConsistencyInfrastructure(E0791Case):
         report = (self.fs.root / result["chapter_sources_path"]).read_text(
             encoding="utf-8"
         )
-        self.assertIn("提供给作者", report)
-        self.assertIn("Retrieved Atomic Facts", report)
+        self.assertIn("## 2. 历史内容来源", report)
+        self.assertIn("FACT-0001-001", report)
         self.assertIn("chapters/chapter_0001.md", report)
-        self.assertNotIn("Adopted Historical Facts", report)
+        self.assertNotIn("adopted", report)
         self.assertFalse(any((self.fs.root / "outlines").glob("chapter_plan*")))
 
 
@@ -380,6 +384,10 @@ class TestAgentReviewActions(E0791Case):
         current = patch(
             "src.storage.current_state_store.CurrentStateStore.ensure_initialized",
             return_value=(SimpleNamespace(), "# Current State", "hash"),
+        ).start()
+        query_intent = patch(
+            "src.agents.author.query_intent_builder.QueryIntentBuilder.build",
+            return_value="intent",
         ).start()
         self.addCleanup(patch.stopall)
         retrieval.return_value.retrieve.return_value = RetrievalOutcome(

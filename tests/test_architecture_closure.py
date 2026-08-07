@@ -156,14 +156,15 @@ class TestSemanticSeparation(ClosureCase):
             "plan_review": "src.agents.author.plan_reviewer.PlanReviewer",
             "writer": "src.agents.author.deepseek_writer.DeepSeekWriter",
             "stylist": "src.agents.author.claude_stylist.ClaudeStylist",
-            "checker": "src.agents.author.style_checker.StyleChecker",
             "manager": "src.agents.state_manager.state_manager.StateManager",
+            "query_intent": "src.agents.author.query_intent_builder.QueryIntentBuilder",
         }
         mocks = {}
         for name, target in targets.items():
             patcher = patch(target)
             mocks[name] = patcher.start()
             self.addCleanup(patcher.stop)
+        mocks["query_intent"].return_value.build.return_value = "intent"
         mocks["retrieval"].return_value.retrieve.return_value = RetrievalOutcome(
             trace=FactRetrievalTrace(chapter_index=1, success=True))
         plan = ChapterPlan.from_markdown(PLAN_TEXT)
@@ -176,9 +177,6 @@ class TestSemanticSeparation(ClosureCase):
         mocks["plan_review"].return_value.review_plan.return_value = pass_decision()
         mocks["writer"].return_value.write_chapter.return_value = "draft"
         mocks["stylist"].return_value.edit_chapter.return_value = "canonical prose"
-        report = MagicMock(errors=0, warnings=0)
-        report.summary.return_value = "OK"
-        mocks["checker"].return_value.check_all.return_value = report
         mocks["manager"].return_value.review_chapter.return_value = {
             "raw_analysis": pass_decision(), "filepath": None,
         }

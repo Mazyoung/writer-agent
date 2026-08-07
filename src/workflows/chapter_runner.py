@@ -18,7 +18,11 @@ from src.storage.story_savepoint import (
     NovelOperationLock,
     StorySavepointManager,
 )
-from src.workflows.chapter_workflow import build_chapter_workflow
+from src.workflows.chapter_workflow import (
+    build_chapter_workflow,
+    record_generation_event,
+    render_chapter_sources,
+)
 
 
 def _novel_mutation_locked(method):
@@ -77,6 +81,29 @@ def _maybe_create_auto_savepoint(
         "savepoint_id": manifest["savepoint_id"],
     }
     if outcome == "CREATED":
+        enriched.setdefault("chapter_index", runner.chapter_index)
+        event = record_generation_event(
+            enriched,
+            "AUTO_SAVEPOINT_CREATED",
+            discriminator=manifest["savepoint_id"],
+            details={"savepoint_id": manifest["savepoint_id"]},
+        )
+        if hasattr(runner, "_open_graph"):
+            connection, _checkpointer, graph = runner._open_graph()
+            try:
+                graph.update_state(runner.config, {"generation_events": event})
+                snapshot = graph.get_state(runner.config)
+                enriched.update(dict(snapshot.values))
+                source_path = (
+                    runner.file_store.root / "sources"
+                    / f"chapter_{runner.chapter_index:04d}" / "chapter_sources.md"
+                )
+                if source_path.exists():
+                    temp = source_path.with_suffix(".md.tmp")
+                    temp.write_text(render_chapter_sources(enriched), encoding="utf-8")
+                    temp.replace(source_path)
+            finally:
+                connection.close()
         print(f"  [AUTO SAVEPOINT] 已创建 {savepoint_id}（READY）。")
     else:
         print(f"  [AUTO SAVEPOINT] {savepoint_id} 已是有效 READY，视为完成。")

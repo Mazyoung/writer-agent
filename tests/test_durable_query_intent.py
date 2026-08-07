@@ -358,10 +358,9 @@ class QueryIntentTests(FocusCase):
         report = (
             self.fs.root / result["chapter_sources_path"]
         ).read_text(encoding="utf-8")
-        self.assertIn("## Retrieval Query Intent", report)
+        self.assertIn("## 1. 本章创作意图", report)
         self.assertIn("ACTUAL EMBEDDING QUERY", report)
-        self.assertIn("## Retrieved Atomic Facts", report)
-        self.assertIn("## Expanded Canonical Sources", report)
+        self.assertIn("## 2. 历史内容来源", report)
 
 
 class TokenEstimateTests(unittest.TestCase):

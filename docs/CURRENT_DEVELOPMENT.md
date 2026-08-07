@@ -61,7 +61,7 @@ Story Savepoint 将正式章节完成后的完整小说创作世界保存为 imm
 - Derivation receives Canonical Prose, Previous Current State, and the current ACTIVE Volume Plan.
 - Canonical Prose remains the only source for StateDelta, Fact Digest / Atomic Facts, and Current State. Volume Plan is restricted to the advisory VolumeProgress decision.
 - close-volume ignores CONTINUE / READY_TO_CLOSE / UNKNOWN advice, but refuses closure unless the latest canonical chapter has a valid durable DERIVED_READY marker; the error directs the user to derivation repair.
-- Volume Plan validation rejects structural chapter assignment fields/headings/tables, while preserving arbitrary human sections and notes, including prose that merely mentions “逐章”.
+- Volume Plan validation 只保留非空、卷号、status enum/lifecycle 等机器约束；自然语言字段未被 parser 提取或正文出现“章节/逐章/chapter assignment”等词汇都不会被 Python 判为内容缺失或章纲化。
 
 ## E07.9.1 Human Author Mode Closure
 
@@ -74,7 +74,10 @@ Story Savepoint 将正式章节完成后的完整小说创作世界保存为 imm
 - Consistency `WARN` 或 Agent Review `NEEDS_REVISION` 的 approve 只进入 `review_override_confirmation` interrupt；只有 `confirm_override` 才设置 `review_override_confirmed=True` 并允许 Canonical。原 `verdict` / warnings 始终保留。
 - Human manual edit 会清空旧 Consistency 结果并重新执行 Consistency Check；override confirmation 不会重跑昂贵 Review。
 - Human 和 Agent 最终共用 `commit_canonical_prose` 以及完整 Derivation、Current State、Fact Digest、Volume Progress、chapter_sources、Chroma sync 和 repair-derivation 路径。
-- Human 与 Agent `chapter_sources` 都记录实际 Retrieval Query Intent、全部 Retrieved Atomic Facts、Expanded Canonical Sources 以及审阅/override 审计；Agent 同时标记 adopted 与 candidate-only。
+- Human 与 Agent 统一使用 `chapter_sources.md` 记录 Intent、Query Intent、Retrieval sources、正式上下文、Review/Edit/Regenerate/Override、Canonical 与 Derivation；报告只机械汇总 checkpointed `generation_events` 和 Retrieval 结构化结果，不再扫描 Chapter Plan 猜测 adopted/candidate-only。
+- `generation_events` 位于 Chapter Workflow State，使用稳定 workflow counter/round/revision/retry 或固定 lifecycle stage 构造 event ID；checkpoint replay、continue 和 derivation recovery 按 ID 幂等合并。
+- ReviewDecision 不再因 analysis prose 中的 major/minor/T1/T2/T3 推翻显式 verdict；Consistency 只消费 `## 一致性结论` 的明确 CLEAN/WARN，缺失或非法仍 fail closed。
+- StyleChecker 已退出正式 Chapter Workflow，仅保留手动 lint/debug 用途；无生产引用的 `quality_reviewer.txt` 与 `consistency_guard.txt` 已删除。
 ## Architecture CI Baseline
 
 The push/PR gate is frozen around stable functional contracts and safety invariants:
@@ -108,9 +111,10 @@ Tests tied to the retired src.core.orchestrator, automatic revision, PASS-to-dir
 
 ## Verification
 
-- residual cleanup focused tests：52 passed。
-- 完整 unittest suite：222 passed。
-- `py_compile`、workflow graph build、CLI parser smoke 与 `git diff --check` 通过。
+- 本轮规划/parser/raw Markdown 针对性测试：73 passed。
+- 本轮 Chapter Workflow / Human / Derivation 针对性测试：25 passed，3 subtests passed。
+- 完整 pytest suite：225 passed，20 subtests passed。
+- 仅有 ChromaDB 依赖的既有 `asyncio.iscoroutinefunction` DeprecationWarning；本轮未处理无关技术债。
 
 ## Next Task
 

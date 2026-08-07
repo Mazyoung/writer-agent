@@ -11,7 +11,7 @@ from src.planning.models import PlanRevision, PlanType, RevisionStatus
 from src.planning.store import PlanningStore
 from src.planning.trigger_policy import ReplanTrigger
 from src.storage.current_state_store import CurrentStateStore
-from src.storage.document_formats import BookPlan, VolumePlan
+from src.storage.document_formats import VolumePlan
 from src.storage.file_store import FileStore
 from src.storage.sqlite_store import SQLiteStore
 
@@ -45,6 +45,7 @@ class NovelLifecycleService:
 1. 每个部分提供 2-3 个具体选项或建议
 2. 建议要符合当前网文市场的流行趋势
 3. 给出具体的、有画面感的描述
+4. 只生成创作提案，不得输出或承诺“前 N 章”“前N章”等任何章纲
 
 ## 输出格式
 
@@ -96,6 +97,8 @@ class NovelLifecycleService:
 
 ---
 作者提示: {hint if hint else '（无特殊要求，请自由发挥）'}
+
+提案经作者确认后，系统才会依次生成世界观、全书规划和第一卷规划。
 """
         result = self.world_builder.run(
             user_message=prompt,
@@ -120,12 +123,18 @@ class NovelLifecycleService:
         print(f"确认提案，生成分层规划: {self.novel_id}")
         print(f"{'='*60}\n")
 
-        print("[1/3] 世界观构建师工作中...")
-        guard_planning_context(
-            get_settings().get_model_slot("architect"),
-            {"proposal.md": proposal},
-        )
-        world_prompt = f"""## 已确认的创作提案
+        world_setting = self.file_store.load_canonical(
+            "settings", "world_setting"
+        ) or ""
+        if world_setting.strip():
+            print("[1/3] 世界观设定已存在，复用")
+        else:
+            print("[1/3] 世界观构建师工作中...")
+            guard_planning_context(
+                get_settings().get_model_slot("architect"),
+                {"proposal.md": proposal},
+            )
+            world_prompt = f"""## 已确认的创作提案
 {proposal}
 
 ---
@@ -134,21 +143,27 @@ class NovelLifecycleService:
 2. 设定层：地理、势力、历史、文化
 3. 力量/修炼体系详细说明
 4. 所有设定必须与提案中的题材、风格一致"""
-        world_setting = self.world_builder.run(
-            user_message=world_prompt,
-            save_category="settings",
-            save_prefix="world_setting",
-            use_canonical=True,
-        ).content
+            world_setting = self.world_builder.run(
+                user_message=world_prompt,
+                save_category="settings",
+                save_prefix="world_setting",
+                use_canonical=True,
+            ).content
+            if not world_setting.strip():
+                raise ValueError("WorldBuilder 返回了空内容")
 
-        ws = self.file_store.load_canonical("settings", "world_setting") or world_setting
+        ws = world_setting
 
-        print("[2/3] 情节设计师工作中...（Book Plan v1 / 战略层）")
-        guard_planning_context(
-            get_settings().get_model_slot("architect"),
-            {"proposal.md": proposal, "world_setting.md": ws},
-        )
-        book_prompt = f"""## 已确认的创作提案
+        book_plan = self.file_store.load_tracking_doc("book_plan") or ""
+        if book_plan.strip():
+            print("[2/3] Book Plan 已存在，复用")
+        else:
+            print("[2/3] 情节设计师工作中...（Book Plan v1 / 战略层）")
+            guard_planning_context(
+                get_settings().get_model_slot("architect"),
+                {"proposal.md": proposal, "world_setting.md": ws},
+            )
+            book_prompt = f"""## 已确认的创作提案
 {proposal}
 
 ## 世界观设定
@@ -184,35 +199,31 @@ Book Plan 是整本书的长期战略，只写长期有效的内容：
 ## 全局伏笔追踪
 | 伏笔描述 | 埋伏章节 | 预计回收卷 | 状态 | 回收章节 |
 |---------|---------|-----------|------|---------|"""
-        book_plan = self.plot_designer.run(
-            user_message=book_prompt,
-            save_category="tracking",
-            save_prefix="book_plan",
-            use_canonical=True,
-        ).content
+            book_plan = self.plot_designer.run(
+                user_message=book_prompt,
+                save_category="tracking",
+                save_prefix="book_plan",
+                use_canonical=True,
+            ).content
+            if not book_plan.strip():
+                raise ValueError("PlotDesigner 返回了空 Book Plan")
+            print("  Book Plan 已生成")
 
-        # Book Plan 必须先成功解析，Volume 1 才允许生成——
-        # 不允许 Book/Volume 从 proposal/world_setting 并行独立生成。
-        bp = BookPlan.from_markdown(book_plan)
-        if not bp.title.strip() or not bp.volumes:
-            raise ValueError(
-                "Book Plan 解析失败（缺少标题或卷框架），分层规划链中断。"
-                "\n请检查 tracking/book_plan.md 后重新运行 init --confirm。")
-        print(f"  Book Plan 已解析: 《{bp.title}》v{bp.version}，{len(bp.volumes)} 卷框架")
-
-        print("[3/3] 情节设计师工作中...（Volume 1 Plan v1 / 战术层）")
-        # Parsing above is validation only. The next stage must receive the
-        # complete canonical document, including author-added sections.
         book_plan_markdown = book_plan
-        guard_planning_context(
-            get_settings().get_model_slot("architect"),
-            {
-                "proposal.md": proposal,
-                "world_setting.md": ws,
-                "book_plan.md": book_plan_markdown,
-            },
-        )
-        volume_prompt = f"""## 已确认的创作提案
+        volume_plan = self.file_store.load_tracking_doc("volume_plan") or ""
+        if volume_plan.strip():
+            print("[3/3] Volume Plan 已存在，复用")
+        else:
+            print("[3/3] 情节设计师工作中...（Volume 1 Plan v1 / 战术层）")
+            guard_planning_context(
+                get_settings().get_model_slot("architect"),
+                {
+                    "proposal.md": proposal,
+                    "world_setting.md": ws,
+                    "book_plan.md": book_plan_markdown,
+                },
+            )
+            volume_prompt = f"""## 已确认的创作提案
 {proposal}
 
 ## World Setting
@@ -239,13 +250,15 @@ Book Plan 是整本书的长期战略，只写长期有效的内容：
 ## 限制条件
 ## 目标结束状态
 """
-        volume_plan = self.plot_designer.run(
-            user_message=volume_prompt,
-            save_category="tracking",
-            save_prefix="volume_plan",
-            use_canonical=True,
-        ).content
-        self._validate_volume_candidate(volume_plan, 1, expected_status="DRAFT")
+            volume_plan = self.plot_designer.run(
+                user_message=volume_prompt,
+                save_category="tracking",
+                save_prefix="volume_plan",
+                use_canonical=True,
+            ).content
+            self._validate_volume_candidate(
+                volume_plan, 1, expected_status="DRAFT"
+            )
 
         sqlite = SQLiteStore(self.file_store.root / "state.db")
         try:
@@ -414,61 +427,8 @@ per-chapter outline. Output exactly this Markdown structure:
             problems.append(
                 f"status 必须为 {expected_status}，当前为 {plan.status}"
             )
-        if not plan.title.strip():
-            problems.append("缺少标题")
-        if not plan.starting_state.strip():
-            problems.append("缺少起始状态")
-        if not plan.volume_goal.strip():
-            problems.append("缺少本卷目标")
-        if not plan.core_conflict.strip():
-            problems.append("缺少主要冲突")
-        if not plan.story_path:
-            problems.append("缺少故事路径")
-        if not plan.target_end_state.strip():
-            problems.append("缺少目标结束状态")
-        structural_patterns = {
-            "章节范围": (
-                r"(?:^|\n)\s*(?:#{1,6}\s*章节范围\s*|"
-                r"(?:[-*]\s*)?(?:\*\*)?章节范围(?:\*\*)?\s*[:：])"
-            ),
-            "逐章事件表": (
-                r"(?:^|\n)\s*(?:#{1,6}\s*逐章事件表\s*|"
-                r"(?:[-*]\s*)?(?:\*\*)?逐章事件表(?:\*\*)?\s*[:：])"
-            ),
-            "事件对应章节": (
-                r"(?:^|\n)\s*(?:#{1,6}\s*(?:事件对应章节|对应章节)\s*|"
-                r"(?:[-*]\s*)?(?:\*\*)?(?:事件对应章节|对应章节)"
-                r"(?:\*\*)?\s*[:：])"
-            ),
-            "chapter assignment": (
-                r"(?:^|\n)\s*(?:#{1,6}\s*chapter assignments?\s*|"
-                r"(?:[-*]\s*)?(?:\*\*)?chapter assignments?"
-                r"(?:\*\*)?\s*[:：])"
-            ),
-        }
-        found = [
-            label for label, pattern in structural_patterns.items()
-            if re.search(pattern, text, re.IGNORECASE)
-        ]
-        table_rows = [
-            line for line in text.splitlines()
-            if line.lstrip().startswith("|")
-        ]
-        if any(
-            re.search(r"\|\s*(?:章节|chapter)\s*\|", row, re.IGNORECASE)
-            or re.search(
-                r"\|\s*(?:对应章节|chapter assignment)\s*\|",
-                row,
-                re.IGNORECASE,
-            )
-            for row in table_rows
-        ):
-            found.append("chapter assignment table")
-        if found:
-            problems.append(
-                "chapterized structures are forbidden: "
-                + ", ".join(dict.fromkeys(found))
-            )
+        if plan.status.upper() not in {"DRAFT", "ACTIVE", "COMPLETED"}:
+            problems.append(f"非法 status：{plan.status}")
         if problems:
             raise ValueError("Volume Plan 无效：\n  - " + "\n  - ".join(problems))
         return plan

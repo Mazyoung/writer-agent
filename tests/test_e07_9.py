@@ -203,22 +203,30 @@ class TestVolumeLifecycle(E079Case):
             self.fs.load_tracking_doc("volume_plan"),
         )
 
-    def test_validator_allows_notes_but_rejects_chapterized_structures(self):
+    def test_validator_only_enforces_machine_constraints(self):
         service = self._service()
-        service._validate_volume_candidate(VOLUME_DRAFT, 2)
-        for heading in (
-            "## 章节范围",
-            "## 逐章事件表",
-            "## 事件对应章节",
-            "## Chapter Assignment",
-            "- **对应章节**: 第3章",
-        ):
-            with self.subTest(heading=heading):
-                with self.assertRaisesRegex(ValueError, "chapterized structures"):
-                    service._validate_volume_candidate(
-                        VOLUME_DRAFT + "\n" + heading + "\n- legacy\n",
-                        2,
-                    )
+        sparse = """# 第2卷规划：
+- **状态**: DRAFT
+## 作者自由备注
+前3章章纲、Chapter Assignment、对应章节都只是自然语言。
+"""
+        plan = service._validate_volume_candidate(sparse, 2)
+        self.assertEqual(plan.volume_number, 2)
+        self.assertEqual(plan.status, "DRAFT")
+
+        with self.assertRaisesRegex(ValueError, "空内容"):
+            service._validate_volume_candidate("  ", 2)
+        with self.assertRaisesRegex(ValueError, "expected volume 2"):
+            service._validate_volume_candidate(sparse.replace("第2卷", "第3卷"), 2)
+        with self.assertRaisesRegex(ValueError, "expected volume 2"):
+            service._validate_volume_candidate(sparse.replace("第2卷", "卷规划"), 2)
+        with self.assertRaisesRegex(ValueError, "status 必须为 DRAFT"):
+            service._validate_volume_candidate(sparse.replace("DRAFT", "ACTIVE"), 2)
+        with self.assertRaisesRegex(ValueError, "status 必须为 DRAFT"):
+            service._validate_volume_candidate(sparse.replace("- **状态**: DRAFT\n", ""), 2)
+        with self.assertRaisesRegex(ValueError, "非法 status"):
+            service._validate_volume_candidate(sparse.replace("DRAFT", "MAYBE"), 2,
+                                               expected_status="MAYBE")
 
     def test_next_volume_uses_required_inputs_and_stays_draft(self):
         previous = VOLUME_DRAFT.replace("第2卷", "第1卷").replace(

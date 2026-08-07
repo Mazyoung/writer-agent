@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable
 from functools import wraps
-from typing import Any, TypedDict
+from typing import Annotated, Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
@@ -18,6 +18,98 @@ from src.config.settings import get_settings
 from src.core.text_windows import previous_chapter_end
 from src.storage.file_store import FileStore
 from src.storage.sqlite_store import SQLiteStore
+
+
+GENERATION_EVENT_TYPES = frozenset({
+    "INTENT_FINALIZED",
+    "QUERY_INTENT_FINALIZED",
+    "QUERY_INTENT_RETRIED",
+    "RETRIEVAL_COMPLETED",
+    "PLAN_CREATED",
+    "PLAN_REVIEWED",
+    "PLAN_AGENT_EDITED",
+    "PLAN_HUMAN_EDITED",
+    "PROSE_CREATED",
+    "PROSE_REVIEWED",
+    "PROSE_REGENERATED",
+    "PROSE_AGENT_EDITED",
+    "PROSE_HUMAN_EDITED",
+    "CONSISTENCY_REVIEWED",
+    "REVIEW_OVERRIDE_REQUESTED",
+    "REVIEW_OVERRIDE_CONFIRMED",
+    "CANONICAL_COMMITTED",
+    "DERIVATION_FAILED",
+    "DERIVATION_RECOVERED",
+    "DERIVED_READY",
+    "AUTO_SAVEPOINT_CREATED",
+})
+
+
+class GenerationEvent(TypedDict, total=False):
+    event_id: str
+    event_type: str
+    chapter_index: int
+    attempt: int
+    discriminator: str
+    details: dict[str, Any]
+
+
+def merge_generation_events(
+    current: list[GenerationEvent] | None,
+    updates: list[GenerationEvent] | None,
+) -> list[GenerationEvent]:
+    """Merge checkpointed audit facts by their stable workflow identity."""
+    merged = list(current or [])
+    by_id = {event["event_id"]: event for event in merged}
+    for event in updates or []:
+        event_type = event.get("event_type", "")
+        event_id = event.get("event_id", "")
+        if event_type not in GENERATION_EVENT_TYPES:
+            raise ValueError(f"不支持的 generation event: {event_type}")
+        if not event_id:
+            raise ValueError("generation event 缺少 event_id")
+        existing = by_id.get(event_id)
+        if existing is None:
+            merged.append(event)
+            by_id[event_id] = event
+        elif existing != event:
+            raise ValueError(f"generation event ID 冲突: {event_id}")
+    return merged
+
+
+def record_generation_event(
+    state: "ChapterWorkflowState",
+    event_type: str,
+    *,
+    counter: int | None = None,
+    discriminator: str = "",
+    details: dict[str, Any] | None = None,
+) -> list[GenerationEvent]:
+    """Create one event whose ID comes only from durable workflow identity."""
+    if event_type not in GENERATION_EVENT_TYPES:
+        raise ValueError(f"不支持的 generation event: {event_type}")
+    chapter_index = int(state.get("chapter_index", 0))
+    parts = [str(chapter_index), event_type]
+    if discriminator:
+        parts.append(discriminator)
+    if counter is not None:
+        if counter < 1:
+            raise ValueError("generation event counter 必须从 1 开始")
+        parts.append(str(counter))
+    event: GenerationEvent = {
+        "event_id": ":".join(parts),
+        "event_type": event_type,
+        "chapter_index": chapter_index,
+        "details": details or {},
+    }
+    if counter is not None:
+        event["attempt"] = counter
+    if discriminator:
+        event["discriminator"] = discriminator
+    for existing in state.get("generation_events", []):
+        if existing.get("event_id") == event["event_id"]:
+            return [existing]
+    return [event]
 
 
 class ChapterWorkflowState(TypedDict, total=False):
@@ -62,9 +154,11 @@ class ChapterWorkflowState(TypedDict, total=False):
     consistency_verdict: str
     consistency_warnings: list[str]
     review_reasons: list[str]
+    review_issues: list[str]
     t1_issues: list[str]
     planning_level: str
     review_round: int
+    prose_regeneration_count: int
     revision_used: bool
 
     human_decision: str
@@ -95,6 +189,10 @@ class ChapterWorkflowState(TypedDict, total=False):
 
     workflow_status: str
     error: str | None
+
+    generation_events: Annotated[
+        list[GenerationEvent], merge_generation_events
+    ]
 
 
 def _error_result(message: str) -> dict[str, Any]:
@@ -188,7 +286,15 @@ def load_chapter_intent(state: ChapterWorkflowState) -> dict[str, Any]:
         intent = supplied
     else:
         intent = fs.load_canonical("briefs", prefix) or ""
-    return {"chapter_intent": intent, "workflow_status": "INTENT_LOADED"}
+    return {
+        "chapter_intent": intent,
+        "generation_events": record_generation_event(
+            state,
+            "INTENT_FINALIZED",
+            details={"provided": bool(supplied), "has_content": bool(intent.strip())},
+        ),
+        "workflow_status": "INTENT_LOADED",
+    }
 
 
 def _route_after_intent(state: ChapterWorkflowState) -> str:
@@ -209,17 +315,53 @@ def _evidence_section(evidence: str, heading: str) -> str:
     return match.group(1).strip() if match else "- None retrieved"
 
 
-def _build_query_intent(state: ChapterWorkflowState) -> str:
-    """Build the sole embedding query from complete formal planning context."""
+def _as_event_dict(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return dict(value)
+    to_dict = getattr(value, "to_dict", None)
+    if callable(to_dict):
+        return dict(to_dict())
+    return dict(vars(value))
+
+
+def _retrieval_event_details(retrieval: Any) -> dict[str, Any]:
+    return {
+        "query_intent": retrieval.trace.query,
+        "result_count": len(retrieval.trace.results),
+        "retrieval_trace_path": retrieval.trace_path,
+        "facts": [_as_event_dict(fact) for fact in retrieval.fact_candidates],
+        "sources": [_as_event_dict(source) for source in retrieval.source_excerpts],
+    }
+
+
+def _build_query_intent(
+    state: ChapterWorkflowState,
+) -> tuple[str, int, list[GenerationEvent]]:
+    """Build the sole embedding query and expose its durable retry attempt."""
     from src.agents.author.query_intent_builder import QueryIntentBuilder
 
+    events: list[GenerationEvent] = []
+    final_attempt = 1
+
+    def on_attempt(kind: str, attempt: int) -> None:
+        nonlocal final_attempt
+        if kind == "retried":
+            final_attempt = attempt
+            events.extend(record_generation_event(
+                state,
+                "QUERY_INTENT_RETRIED",
+                counter=attempt,
+            ))
+
     fs = FileStore(state["novel_id"], get_settings().data_dir)
-    return QueryIntentBuilder(state["novel_id"]).build(
+    query_intent = QueryIntentBuilder(state["novel_id"]).build(
         volume_plan=fs.load_tracking_doc("volume_plan") or "",
         recent_chapter_end=previous_chapter_end(fs, state["chapter_index"]),
         current_state=state.get("current_state_text", ""),
         human_intent=state.get("chapter_intent", ""),
+        on_attempt=on_attempt,
     )
+    return query_intent, final_attempt, events
 
 
 @_guard_node
@@ -232,7 +374,7 @@ def prepare_human_context(state: ChapterWorkflowState) -> dict[str, Any]:
         return _error_result(
             "Human Mode 执行历史检索前必须提供非空 Chapter Intent。"
         )
-    query_intent = _build_query_intent(state)
+    query_intent, query_attempt, query_events = _build_query_intent(state)
     retrieval = ChapterRetrievalService(state["novel_id"]).retrieve(
         state["chapter_index"], query_intent
     )
@@ -277,6 +419,17 @@ def prepare_human_context(state: ChapterWorkflowState) -> dict[str, Any]:
     path = fs.save_generated_tracking_doc(
         f"writing_context_ch{chapter_index:04d}", context
     )
+    query_events.extend(record_generation_event(
+        state,
+        "QUERY_INTENT_FINALIZED",
+        counter=query_attempt,
+        details={"query_intent": query_intent},
+    ))
+    query_events.extend(record_generation_event(
+        state,
+        "RETRIEVAL_COMPLETED",
+        details=_retrieval_event_details(retrieval),
+    ))
     return {
         "historical_evidence": retrieval.evidence,
         "query_intent": query_intent,
@@ -287,6 +440,7 @@ def prepare_human_context(state: ChapterWorkflowState) -> dict[str, Any]:
         "expanded_sources": retrieval.source_excerpts,
         "writing_context_path": str(path.relative_to(fs.root)).replace("\\", "/"),
         "warnings": retrieval.warnings,
+        "generation_events": query_events,
         "workflow_status": "HUMAN_CONTEXT_READY",
     }
 
@@ -316,6 +470,11 @@ def await_human_writing(state: ChapterWorkflowState) -> dict[str, Any]:
         "candidate_path": str(path.relative_to(fs.root)).replace("\\", "/"),
         "final_author_approved": False,
         "review_override_confirmed": False,
+        "generation_events": record_generation_event(
+            state,
+            "PROSE_CREATED",
+            details={"source": "human"},
+        ),
         "workflow_status": "HUMAN_CANDIDATE_SUBMITTED",
     }
 
@@ -355,39 +514,38 @@ def review_consistency(state: ChapterWorkflowState) -> dict[str, Any]:
 
 @_guard_node
 def parse_consistency_decision(state: ChapterWorkflowState) -> dict[str, Any]:
-    """确定性解析 CLEAN/WARN；缺失或非法结论保持 fail-closed。"""
+    """只消费 Reviewer 明确给出的 CLEAN/WARN 结构化结果。"""
+    from src.storage.document_formats import _extract_section, _parse_key_value
+
     raw = state.get("consistency_raw_analysis", "")
-    match = re.search(
-        r"\*\*结论\*\*\s*[:：]\s*(CLEAN|WARN)\b", raw, re.IGNORECASE
-    )
-    if not match:
+    decision_section = _extract_section(raw, "## 一致性结论")
+    decision = _parse_key_value(decision_section) if decision_section else {}
+    verdict = decision.get("结论", "").strip().upper()
+    if verdict not in {"CLEAN", "WARN"}:
         return {
-            **_error_result("一致性检查缺少有效的 CLEAN/WARN 结论"),
+            **_error_result("一致性检查缺少有效的 CLEAN/WARN 结构化结论"),
             "consistency_verdict": "UNKNOWN",
         }
-    verdict = match.group(1).upper()
-    section = re.search(
-        r"^## 连续性问题\s*\n(.*?)(?=^## |\Z)",
-        raw,
-        re.MULTILINE | re.DOTALL,
-    )
-    warnings = []
-    if section:
-        warnings = [
-            line.strip()[2:].strip()
-            for line in section.group(1).splitlines()
-            if line.strip().startswith("- ")
-            and line.strip()[2:].strip() not in {"", "无"}
-        ]
-    if verdict == "WARN" and not warnings:
-        reason = re.search(r"\*\*主要问题\*\*\s*[:：]\s*(.+)", raw)
-        if reason and reason.group(1).strip() not in {"", "无"}:
-            warnings = [
-                item.strip() for item in reason.group(1).split(";") if item.strip()
-            ]
+
+    issue_section = _extract_section(raw, "## 连续性问题")
+    warnings = [
+        line.strip()[2:].strip()
+        for line in issue_section.splitlines()
+        if line.strip().startswith("- ")
+        and line.strip()[2:].strip() not in {"", "无"}
+    ]
+    main_issue = decision.get("主要问题", "").strip()
+    if not warnings and main_issue not in {"", "无"}:
+        warnings = [main_issue]
     return {
         "consistency_verdict": verdict,
         "consistency_warnings": warnings,
+        "generation_events": record_generation_event(
+            state,
+            "CONSISTENCY_REVIEWED",
+            counter=state.get("review_round", 1),
+            details={"verdict": verdict, "issues": warnings},
+        ),
         "workflow_status": f"CONSISTENCY_{verdict}",
     }
 
@@ -412,7 +570,7 @@ def plan_chapter(state: ChapterWorkflowState) -> dict[str, Any]:
     instructions = state.get("extra_instructions", "")
     intent = state.get("chapter_intent", "")
 
-    query_intent = _build_query_intent(state)
+    query_intent, query_attempt, query_events = _build_query_intent(state)
     retrieval = ChapterRetrievalService(novel_id).retrieve(
         chapter_index, query_intent
     )
@@ -441,6 +599,24 @@ def plan_chapter(state: ChapterWorkflowState) -> dict[str, Any]:
         return _error_result("ChapterPlanner 未生成可审阅的 canonical Chapter Plan")
 
     print(f"  [plan_chapter] {len(plan.scenes)} scenes planned")
+    query_events.extend(record_generation_event(
+        state,
+        "QUERY_INTENT_FINALIZED",
+        counter=query_attempt,
+        details={"query_intent": query_intent},
+    ))
+    query_events.extend(record_generation_event(
+        state,
+        "RETRIEVAL_COMPLETED",
+        details=_retrieval_event_details(retrieval),
+    ))
+    query_events.extend(record_generation_event(
+        state,
+        "PLAN_CREATED",
+        details={
+            "artifact_path": f"outlines/chapter_plan_ch{chapter_index:04d}.md",
+        },
+    ))
     return {
         "chapter_plan_text": plan_text,
         "historical_evidence": retrieval.evidence,
@@ -452,6 +628,7 @@ def plan_chapter(state: ChapterWorkflowState) -> dict[str, Any]:
         "retrieved_facts": retrieval.fact_candidates,
         "expanded_sources": retrieval.source_excerpts,
         "plan_review_attempt": 0,
+        "generation_events": query_events,
         "workflow_status": "PLANNED",
     }
 
@@ -514,7 +691,29 @@ def parse_plan_decision(state: ChapterWorkflowState) -> dict[str, Any]:
         "plan_verdict": decision.verdict,
         "plan_review_reasons": decision.reasons,
         "plan_t1_issues": decision.t1_issues,
+        "plan_review_issues": [
+            *decision.t1_issues,
+            *decision.t2_issues,
+            *decision.t3_issues,
+            *decision.quality_issues,
+        ],
         "plan_planning_level": decision.planning_level,
+        "generation_events": record_generation_event(
+            state,
+            "PLAN_REVIEWED",
+            counter=state.get("plan_review_attempt", 1),
+            details={
+                "verdict": decision.verdict,
+                "issues": [
+                    *decision.t1_issues,
+                    *decision.t2_issues,
+                    *decision.t3_issues,
+                    *decision.quality_issues,
+                    *decision.reasons,
+                ],
+                "planning_level": decision.planning_level,
+            },
+        ),
         "workflow_status": f"PLAN_DECISION_{decision.verdict}",
     }
 
@@ -565,145 +764,96 @@ def agent_edit_plan(state: ChapterWorkflowState) -> dict[str, Any]:
         chapter_intent=state.get("chapter_intent", ""),
         human_feedback=state.get("human_feedback", ""),
     )
+    revision_count = state.get("plan_revision_count", 0) + 1
     return {
         "chapter_plan_text": revised,
         "plan_verdict": "",
         "plan_raw_analysis": "",
-        "plan_revision_count": state.get("plan_revision_count", 0) + 1,
+        "plan_revision_count": revision_count,
+        "generation_events": record_generation_event(
+            state,
+            "PLAN_AGENT_EDITED",
+            counter=revision_count,
+        ),
         "workflow_status": "PLAN_AGENT_EDITED",
     }
 
 
 
+def _event_lines(state: ChapterWorkflowState) -> list[str]:
+    lines = []
+    for event in state.get("generation_events", []):
+        event_type = event.get("event_type", "")
+        details = event.get("details", {})
+        verdict = details.get("verdict")
+        suffix = f"：{verdict}" if verdict else ""
+        issues = details.get("issues", [])
+        lines.append(f"- `{event_type}`{suffix}")
+        if issues and event_type in {"PLAN_REVIEWED", "PROSE_REVIEWED", "CONSISTENCY_REVIEWED"}:
+            lines.extend(f"  - Review issue: {issue}" for issue in issues)
+    return lines or ["- 暂无关键生成事件"]
+
+
+def render_chapter_sources(state: ChapterWorkflowState) -> str:
+    """Render only checkpointed, structured provenance facts."""
+    chapter_index = state["chapter_index"]
+    facts = list(state.get("retrieved_facts", []))
+    excerpts = list(state.get("expanded_sources", []))
+    events = state.get("generation_events", [])
+    lines = [
+        f"# Chapter {chapter_index} 内容来源与生成记录", "",
+        "## 1. 本章创作意图",
+        f"- Human Intent: {state.get('chapter_intent', '') or '未提供'}",
+        f"- Query Intent: {state.get('query_intent', '') or '未生成'}", "",
+        "## 2. 历史内容来源",
+        f"- Retrieval Trace: `{state.get('retrieval_trace_path', '') or '未执行'}`",
+    ]
+    for fact in facts:
+        lines.append(
+            f"- **{fact.get('fact_id', '')}**（第{fact.get('chapter_index', 0)}章，"
+            f"{fact.get('fact_type', 'event')}）: {fact.get('text', '')}"
+        )
+    for source in excerpts:
+        lines.append(
+            f"- Source `{source.get('source_path', '')}` paragraphs "
+            f"{source.get('paragraph_start', 0)}-{source.get('paragraph_end', 0)}"
+        )
+    if not facts and not excerpts:
+        lines.append("- 未提供历史来源")
+    lines.extend([
+        "", "## 3. 规划与状态来源",
+        "- Book Plan: 已使用" if state.get("chapter_mode", "agent") != "human" else "- Book Plan: 未直接使用",
+        "- Volume Plan: 已使用" if state.get("query_intent") else "- Volume Plan: 未使用",
+        "- Current State: 已使用" if state.get("current_state_text") else "- Current State: 未提供",
+        "- Previous Chapter End: 已使用" if state.get("historical_evidence") else "- Previous Chapter End: 未提供",
+        f"- Human Intent: {'已使用' if state.get('chapter_intent') else '未提供'}",
+        "", "## 4. 关键生成过程",
+        *_event_lines(state),
+        "", "## 5. 最终状态",
+        f"- Canonical Commit: {'是' if state.get('commit_success') else '否'}",
+        f"- DERIVED_READY: {'是' if state.get('workflow_status') == 'DERIVED_READY' or any(e.get('event_type') == 'DERIVED_READY' for e in events) else '否'}",
+        f"- Review Override: {'是' if state.get('review_override_confirmed') is True else '否'}",
+    ])
+    consistency_seen = any(e.get("event_type") == "CONSISTENCY_REVIEWED" for e in events)
+    lines.append(
+        f"- Consistency Review: {state.get('consistency_verdict', '未执行') if consistency_seen else '未执行'}"
+    )
+    lines.extend([
+        "", "建议在继续下一章前优先检查本记录中的 Review 与 Warning。"
+    ])
+    return "\n".join(lines) + "\n"
+
+
 @_guard_node
 def save_chapter_sources(state: ChapterWorkflowState) -> dict[str, Any]:
-    """Write a truthful provenance report for Agent or Human creation."""
-    if state.get("chapter_mode", "agent") == "human":
-        chapter_index = state["chapter_index"]
-        facts = list(state.get("retrieved_facts", []))
-        excerpts = list(state.get("expanded_sources", []))
-        lines = [
-            f"# Chapter {chapter_index} Sources",
-            "",
-            "> 自动生成的来源报告；它记录系统提供给作者的历史上下文，不表示作者必然采用了这些事实。",
-            "",
-            "## Chapter Intent",
-            state.get("chapter_intent", "") or "暂无",
-            "",
-            "## Retrieval Query Intent",
-            state.get("query_intent", "") or "暂无",
-            "",
-            "## Human Writing Context Sources",
-            f"- Writing Context: `{state.get('writing_context_path', '')}`",
-            f"- Retrieval Trace: `{state.get('retrieval_trace_path', '')}`",
-            "",
-            "## Consistency and Author Approval Audit",
-            f"- Consistency Verdict: `{state.get('consistency_verdict', 'UNKNOWN')}`",
-            f"- Review Override Confirmed: `{str(state.get('review_override_confirmed') is True).lower()}`",
-            "- Consistency Warnings:",
-            *(
-                [f"  - {warning}" for warning in state.get("consistency_warnings", [])]
-                or ["  - 无"]
-            ),
-            "",
-            "## Retrieved Atomic Facts",
-        ]
-        if facts:
-            for fact in facts:
-                lines.append(
-                    f"- **{fact.get('fact_id', '')}** (Chapter "
-                    f"{fact.get('chapter_index', 0)}, "
-                    f"{fact.get('fact_type', 'event')}): {fact.get('text', '')}"
-                )
-        else:
-            lines.append("- 无")
-        lines.extend(["", "## Expanded Canonical Sources"])
-        if excerpts:
-            for source in excerpts:
-                lines.append(
-                    f"- **{source.get('fact_id', '')}**: "
-                    f"`{source.get('source_path', '')}` paragraphs "
-                    f"{source.get('paragraph_start', 0)}-"
-                    f"{source.get('paragraph_end', 0)} (provided-context)"
-                )
-        else:
-            lines.append("- 无")
-        fs = FileStore(state["novel_id"], get_settings().data_dir)
-        path = (
-            fs.root / "sources" / f"chapter_{chapter_index:04d}"
-            / "chapter_sources.md"
-        )
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        return {
-            "chapter_sources_path": str(path.relative_to(fs.root)).replace("\\", "/"),
-            "workflow_status": "SOURCES_SAVED",
-        }
-
-    from src.storage.document_formats import ChapterPlan
-
-    plan_text = state.get("chapter_plan_text", "")
-    plan = ChapterPlan.from_markdown(plan_text)
-    adopted_ids = set(re.findall(r"FACT-\d{4}-\d{3}", plan_text))
-    candidates = [
-        fact for fact in state.get("retrieved_facts", [])
-        if fact.get("fact_id") in adopted_ids
-    ]
-    excerpts = list(state.get("expanded_sources", []))
-    chapter_index = state["chapter_index"]
-    lines = [
-        f"# Chapter {chapter_index} Sources",
-        "",
-        "> 自动生成的来源报告；请修改生产源后重新生成，不要直接编辑本文件。",
-        "",
-        "## Chapter Intent",
-        state.get("chapter_intent", "") or "暂无（本章未提供人工 Intent）",
-        "",
-        "## Retrieval Query Intent",
-        state.get("query_intent", "") or "暂无",
-        "",
-        "## Planning Sources",
-        "- Book Plan: `tracking/book_plan.md`",
-        "- Volume Plan: `tracking/volume_plan.md`",
-        "",
-        "## Retrieved Atomic Facts",
-    ]
-    all_facts = list(state.get("retrieved_facts", []))
-    if all_facts:
-        for fact in all_facts:
-            usage = "adopted" if fact.get("fact_id") in adopted_ids else "candidate-only"
-            lines.append(
-                f"- **{fact['fact_id']}** (Chapter {fact['chapter_index']}, "
-                f"{fact.get('fact_type', 'event')}, {usage}): {fact.get('text', '')}"
-            )
-    else:
-        lines.append("- 无")
-    lines.extend(["", "## Future Planning Constraints"])
-    lines.append(plan.context.future_constraints or "暂无")
-    lines.extend(["", "## Expanded Canonical Sources"])
-    if excerpts:
-        for source in excerpts:
-            usage = (
-                "adopted" if source.get("fact_id") in adopted_ids
-                else "candidate-only"
-            )
-            lines.append(
-                f"- **{source['fact_id']}**: `{source['source_path']}` "
-                f"paragraphs {source['paragraph_start']}-"
-                f"{source['paragraph_end']} ({usage})"
-            )
-    else:
-        lines.append("- 无")
-    lines.extend([
-        "",
-        "## Review and Author Approval Audit",
-        f"- Review Verdict: `{state.get('verdict', 'UNKNOWN')}`",
-        f"- Review Override Confirmed: `{str(state.get('review_override_confirmed') is True).lower()}`",
-    ])
+    """Write the checkpointed provenance projection for this chapter."""
     fs = FileStore(state["novel_id"], get_settings().data_dir)
+    chapter_index = state["chapter_index"]
     path = fs.root / "sources" / f"chapter_{chapter_index:04d}" / "chapter_sources.md"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    temp = path.with_suffix(".md.tmp")
+    temp.write_text(render_chapter_sources(state), encoding="utf-8")
+    temp.replace(path)
     return {
         "chapter_sources_path": str(path.relative_to(fs.root)).replace("\\", "/"),
         "workflow_status": "SOURCES_SAVED",
@@ -729,10 +879,20 @@ def write_draft(state: ChapterWorkflowState) -> dict[str, Any]:
         fs.load_canonical("settings", "world_setting") or "",
         _load_prev_chapter_end(fs, state["chapter_index"]),
     )
+    regenerated = state.get("human_decision") == "regenerate_prose"
+    regeneration_count = state.get("prose_regeneration_count", 0) + 1
+    event_type = "PROSE_REGENERATED" if regenerated else "PROSE_CREATED"
     return {
         "draft_text": draft,
         "review_round": 1,
+        "prose_regeneration_count": regeneration_count if regenerated else 0,
         "revision_used": False,
+        "generation_events": record_generation_event(
+            state,
+            event_type,
+            counter=regeneration_count if regenerated else None,
+            details={"source": "agent"},
+        ),
         "workflow_status": "DRAFTED",
     }
 
@@ -781,34 +941,30 @@ def agent_edit_chapter(state: ChapterWorkflowState) -> dict[str, Any]:
     )
     if not revised.strip():
         return _error_result("Auto Revision 未产生正文")
+    next_round = state.get("review_round", 1) + 1
     return {
         "styled_text": revised,
-        "review_round": state.get("review_round", 1) + 1,
+        "review_round": next_round,
         "revision_used": True,
         "verdict": "",
+        "generation_events": record_generation_event(
+            state,
+            "PROSE_AGENT_EDITED",
+            counter=next_round,
+        ),
         "workflow_status": "AGENT_EDITED",
     }
 
 
 @_guard_node
 def save_styled(state: ChapterWorkflowState) -> dict[str, Any]:
-    """Save/check the current styled prose before every review."""
-    from src.agents.author.style_checker import StyleChecker
-
+    """Save the current styled prose before every LLM review."""
     styled = state.get("styled_text", "")
     if not styled:
         return _error_result("styled_text 为空，无法保存")
     fs = FileStore(state["novel_id"], get_settings().data_dir)
-    saved_path = fs.save("chapters", f"chapter_{state['chapter_index']:04d}_styled", styled)
-    report = StyleChecker(styled).check_all(
-        file_path=f"第{state['chapter_index']}章"
-    )
-    print(report.summary())
-    if report.errors > 0:
-        print(f"\n  [!] {report.errors} 个错误 + {report.warnings} 个警告，请人工复核。")
-    return {
-        "workflow_status": "STYLED_SAVED",
-    }
+    fs.save("chapters", f"chapter_{state['chapter_index']:04d}_styled", styled)
+    return {"workflow_status": "STYLED_SAVED"}
 
 
 @_guard_node
@@ -855,6 +1011,12 @@ def parse_chapter_decision(state: ChapterWorkflowState) -> dict[str, Any]:
             "verdict": "UNKNOWN",
             "review_reasons": decision.reasons,
             "t1_issues": decision.t1_issues,
+            "review_issues": [
+                *decision.t1_issues,
+                *decision.t2_issues,
+                *decision.t3_issues,
+                *decision.quality_issues,
+            ],
             "planning_level": decision.planning_level,
         }
     print(f"  [parse_chapter_decision] Review #{state.get('review_round', 1)}: "
@@ -862,8 +1024,29 @@ def parse_chapter_decision(state: ChapterWorkflowState) -> dict[str, Any]:
     result = {
         "verdict": decision.verdict,
         "review_reasons": decision.reasons,
+        "review_issues": [
+            *decision.t1_issues,
+            *decision.t2_issues,
+            *decision.t3_issues,
+            *decision.quality_issues,
+        ],
         "t1_issues": decision.t1_issues,
         "planning_level": decision.planning_level,
+        "generation_events": record_generation_event(
+            state,
+            "PROSE_REVIEWED",
+            counter=state.get("review_round", 1),
+            details={
+                "verdict": decision.verdict,
+                "issues": [
+                    *decision.t1_issues,
+                    *decision.t2_issues,
+                    *decision.t3_issues,
+                    *decision.quality_issues,
+                    *decision.reasons,
+                ],
+            },
+        ),
         "workflow_status": f"DECISION_{decision.verdict}",
     }
     if (
@@ -945,6 +1128,11 @@ def await_human_plan(state: ChapterWorkflowState) -> dict[str, Any]:
         "human_decision": "human_edit",
         "human_feedback": str(resume_value.get("feedback", "")).strip(),
         "plan_verdict": "",
+        "generation_events": record_generation_event(
+            state,
+            "PLAN_HUMAN_EDITED",
+            counter=state.get("plan_review_attempt", 1),
+        ),
         "workflow_status": "HUMAN_PLAN_EDITED",
     }
 
@@ -959,7 +1147,7 @@ def _approval_warnings(state: ChapterWorkflowState) -> list[str]:
     if state.get("chapter_mode", "agent") == "human":
         return list(state.get("consistency_warnings", []))
     return [
-        *state.get("t1_issues", []),
+        *state.get("review_issues", []),
         *state.get("review_reasons", []),
     ]
 
@@ -1011,7 +1199,7 @@ def await_human_chapter(state: ChapterWorkflowState) -> dict[str, Any]:
     action = str(resume_value.get("action", "")).strip().lower()
     feedback = str(resume_value.get("feedback", "")).strip()
     if action == "approve":
-        return {
+        result = {
             "human_decision": "approve",
             "final_author_approved": True,
             "review_override_confirmed": False,
@@ -1020,6 +1208,13 @@ def await_human_chapter(state: ChapterWorkflowState) -> dict[str, Any]:
                 "FINAL_AUTHOR_APPROVED" if passed else "REVIEW_OVERRIDE_REQUESTED"
             ),
         }
+        if not passed:
+            result["generation_events"] = record_generation_event(
+                state,
+                "REVIEW_OVERRIDE_REQUESTED",
+                details={"original_verdict": verdict},
+            )
+        return result
     if action == "agent_edit" and not human_mode:
         if passed and not feedback:
             return _error_result(
@@ -1036,12 +1231,18 @@ def await_human_chapter(state: ChapterWorkflowState) -> dict[str, Any]:
         edited = str(resume_value.get("edited_text", "")).strip()
         if not edited:
             return _error_result("human_edit 需要非空正文")
+        next_round = state.get("review_round", 1) + 1
         common = {
             "human_decision": action,
             "human_feedback": feedback,
             "final_author_approved": False,
             "review_override_confirmed": False,
-            "review_round": state.get("review_round", 1) + 1,
+            "review_round": next_round,
+            "generation_events": record_generation_event(
+                state,
+                "PROSE_HUMAN_EDITED",
+                counter=next_round,
+            ),
             "workflow_status": "MANUAL_EDITED",
         }
         if human_mode:
@@ -1088,6 +1289,11 @@ def await_review_override(state: ChapterWorkflowState) -> dict[str, Any]:
             "human_decision": "confirm_override",
             "final_author_approved": True,
             "review_override_confirmed": True,
+            "generation_events": record_generation_event(
+                state,
+                "REVIEW_OVERRIDE_CONFIRMED",
+                details={"original_verdict": verdict},
+            ),
             "workflow_status": "REVIEW_OVERRIDE_CONFIRMED",
         }
     if action == "back":
@@ -1178,6 +1384,11 @@ def commit_canonical_prose(state: ChapterWorkflowState) -> dict[str, Any]:
     return {
         "commit_success": True,
         "canonical_source_path": relative,
+        "generation_events": record_generation_event(
+            state,
+            "CANONICAL_COMMITTED",
+            details={"canonical_source_path": relative},
+        ),
         "workflow_status": "CANONICAL_COMMITTED",
     }
 
@@ -1192,11 +1403,41 @@ def _route_after_commit(state: ChapterWorkflowState) -> str:
     return "derive_semantics"
 
 
-def _derived_failure(state: ChapterWorkflowState, message: str) -> dict[str, Any]:
+def _recovery_event(
+    state: ChapterWorkflowState,
+    stage: str,
+) -> list[GenerationEvent]:
+    """Record recovery only after a previously checkpointed stage failure."""
+    failed_id = f"{state['chapter_index']}:DERIVATION_FAILED:{stage}"
+    if not any(
+        event.get("event_id") == failed_id
+        for event in state.get("generation_events", [])
+    ):
+        return []
+    return record_generation_event(
+        state,
+        "DERIVATION_RECOVERED",
+        discriminator=stage,
+        details={"stage": stage},
+    )
+
+
+def _derived_failure(
+    state: ChapterWorkflowState,
+    message: str,
+    *,
+    stage: str,
+) -> dict[str, Any]:
     return {
         "workflow_status": "DERIVATION_ERROR",
         "warnings": [*state.get("warnings", []), message],
         "derived_state_errors": [*state.get("derived_state_errors", []), message],
+        "generation_events": record_generation_event(
+            state,
+            "DERIVATION_FAILED",
+            discriminator=stage,
+            details={"stage": stage, "message": message},
+        ),
     }
 
 
@@ -1205,11 +1446,11 @@ def derive_semantics(state: ChapterWorkflowState) -> dict[str, Any]:
     from src.agents.state_manager.state_manager import StateManager
 
     if state.get("commit_success") is not True:
-        return _derived_failure(state, "Derivation 需要 Canonical 正文")
+        return _derived_failure(state, "Derivation 需要 Canonical 正文", stage="semantic")
     fs = FileStore(state["novel_id"], get_settings().data_dir)
     canonical = fs.load_canonical_chapter(state["chapter_index"]) or ""
     if not canonical:
-        return _derived_failure(state, "Canonical prose missing after commit")
+        return _derived_failure(state, "Canonical prose missing after commit", stage="semantic")
     volume_plan = fs.load_tracking_doc("volume_plan") or ""
     if volume_plan:
         from src.storage.document_formats import VolumePlan
@@ -1230,12 +1471,14 @@ def derive_semantics(state: ChapterWorkflowState) -> dict[str, Any]:
             raise ValueError("Deriver returned empty analysis")
     except Exception as exc:
         return _derived_failure(
-            state, f"Semantic derivation failed: {type(exc).__name__}: {exc}"
+            state, f"Semantic derivation failed: {type(exc).__name__}: {exc}",
+            stage="semantic",
         )
     finally:
         sqlite.close()
     return {
         "derivation_raw_analysis": raw,
+        "generation_events": _recovery_event(state, "semantic"),
         "workflow_status": "SEMANTICS_DERIVED",
     }
 
@@ -1268,7 +1511,8 @@ def persist_current_state(state: ChapterWorkflowState) -> dict[str, Any]:
             )
     except Exception as exc:
         return _derived_failure(
-            state, f"Current State 持久化失败：{type(exc).__name__}: {exc}"
+            state, f"Current State 持久化失败：{type(exc).__name__}: {exc}",
+            stage="current-state",
         )
     finally:
         sqlite.close()
@@ -1276,6 +1520,7 @@ def persist_current_state(state: ChapterWorkflowState) -> dict[str, Any]:
     return {
         "current_state_persisted": True,
         "completion_marker_path": str(marker),
+        "generation_events": _recovery_event(state, "current-state"),
         "workflow_status": "CURRENT_STATE_PERSISTED",
     }
 
@@ -1313,7 +1558,8 @@ def persist_fact_digest(state: ChapterWorkflowState) -> dict[str, Any]:
         return {
             "fact_digest_generated": False,
             **_derived_failure(
-                state, f"Fact Digest persistence failed: {type(exc).__name__}: {exc}"
+                state, f"Fact Digest persistence failed: {type(exc).__name__}: {exc}",
+                stage="fact-digest",
             ),
         }
     finally:
@@ -1322,6 +1568,7 @@ def persist_fact_digest(state: ChapterWorkflowState) -> dict[str, Any]:
         "fact_digest_generated": True,
         "fact_digest_path": str(digest_path.relative_to(fs.root)).replace("\\", "/"),
         "atomic_fact_count": len(canonical_digest.atomic_facts),
+        "generation_events": _recovery_event(state, "fact-digest"),
         "workflow_status": "FACT_DIGEST_PERSISTED",
     }
 
@@ -1351,12 +1598,14 @@ def persist_volume_progress(state: ChapterWorkflowState) -> dict[str, Any]:
         path.write_text(content, encoding="utf-8")
     except Exception as exc:
         return _derived_failure(
-            state, f"Volume Progress persistence failed: {type(exc).__name__}: {exc}"
+            state, f"Volume Progress persistence failed: {type(exc).__name__}: {exc}",
+            stage="volume-progress",
         )
     return {
         "volume_progress": progress,
         "volume_progress_updated": True,
         "volume_progress_path": "tracking/volume_progress.md",
+        "generation_events": _recovery_event(state, "volume-progress"),
         "workflow_status": "VOLUME_PROGRESS_PERSISTED",
     }
 
@@ -1365,11 +1614,13 @@ def persist_chapter_sources(state: ChapterWorkflowState) -> dict[str, Any]:
     """Overwrite the deterministic provenance report for this chapter."""
     try:
         result = save_chapter_sources.__wrapped__(state)
+        result["generation_events"] = _recovery_event(state, "chapter-sources")
         result["workflow_status"] = "CHAPTER_SOURCES_PERSISTED"
         return result
     except Exception as exc:
         return _derived_failure(
-            state, f"Chapter sources persistence failed: {type(exc).__name__}: {exc}"
+            state, f"Chapter sources persistence failed: {type(exc).__name__}: {exc}",
+            stage="chapter-sources",
         )
 
 
@@ -1399,15 +1650,22 @@ def sync_chroma(state: ChapterWorkflowState) -> dict[str, Any]:
         return {
             "rag_facts": 0, "rag_chunks": 0,
             **_derived_failure(
-                state, f"Atomic Fact RAG failed: {type(exc).__name__}: {exc}"
+                state, f"Atomic Fact RAG failed: {type(exc).__name__}: {exc}",
+                stage="rag",
             ),
         }
+    ready_event = record_generation_event(
+        state,
+        "DERIVED_READY",
+        details={"completion_marker_path": str(completion.relative_to(fs.root)).replace("\\", "/")},
+    )
     return {
         "rag_facts": count,
         "rag_chunks": 0,
         "completion_marker_path": str(
             completion.relative_to(fs.root)
         ).replace("\\", "/"),
+        "generation_events": [*_recovery_event(state, "rag"), *ready_event],
         "workflow_status": "DERIVED_READY",
     }
 

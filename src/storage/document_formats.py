@@ -213,7 +213,7 @@ class VolumePlan:
 
     @classmethod
     def from_markdown(cls, text: str) -> "VolumePlan":
-        vp = cls()
+        vp = cls(volume_number=0, status="")
         raw_title = _extract_title(text)
         match = re.search(r'第\s*(\d+)\s*卷', raw_title)
         if match:
@@ -1528,8 +1528,8 @@ class ReviewDecision:
 
         Rules:
         1. Missing/invalid 「## 审阅决策」section → UNKNOWN (never infer PASS)
-        2. Safety override: explicit PASS but T1 errors → NEEDS_REVISION
-        3. Safety override: explicit PASS but MAJOR quality → NEEDS_REVISION
+        2. T1/T2/T3 remain diagnostics and never override an explicit verdict
+        3. Quality prose is not scanned for MAJOR/MINOR or verdict inference
         4. Truly empty/unparseable → UNKNOWN
 
         This is the E06.1 fail-closed contract:
@@ -1576,18 +1576,14 @@ class ReviewDecision:
                         if issue and issue != "无":
                             rd.t3_issues.append(issue)
 
-        # Parse quality review
+        # Preserve quality prose as diagnostics only. It must not set severity
+        # or override the explicit decision below.
         quality = _extract_section(text, "## 质量审阅")
         if quality:
             for line in quality.strip().split("\n"):
                 stripped = line.strip()
                 if stripped.startswith("- "):
                     rd.quality_issues.append(stripped[2:].strip())
-            q_lower = quality.lower()
-            if "major" in q_lower:
-                rd.severity = "MAJOR"
-            elif "minor" in q_lower:
-                rd.severity = "MINOR"
 
         # ── E06.1 Fail-Closed Decision Parsing ──
 
@@ -1621,19 +1617,14 @@ class ReviewDecision:
         # Parse reasons from decision section
         reasons_str = kv.get("主要问题", kv.get("原因", ""))
         if reasons_str:
-            rd.reasons = [r.strip() for r in reasons_str.split(";") if r.strip()]
+            rd.reasons = [
+                r.strip() for r in re.split(r"[;；]", reasons_str)
+                if r.strip() and r.strip() not in {"无", "None"}
+            ]
 
         # Parse planning level
         planning_str = kv.get("规划级别", "L1").strip()
         rd.planning_level = planning_str if planning_str in ("L1", "L2", "L3") else "L1"
-
-        # ── E06.1 Safety Override ──
-        # If LLM claims PASS but T1 hard errors exist → promote
-        if rd.verdict == "PASS" and rd.t1_issues:
-            rd.verdict = "NEEDS_REVISION"
-        # If LLM claims PASS but quality is MAJOR → promote
-        if rd.verdict == "PASS" and rd.severity == "MAJOR":
-            rd.verdict = "NEEDS_REVISION"
 
         return rd
 
