@@ -1,4 +1,4 @@
-"""Simple fail-closed guard for complete formal planning documents."""
+"""Estimate complete model inputs and warn when they exceed slot guidance."""
 
 from __future__ import annotations
 
@@ -7,9 +7,6 @@ import re
 from collections.abc import Mapping
 
 from src.config.settings import ModelSlot
-
-
-PLANNING_CONTEXT_SAFETY_TOKENS = 100_000
 
 
 def estimate_tokens(text: str) -> int:
@@ -34,16 +31,13 @@ def guard_planning_context(
         for name, content in documents.items()
     }
     input_tokens = sum(estimates.values())
-    if input_tokens + slot.max_tokens <= PLANNING_CONTEXT_SAFETY_TOKENS:
-        return estimates
-    details = "\n".join(
-        f"  {name:<20} 约 {tokens} tokens"
-        for name, tokens in estimates.items()
-    )
-    raise ValueError(
-        "输入上下文已接近安全上限。\n\n"
-        f"{details}\n"
-        f"  输出预留             {slot.max_tokens} tokens\n\n"
-        "系统不会自动截断正式规划内容。\n"
-        "请优先精简较大的规划文件后重新执行。"
-    )
+    if input_tokens > slot.max_tokens:
+        print(
+            f"[Token Warning] {slot.name.upper()} 输入上下文较大\n"
+            f"Estimated Input Tokens: {input_tokens}\n"
+            f"Configured {slot.name.upper()}_MAX_TOKENS: {slot.max_tokens}\n"
+            "当前仅作提示。\n"
+            "不会截断、压缩或阻断正式上下文，将继续完整发送。\n"
+            "实际请求是否可执行由远端模型 API 决定。"
+        )
+    return estimates
