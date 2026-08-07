@@ -15,6 +15,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
 from src.config.settings import get_settings
+from src.core.model_provider import GenerationLimitExceeded
 from src.core.text_windows import previous_chapter_end
 from src.storage.file_store import FileStore
 from src.storage.sqlite_store import SQLiteStore
@@ -199,6 +200,39 @@ def _error_result(message: str) -> dict[str, Any]:
     return {"workflow_status": "error", "error": message}
 
 
+def _generation_limit_report(
+    state: ChapterWorkflowState,
+    workflow_node: str,
+    exc: GenerationLimitExceeded,
+) -> str:
+    is_chapter_plan = (
+        workflow_node == "plan_chapter" and exc.slot_name == "plan"
+    )
+    lines = [
+        (
+            "Chapter Plan 生成失败：模型输出达到生成上限"
+            if is_chapter_plan else "模型生成失败：模型输出达到生成上限"
+        ),
+        "",
+        f"Chapter: {state.get('chapter_index', 'UNKNOWN')}",
+        f"Node: {'ChapterPlanner' if is_chapter_plan else workflow_node}",
+        f"Model Slot: {exc.slot_name.upper()}",
+        f"Provider: {exc.provider}",
+        f"Model: {exc.model}",
+        f"Configured max_tokens: {exc.configured_max_tokens}",
+        f"finish_reason / stop_reason: {exc.reason}",
+        "Partial output saved: NO",
+    ]
+    if is_chapter_plan:
+        lines.extend([
+            "Partial canonical saved: NO",
+            "Plan Review executed: NO",
+            "",
+            "这是模型生成上限导致的技术性失败，不是 Plan Review 未通过。",
+        ])
+    return "\n".join(lines)
+
+
 def _guard_node(
     node: Callable[[ChapterWorkflowState], dict[str, Any]],
 ) -> Callable[[ChapterWorkflowState], dict[str, Any]]:
@@ -207,6 +241,10 @@ def _guard_node(
     def guarded(state: ChapterWorkflowState) -> dict[str, Any]:
         try:
             result = node(state)
+        except GenerationLimitExceeded as exc:
+            return _error_result(
+                _generation_limit_report(state, node.__name__, exc)
+            )
         except Exception as exc:
             return _error_result(
                 f"{node.__name__} failed: {type(exc).__name__}: {exc}"

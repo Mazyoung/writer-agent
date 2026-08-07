@@ -13,6 +13,22 @@ class EmptyModelResponseError(RuntimeError):
     """模型请求成功返回，但没有可消费的非空文本。"""
 
 
+class GenerationLimitExceeded(RuntimeError):
+    """Provider 明确报告输出达到本次调用的生成上限。"""
+
+    def __init__(self, slot: ModelSlot, reason: str):
+        self.slot_name = slot.name
+        self.provider = slot.provider
+        self.model = slot.model
+        self.configured_max_tokens = slot.max_tokens
+        self.reason = reason
+        super().__init__(
+            "模型输出达到生成上限（"
+            f"provider={slot.provider}, model={slot.model}, "
+            f"reason={reason}, max_tokens={slot.max_tokens}）"
+        )
+
+
 def _require_non_empty_text(
     value: Any,
     *,
@@ -120,6 +136,8 @@ class ModelProviderClient:
         choice = choices[0]
         message = getattr(choice, "message", None)
         finish_reason = getattr(choice, "finish_reason", None)
+        if finish_reason == "length":
+            raise GenerationLimitExceeded(self.slot, finish_reason)
         content = getattr(message, "content", None)
         return _require_non_empty_text(
             content,
@@ -151,6 +169,9 @@ class ModelProviderClient:
             system="\n\n".join(part for part in system_parts if part),
             messages=conversation,
         )
+        stop_reason = getattr(response, "stop_reason", None)
+        if stop_reason == "max_tokens":
+            raise GenerationLimitExceeded(self.slot, stop_reason)
         text_parts = [
             str(text)
             for block in (getattr(response, "content", None) or [])
@@ -160,5 +181,5 @@ class ModelProviderClient:
             "".join(text_parts),
             provider=self.slot.provider,
             model=self.slot.model,
-            finish_reason=getattr(response, "stop_reason", None),
+            finish_reason=stop_reason,
         )
