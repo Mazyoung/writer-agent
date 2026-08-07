@@ -5,8 +5,8 @@
     python main.py init <小说名> ["前提"]           # Phase 1: 生成创作提案
     python main.py init <小说名> --confirm          # Phase 2: 确认提案 → 生成大纲
 
-    # 规划
-    python main.py plan <小说名> --chapter N        # 生成章规划 (Part A + Part B)
+    # standalone / 调试规划（不属于正式 ChapterWorkflow，write 不会接续其结果）
+    python main.py plan <小说名> --chapter N        # 独立生成章规划 (Part A + Part B)
     python main.py plan <小说名> --chapter N --outline "..."  # 指定章大纲
     python main.py plan <小说名> --chapter N --instructions "..."  # 额外指示
 
@@ -187,6 +187,7 @@ def cmd_status(args):
 def cmd_plan(args):
     if not _get_novel_dir(args.name):
         return
+    print("\n[standalone/debug] plan 不属于正式 ChapterWorkflow；其结果不会被 write 接续或采用。")
     planning = ChapterPlanningService(args.name)
     outline = getattr(args, 'outline', "") or ""
     instructions = getattr(args, 'instructions', "") or ""
@@ -200,7 +201,7 @@ def cmd_plan(args):
     except FileNotFoundError as e:
         print(str(e))
         return
-    print(f"\n下一步: python main.py write {args.name} --chapter {args.chapter}")
+    print("\nstandalone/debug plan 已完成；正式章节请直接使用 write，其 Workflow 会重新生成本次章节规划。")
 
 
 def _cmd_plan_interactive(planning, args):
@@ -255,7 +256,7 @@ def _cmd_plan_interactive(planning, args):
 
     print(f"  场景规划：{len(plan.scenes)} 个场景")
     print(f"  已保存: outlines/chapter_plan_ch{args.chapter:04d}.md")
-    print(f"\n  下一步: python main.py write {args.name} --chapter {args.chapter}")
+    print("\n  standalone/debug plan 已完成；正式 write 会重新生成本次章节规划，不接续此结果。")
 
 
 def _print_chapter_result(name: str, chapter: int, result: dict) -> None:
@@ -531,7 +532,9 @@ def main():
     p.add_argument("name")
 
     # plan
-    p = subparsers.add_parser("plan", help="生成章规划 (Part A + Part B)")
+    p = subparsers.add_parser(
+        "plan", help="standalone/debug：独立生成章规划（不属于正式 Workflow）"
+    )
     p.add_argument("name"); p.add_argument("--chapter", type=int, required=True)
     p.add_argument("--outline"); p.add_argument("--instructions")
     p.add_argument("--interactive", action="store_true", help="交互式Q&A模式(待实现)")

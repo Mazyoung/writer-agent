@@ -8,6 +8,27 @@ from openai import OpenAI
 
 from src.config.settings import ModelSlot
 
+
+class EmptyModelResponseError(RuntimeError):
+    """模型请求成功返回，但没有可消费的非空文本。"""
+
+
+def _require_non_empty_text(
+    value: Any,
+    *,
+    provider: str,
+    model: str,
+    finish_reason: Any = None,
+) -> str:
+    text = value if isinstance(value, str) else "" if value is None else str(value)
+    if not text.strip():
+        detail = f"provider={provider}, model={model}"
+        if finish_reason is not None:
+            detail += f", finish_reason={finish_reason}"
+        raise EmptyModelResponseError(f"模型返回空文本响应（{detail}）")
+    return text
+
+
 try:
     from anthropic import Anthropic
 except ImportError:  # Optional until an anthropic slot is actually selected.
@@ -90,7 +111,22 @@ class ModelProviderClient:
             "max_tokens": self.slot.max_tokens,
         }
         response = self.client.chat.completions.create(**kwargs)
-        return str(response.choices[0].message.content or "")
+        choices = getattr(response, "choices", None) or []
+        if not choices:
+            raise EmptyModelResponseError(
+                f"模型响应缺少 choices（provider={self.slot.provider}, "
+                f"model={self.slot.model}）"
+            )
+        choice = choices[0]
+        message = getattr(choice, "message", None)
+        finish_reason = getattr(choice, "finish_reason", None)
+        content = getattr(message, "content", None)
+        return _require_non_empty_text(
+            content,
+            provider=self.slot.provider,
+            model=self.slot.model,
+            finish_reason=finish_reason,
+        )
 
     def _complete_anthropic(
         self,
@@ -115,8 +151,14 @@ class ModelProviderClient:
             system="\n\n".join(part for part in system_parts if part),
             messages=conversation,
         )
-        for block in response.content:
-            text = getattr(block, "text", None)
-            if text is not None:
-                return str(text)
-        raise RuntimeError("Anthropic 响应中没有文本内容")
+        text_parts = [
+            str(text)
+            for block in (getattr(response, "content", None) or [])
+            if (text := getattr(block, "text", None)) is not None
+        ]
+        return _require_non_empty_text(
+            "".join(text_parts),
+            provider=self.slot.provider,
+            model=self.slot.model,
+            finish_reason=getattr(response, "stop_reason", None),
+        )

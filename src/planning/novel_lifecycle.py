@@ -276,8 +276,8 @@ Book Plan 是整本书的长期战略，只写长期有效的内容：
         print("\nVolume Plan 已生成。")
         print("\n请直接审阅并编辑：")
         print(f"{self.file_store.root / 'tracking' / 'volume_plan.md'}")
-        print("\n确认当前规划可用后，运行：")
-        print(f"\npython main.py plan {self.novel_id} --chapter 1")
+        print("\n确认当前规划可用后，运行正式章节 Workflow：")
+        print(f"\npython main.py write {self.novel_id} --chapter 1")
         return {"world_setting": world_setting, "book_plan": book_plan,
                 "volume_plan": volume_plan}
 

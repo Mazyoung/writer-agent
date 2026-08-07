@@ -204,6 +204,15 @@ class TestSourcesAndBoundaries(E077Case):
                 {"fact_id": "FACT-0072-002", "source_path": "chapters/c72.md",
                  "paragraph_start": 4, "paragraph_end": 6},
             ],
+            "generation_events": [{
+                "event_type": "PLAN_CREATED",
+                "details": {"context_sources": {
+                    "world_setting": True, "book_plan": True,
+                    "volume_plan": True, "current_state": True,
+                    "previous_chapter_end": False, "human_intent": True,
+                    "rag_context": True,
+                }},
+            }],
         })
         report = (self.fs.root / result["chapter_sources_path"]).read_text(encoding="utf-8")
         self.assertIn("FACT-0072-002", report)

@@ -51,6 +51,8 @@ class BaseAgent:
         messages.append({"role": "user", "content": user_message})
 
         response = self._call_llm(messages)
+        if not isinstance(response, str) or not response.strip():
+            raise RuntimeError("Agent 返回空文本，已阻止保存")
 
         if use_canonical:
             filepath = self.file_store.save_canonical(save_category, save_prefix, response)

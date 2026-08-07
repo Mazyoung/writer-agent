@@ -592,6 +592,10 @@ def plan_chapter(state: ChapterWorkflowState) -> dict[str, Any]:
         current_state_text=state.get("current_state_text", ""),
     )
     fs = FileStore(novel_id, get_settings().data_dir)
+    world_setting = fs.load_canonical("settings", "world_setting") or ""
+    book_plan = fs.load_tracking_doc("book_plan") or ""
+    volume_plan = fs.load_tracking_doc("volume_plan") or ""
+    previous_end = previous_chapter_end(fs, chapter_index)
     plan_text = fs.load_canonical(
         "outlines", f"chapter_plan_ch{chapter_index:04d}"
     ) or ""
@@ -615,6 +619,15 @@ def plan_chapter(state: ChapterWorkflowState) -> dict[str, Any]:
         "PLAN_CREATED",
         details={
             "artifact_path": f"outlines/chapter_plan_ch{chapter_index:04d}.md",
+            "context_sources": {
+                "world_setting": bool(world_setting.strip()),
+                "book_plan": bool(book_plan.strip()),
+                "volume_plan": bool(volume_plan.strip()),
+                "current_state": bool(state.get("current_state_text", "").strip()),
+                "previous_chapter_end": bool(previous_end.strip()),
+                "human_intent": bool(intent.strip()),
+                "rag_context": bool(retrieval.evidence.strip()),
+            },
         },
     ))
     return {
@@ -820,13 +833,31 @@ def render_chapter_sources(state: ChapterWorkflowState) -> str:
         )
     if not facts and not excerpts:
         lines.append("- 未提供历史来源")
+    context_sources = None
+    for event in events:
+        if event.get("event_type") != "PLAN_CREATED":
+            continue
+        details = event.get("details", {})
+        if isinstance(details.get("context_sources"), dict):
+            context_sources = details["context_sources"]
+            break
+    lines.extend(["", "## 3. 规划与状态来源"])
+    if context_sources is None:
+        lines.append("- context_sources: 未记录（旧 checkpoint）")
+    else:
+        source_labels = {
+            "world_setting": "World Setting",
+            "book_plan": "Book Plan",
+            "volume_plan": "Volume Plan",
+            "current_state": "Current State",
+            "previous_chapter_end": "Previous Chapter End",
+            "human_intent": "Human Intent",
+            "rag_context": "RAG Context",
+        }
+        for source_name, label in source_labels.items():
+            status = "已使用" if context_sources.get(source_name) is True else "未使用"
+            lines.append(f"- {label}: {status}")
     lines.extend([
-        "", "## 3. 规划与状态来源",
-        "- Book Plan: 已使用" if state.get("chapter_mode", "agent") != "human" else "- Book Plan: 未直接使用",
-        "- Volume Plan: 已使用" if state.get("query_intent") else "- Volume Plan: 未使用",
-        "- Current State: 已使用" if state.get("current_state_text") else "- Current State: 未提供",
-        "- Previous Chapter End: 已使用" if state.get("historical_evidence") else "- Previous Chapter End: 未提供",
-        f"- Human Intent: {'已使用' if state.get('chapter_intent') else '未提供'}",
         "", "## 4. 关键生成过程",
         *_event_lines(state),
         "", "## 5. 最终状态",

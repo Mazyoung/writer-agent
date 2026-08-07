@@ -109,13 +109,20 @@ Tests tied to the retired src.core.orchestrator, automatic revision, PASS-to-dir
 - Writer、Stylist、Plan Review、Prose/Consistency Review 不再静默裁剪 World Setting、Book Plan、Volume Plan、Chapter Plan、Current State 或 Human Intent；正式上下文过大时统一由 Token Guard 在模型调用前中文拒绝。
 - Chapter Workflow / standalone Planning Service 先生成 Query Intent，再调用 `ChapterRetrievalService.retrieve(chapter_index, query_intent)`；Retrieval Service 仅负责 Embedding、Atomic Fact Top-K、Canonical paragraph ±1 expansion、Author Knowledge、trace 和 outcome。
 
+## Real Smoke Remediation Closure
+
+- `ModelProviderClient` 对 OpenAI-compatible、DeepSeek 和 Anthropic 的 None、空字符串、纯空白或无文本响应 fail closed；错误仅保留 provider、model、finish/stop reason 等非敏感诊断。`BaseAgent` 在任何 save/save_canonical 和 interceptor 前保留 provider-independent 非空最后防线，空响应不得创建或覆盖文件。
+- 正式章节入口统一为 `python main.py write <novel> --chapter N`；`init --confirm` 直接引导 write。`plan` 保留为 standalone/debug 工具，其 Chapter Plan 不会被正式 write 接续或采用，不写 generation_events 或独立 provenance。
+- Chapter Planner、Writer 与 Query Intent 提示词已移除旧项目的固定题材、文风、范文和节奏硬编码。Query Intent 明确 Current State/Canonical History 是已发生历史，Book/Volume Plan 仅是未来规划参考，不得将未来事件包装成历史检索目标。
+- 正式 Workflow 的 `PLAN_CREATED.details.context_sources` 直接记录 Planner 本次实际输入的 World Setting、Book Plan、Volume Plan、Current State、Previous Chapter End、Human Intent 与 RAG flags；`render_chapter_sources()` 仅机械投影这些 flags，不再从 RAG 或其他 state 推断来源。旧 checkpoint 无 flags 时显示未记录。
+- 已删除本次 smoke 产生的 0-byte `data/novels/smoke_test/outlines/chapter_plan_ch0001.md`；Proposal、World Setting、Book Plan、Volume Plan 和 Current State 保持不变。本轮未调用真实模型 API。
+
 ## Verification
 
-- 本轮规划/parser/raw Markdown 针对性测试：73 passed。
-- 本轮 Chapter Workflow / Human / Derivation 针对性测试：25 passed，3 subtests passed。
-- 完整 pytest suite：225 passed，20 subtests passed。
-- 仅有 ChromaDB 依赖的既有 `asyncio.iscoroutinefunction` DeprecationWarning；本轮未处理无关技术债。
+- 整改相关既有测试：81 passed，21 subtests passed，1 warning。
+- 完整 pytest suite：226 passed，24 subtests passed，1 warning。
+- 唯一 warning 是 ChromaDB 依赖的既有 `asyncio.iscoroutinefunction` DeprecationWarning；本轮未处理无关技术债。
 
 ## Next Task
 
-使用真实模型凭证执行 Real End-to-End Smoke Test。未经明确任务，不调用真实 API。
+使用真实模型凭证执行：`python main.py write smoke_test --chapter 1` Real End-to-End Smoke Test。未经明确任务，不调用真实 API。
