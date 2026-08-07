@@ -335,6 +335,196 @@ def _print_chapter_result(name: str, chapter: int, result: dict) -> None:
         print(f"\n编辑文件：{payload['edit_path']}")
 
 
+def _waiting_payload(result: dict) -> dict:
+    pending = result.get("interrupts", [])
+    return pending[0].get("value", {}) if pending else {}
+
+
+def _print_review_context(chapter: int, payload: dict) -> None:
+    labels = {
+        "plan_review": "Plan Review",
+        "chapter_review": "Prose Review",
+        "final_author_approval": "Prose Review",
+        "human_final_approval": "Consistency Review",
+        "review_override_confirmation": "Review Override",
+    }
+    kind = payload.get("type", "unknown")
+    print(f"\n第 {chapter} 章 {labels.get(kind, kind)}：{payload.get('verdict', 'UNKNOWN')}")
+    issues = []
+    for item in [*payload.get("t1_issues", []), *payload.get("reasons", [])]:
+        if item and item not in issues:
+            issues.append(item)
+    if issues:
+        print("\n具体问题：")
+        for index, issue in enumerate(issues, 1):
+            print(f"{index}. {issue}")
+
+
+def _interactive_resume_value(
+    novel_id: str, chapter: int, payload: dict
+) -> dict | None:
+    kind = payload.get("type", "unknown")
+    allowed = set(payload.get("allowed_actions", []))
+    if kind == "human_writing":
+        print("\n【人工创作模式】")
+        print(f"Writing Context：{payload.get('writing_context_path', '')}")
+        print(
+            f"兼容命令：python main.py write {novel_id} --chapter {chapter} "
+            "--action submit --file <正文文件>"
+        )
+        entries = [("submit", "提交人工正文文件"), ("restart", "重启本章")]
+    elif kind == "plan_review":
+        _print_review_context(chapter, payload)
+        entries = [
+            ("agent_edit", "Agent 自动修改"),
+            ("human_edit", "人工修改"),
+            ("restart", "重启本章"),
+            ("approve", "批准并继续"),
+        ]
+    elif kind in {"chapter_review", "final_author_approval"}:
+        _print_review_context(chapter, payload)
+        entries = [
+            ("agent_edit", "Agent 自动修改"),
+            ("human_edit", "人工修改"),
+            ("regenerate_prose", "重新生成正文"),
+            ("restart", "重启本章"),
+            ("approve", "批准并继续"),
+        ]
+    elif kind == "human_final_approval":
+        _print_review_context(chapter, payload)
+        entries = [
+            ("human_edit", "人工修改"),
+            ("restart", "重启本章"),
+            ("approve", "批准并继续"),
+        ]
+    elif kind == "review_override_confirmation":
+        _print_review_context(chapter, payload)
+        print(f"\n{payload.get('message', '')}")
+        entries = [
+            ("confirm_override", "确认 Override 并继续"),
+            ("back", "返回上一步"),
+        ]
+    else:
+        _print_review_context(chapter, payload)
+        labels = {
+            "agent_edit": "Agent 自动修改",
+            "human_edit": "人工修改",
+            "regenerate_prose": "重新生成正文",
+            "restart": "重启本章",
+            "approve": "批准并继续",
+            "confirm_override": "确认 Override 并继续",
+            "back": "返回上一步",
+            "submit": "提交",
+        }
+        entries = [(action, labels.get(action, action)) for action in allowed]
+
+    entries = [(action, label) for action, label in entries if action in allowed]
+    print("\n请选择操作：\n")
+    for index, (_action, label) in enumerate(entries, 1):
+        print(f"[{index}] {label}")
+    print("[0] 暂停并退出，稍后继续")
+
+    while True:
+        try:
+            selected = input("\n请输入选择：").strip()
+        except (EOFError, KeyboardInterrupt, OSError):
+            print("\n已暂停，当前 WAITING_HUMAN checkpoint 保持不变。")
+            return None
+        if selected == "0":
+            print("\n已暂停，当前 WAITING_HUMAN checkpoint 保持不变。")
+            return None
+        if not selected.isdigit() or not 1 <= int(selected) <= len(entries):
+            print("无效选择，请重新输入。")
+            continue
+        action = entries[int(selected) - 1][0]
+        break
+
+    if action == "agent_edit":
+        try:
+            feedback = input(
+                "\n请输入给 Agent 的补充修改意见：\n"
+                "（直接回车则仅使用 Reviewer 已给出的修改问题）\n\n> "
+            ).strip()
+        except (EOFError, KeyboardInterrupt, OSError):
+            print("\n已暂停，当前 WAITING_HUMAN checkpoint 保持不变。")
+            return None
+        if not feedback and payload.get("verdict") == "PASS":
+            feedback = "请在保持已通过内容的前提下，根据当前作者选择进行局部优化。"
+        return {"action": action, "feedback": feedback}
+
+    if action == "human_edit":
+        edit_path = payload.get("edit_path", "")
+        print(f"\n请编辑：\n{edit_path}\n")
+        while True:
+            try:
+                answer = input("编辑完成后按 Enter 继续。输入 q 可暂时退出。\n\n> ").strip()
+            except (EOFError, KeyboardInterrupt, OSError):
+                answer = "q"
+            if answer.lower() == "q":
+                print("\n已暂停，当前 WAITING_HUMAN checkpoint 保持不变。")
+                return None
+            path = Path(edit_path)
+            if not path.is_absolute():
+                path = FileStore(
+                    novel_id, get_settings().data_dir
+                ).root / edit_path
+            if not path.is_file() or not path.read_text(encoding="utf-8").strip():
+                print("目标编辑文件不存在或为空，请完成编辑后按 Enter 继续。")
+                continue
+            return {"action": action, "feedback": ""}
+
+    if action == "submit":
+        try:
+            candidate_file = input("\n请输入人工正文文件路径：\n\n> ").strip()
+        except (EOFError, KeyboardInterrupt, OSError):
+            candidate_file = ""
+        if not candidate_file:
+            print("未提供正文文件，继续等待。")
+            return {}
+        return {"action": action, "candidate_file": candidate_file}
+
+    if action == "restart":
+        print(
+            f"\n确认重启第 {chapter} 章？\n"
+            "这会清除本章当前 Plan / Prose / Review / Context / RAG / checkpoint，\n"
+            "保留 Human Intent。\nCanonical 章节不得 restart。"
+        )
+        try:
+            confirmed = input("\n[y/N]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt, OSError):
+            confirmed = ""
+        if confirmed != "y":
+            print("已取消重启，继续等待。")
+            return {}
+    return {"action": action, "feedback": ""}
+
+
+def _run_interactive_chapter(args, result: dict) -> None:
+    while result.get("workflow_status") == "WAITING_HUMAN":
+        resume_value = _interactive_resume_value(
+            args.name, args.chapter, _waiting_payload(result)
+        )
+        if resume_value is None:
+            return
+        if not resume_value:
+            continue
+        try:
+            result = resume_chapter_workflow(
+                args.name, args.chapter, resume_value
+            )
+        except ValueError as exc:
+            print(f"\n  章节工作流恢复请求被拒绝：{exc}")
+            print("当前 checkpoint 未被消费，请修正后继续。")
+            continue
+        if result.get("workflow_status") == "RESTARTED":
+            result = run_chapter_workflow(
+                args.name,
+                args.chapter,
+                chapter_intent=getattr(args, "chapter_intent", "") or "",
+            )
+    _print_chapter_result(args.name, args.chapter, result)
+
+
 def cmd_write(args):
     if not _get_novel_dir(args.name):
         return
@@ -369,6 +559,12 @@ def cmd_write(args):
             args.chapter,
             chapter_intent=getattr(args, "chapter_intent", "") or "",
         )
+        if result.get("workflow_status") == "WAITING_HUMAN":
+            _run_interactive_chapter(args, result)
+            return
+    if not requested_action and result.get("workflow_status") == "WAITING_HUMAN":
+        _run_interactive_chapter(args, result)
+        return
     _print_chapter_result(args.name, args.chapter, result)
 
 
