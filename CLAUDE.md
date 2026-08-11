@@ -39,8 +39,9 @@
 - Atomic Facts 新协议仅含 source ranges + 自包含 fact_text；Python 校验地址并生成 deterministic metadata，独立 batch Verifier 与有限 corrective pass 后才进入 Chroma。API Embedding 由 Runtime 按最多 10 条分批，全部成功后才替换章节旧索引；write/continue 自动恢复首个未完成 Derivation stage。
 - 小说级运行策略保存在 `data/novels/<novel_id>/.env`，仅允许 Chapter Mode、Agent Execution、Auto Savepoint 与 RAG Top-K；命令启动时形成只读 snapshot，不污染全局环境，已开始章节仍以 checkpoint 冻结模式为准。
 - 主要 Chapter Workflow 阶段使用 `perf_counter()` 计时并把 `duration_ms` 写入 `generation_events`；CLI 汇总节点实际耗时，人工 checkpoint 外部等待不计入。
+- TTY 阶段计时由单一 daemon UI thread 原地刷新，非 TTY 安全降级；Prose Agent Edit 使用 WRITE slot，完整接收 Reviewer issues，并按 MUST FIX 与局部修改约束执行后重新 Review。
 - Proposal 已不再承诺生成“前50章章纲”；Book Plan 初始化输出的 `vv1` 已修复为 `v1`。
-- 2026-08-11 最近一次完整测试结果：`253 passed, 31 subtests passed, 1 warning`；唯一 warning 是未处理的 ChromaDB 依赖弃用提示，无测试失败。
+- 2026-08-11 最近一次完整测试结果：`258 passed, 31 subtests passed, 1 warning`；唯一 warning 是未处理的 ChromaDB 依赖弃用提示，无测试失败。
 - 当前详细状态、验证记录和 `Next Task` 仍以 `docs/CURRENT_DEVELOPMENT.md` 为准；不要在本文件继续累积阶段历史。
 
 ## Continuing Development

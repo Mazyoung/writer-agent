@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import hashlib
 import re
-import time
 from collections.abc import Callable
 from functools import wraps
 from typing import Annotated, Any, TypedDict
@@ -21,6 +20,12 @@ from src.core.model_provider import GenerationLimitExceeded
 from src.core.text_windows import previous_chapter_end
 from src.storage.file_store import FileStore
 from src.storage.sqlite_store import SQLiteStore
+from src.utils.live_timer import (
+    LiveStageTimer,
+    cancel_active_stage_timer,
+    start_live_stage_timer,
+)
+
 
 
 GENERATION_EVENT_TYPES = frozenset({
@@ -124,26 +129,22 @@ def record_generation_event(
     return [event]
 
 
-def _stage_start(state: "ChapterWorkflowState", message: str) -> float | None:
+def _stage_start(state: "ChapterWorkflowState", message: str) -> LiveStageTimer:
     chapter = state.get("chapter_index", 0)
     print(f"[Chapter {chapter}] 正在{message}...")
-    try:
-        return time.perf_counter()
-    except Exception:
-        return None
+    return start_live_stage_timer(chapter, message)
 
 
 def _stage_finish(
     state: "ChapterWorkflowState",
-    started: float | None,
+    started: LiveStageTimer,
     message: str,
 ) -> float:
-    duration_ms = 0.0
-    if started is not None:
-        try:
-            duration_ms = max(0.0, (time.perf_counter() - started) * 1000)
-        except Exception:
-            duration_ms = 0.0
+    try:
+        duration_ms = started.finish()
+    except Exception:
+        cancel_active_stage_timer()
+        duration_ms = 0.0
     chapter = state.get("chapter_index", 0)
     try:
         print(
@@ -296,10 +297,12 @@ def _guard_node(
         try:
             result = node(state)
         except GenerationLimitExceeded as exc:
+            cancel_active_stage_timer()
             return _error_result(
                 _generation_limit_report(state, node.__name__, exc)
             )
         except Exception as exc:
+            cancel_active_stage_timer()
             return _error_result(
                 f"{node.__name__} failed: {type(exc).__name__}: {exc}"
             )
@@ -886,6 +889,7 @@ def agent_edit_plan(state: ChapterWorkflowState) -> dict[str, Any]:
         "## Historical Evidence\n"
         + (state.get("historical_evidence", "") or "无"),
     ])
+    edit_started = _stage_start(state, "根据审核意见修改章节规划")
     revised = ChapterPlanner(state["novel_id"]).revise_plan(
         chapter_index=state["chapter_index"],
         current_plan=state.get("chapter_plan_text", ""),
@@ -894,6 +898,7 @@ def agent_edit_plan(state: ChapterWorkflowState) -> dict[str, Any]:
         chapter_intent=state.get("chapter_intent", ""),
         human_feedback=state.get("human_feedback", ""),
     )
+    edit_duration = _stage_finish(state, edit_started, "章节规划修改")
     revision_count = state.get("plan_revision_count", 0) + 1
     return {
         "chapter_plan_text": revised,
@@ -904,6 +909,7 @@ def agent_edit_plan(state: ChapterWorkflowState) -> dict[str, Any]:
             state,
             "PLAN_AGENT_EDITED",
             counter=revision_count,
+            duration_ms=edit_duration,
         ),
         "workflow_status": "PLAN_AGENT_EDITED",
     }
@@ -1086,13 +1092,24 @@ def agent_edit_chapter(state: ChapterWorkflowState) -> dict[str, Any]:
     if state.get("human_decision") != "agent_edit" and not autonomous:
         return _error_result("agent_edit 需要明确的人工决定")
 
+    review_issues = []
+    for item in [
+        *state.get("t1_issues", []),
+        *state.get("review_issues", []),
+        *state.get("review_reasons", []),
+    ]:
+        issue = str(item).strip()
+        if issue and issue not in review_issues:
+            review_issues.append(issue)
+    edit_started = _stage_start(state, "根据审核意见修改正文")
     revised = DeepSeekWriter(state["novel_id"]).revise_chapter(
-        state.get("chapter_plan_text", ""),
-        state["chapter_index"],
-        state.get("styled_text", ""),
-        [*state.get("review_reasons", []), state.get("human_feedback", "")],
-        state.get("t1_issues", []),
+        chapter_plan_text=state.get("chapter_plan_text", ""),
+        chapter_index=state["chapter_index"],
+        chapter_text=state.get("styled_text", ""),
+        review_issues=review_issues,
+        human_feedback=state.get("human_feedback", ""),
     )
+    edit_duration = _stage_finish(state, edit_started, "正文修改")
     if not revised.strip():
         return _error_result("Auto Revision 未产生正文")
     next_round = state.get("review_round", 1) + 1
@@ -1105,6 +1122,8 @@ def agent_edit_chapter(state: ChapterWorkflowState) -> dict[str, Any]:
             state,
             "PROSE_AGENT_EDITED",
             counter=next_round,
+            details={"review_issue_count": len(review_issues)},
+            duration_ms=edit_duration,
         ),
         "workflow_status": "AGENT_EDITED",
     }
@@ -1592,6 +1611,7 @@ def _derived_failure(
     *,
     stage: str,
 ) -> dict[str, Any]:
+    cancel_active_stage_timer()
     active = dict(state.get("active_derivation_errors", {}))
     previous = active.get(stage)
     active[stage] = message

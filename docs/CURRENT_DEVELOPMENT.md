@@ -3,7 +3,7 @@
 ## Current Stage
 
 E07 Story Savepoint + Load Savepoint、自动 Savepoint、四模型槽位与小说级
-Embedding 配置、小说级运行策略隔离及节点耗时可观测性已完成。只读 status 显示 `smoke_test` Chapter 1-2 已完成，Chapter 3 当前 durable 状态为 Prose Review / `WAITING_HUMAN`；相关文件时间早于本轮检查，本轮未推进该 checkpoint。
+Embedding 配置、小说级运行策略隔离、Prose Agent Edit 约束及阶段 Live Timer 已完成。`smoke_test` Chapter 1-2 已完成；Chapter 3 保持 Prose Review #3 / `NEEDS_REVISION` / `WAITING_HUMAN`，本轮未推进该 checkpoint。
 
 正式支持两条底层章节创作链与三种用户运行体验：
 
@@ -152,10 +152,22 @@ Tests tied to the retired src.core.orchestrator, automatic revision, PASS-to-dir
 - CLI 在 `DERIVED_READY` 后按 event 汇总系统节点执行时间。LangGraph interrupt 外部等待不在任何 node timing 区间内，因此 `WAITING_HUMAN` 停留时间不会污染阶段或 Total。
 - 本轮未增加并发、第二套 tracing、热加载或 Provider/Embedding 配置迁移，也未修改 Canonical、Derivation、Review、TokenGuard 和章节生成语义。
 
+## Prose Agent Edit & Live Timer Closure
+
+- Prose Agent Edit 仍使用 `deepseek_writer` 的 WRITE slot。输入链为 checkpoint 最新 `styled_text` + approved Chapter Plan + 完整 `t1_issues / review_issues / review_reasons` + 可选 human feedback；输出继续回写 `styled_text`、保存 revision/styled 文件，再由原 Prose Reviewer 审阅。
+- 真实缺口是旧链路没有显式传入完整 `review_issues`，prompt 也只要求泛化的 L1 修订，未把 Reviewer 已给出的正确正式事实定义为不可改写的 MUST FIX。现在按稳定顺序去重合并全部 Reviewer issues；`human_feedback=""` 不会删除任何审阅要求。
+- Editor prompt 明确其职责是受约束的局部修订，不是重新生成；Canonical/Current State/时间线/人物地点物品连续性、元叙述泄漏与明确逻辑错误必须逐项解决。Reviewer 已给出正确事实时禁止第三种解释、新设定绕行或反改正式事实，并要求模型内部完成修订前识别、修订后逐项自检，不把清单写入 prose。
+- 未额外塞入完整 Current State：当前 Reviewer issue 已携带冲突位置、正确事实和修复方向，扩展上下文没有证据基础；本轮也未新增 LLM 调用或第二套 consistency checker。
+- Autonomous Prose Review 只在 `review_round <= 2` 时自动 Agent Edit，之后进入人工 checkpoint；supervised 模式每轮都需用户显式选择，因而不存在无人值守无限循环，但用户可以人工重复发起修订，当前没有额外硬上限。
+- Agent Prose Edit 与 Agent Plan Edit 已接入现有 `perf_counter()` / `generation_events.duration_ms` 体系；CLI 最终汇总新增对应阶段。每秒刷新只存在于 terminal UI，不写 event、SQLite 或 tracking 文件。
+- `src/utils/live_timer.py` 只在 `sys.stdout.isatty()` 时用一个 daemon UI thread 约每秒刷新 `\r + ANSI clear-line`。临时 stdout proxy 使用锁，在现有日志写入前清除动态行、原样输出后重绘；停止时清行并恢复 stdout。非 TTY/CI 不安装 proxy、不输出控制字符，仅保留原开始/完成日志与最终 duration。
+- Timer cleanup 接入 node exception guard 与 Derivation failure path；UI 自身异常只关闭动态显示，不能吞掉或改写业务异常。WAITING_HUMAN 位于 node 计时区间之外，仍不进入任何阶段耗时。
+
+
 ## Verification
 
 - Embedding batching、WAITING_HUMAN 前台交互、既有 checkpoint 恢复、chapter_sources finalization、recovery 日志、只读 status 及既有 Derivation/RAG/TokenGuard 回归通过。
-- 完整 pytest suite：253 passed，31 subtests passed，1 warning。
+- 完整 pytest suite：258 passed，31 subtests passed，1 warning。
 - 唯一 warning 是 ChromaDB 依赖的既有 `asyncio.iscoroutinefunction` DeprecationWarning；本轮未处理无关技术债。
 - 本轮未调用真实模型 API；仅完成代码整改和本地回归验证。
 

@@ -271,6 +271,8 @@ _TIMING_EVENT_LABELS = {
     "RETRIEVAL_COMPLETED": "Retrieval",
     "PLAN_CREATED": "Planning",
     "PLAN_REVIEWED": "Plan Review",
+    "PLAN_AGENT_EDITED": "Agent Plan Edit",
+    "PROSE_AGENT_EDITED": "Agent Prose Edit",
     "PROSE_CREATED": "Writing",
     "PROSE_REGENERATED": "Writing",
     "STYLE_COMPLETED": "Styling",
@@ -298,7 +300,8 @@ def _print_timing_summary(result: dict) -> None:
         return
     print("\n本次系统执行耗时（不含人工等待）：")
     ordered = [
-        "Query Intent", "Retrieval", "Planning", "Plan Review", "Writing",
+        "Query Intent", "Retrieval", "Planning", "Plan Review",
+        "Agent Plan Edit", "Writing", "Agent Prose Edit",
         "Styling", "Prose Review", "Canonical Commit", "Current State",
         "Atomic Fact Derivation", "Fact Verification", "RAG / Embedding",
     ]

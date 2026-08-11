@@ -134,7 +134,7 @@ class StageTimingTests(unittest.TestCase):
             "src.agents.author.claude_stylist.ClaudeStylist",
             return_value=stylist,
         ), patch(
-            "src.workflows.chapter_workflow.time.perf_counter",
+            "src.utils.live_timer.time.perf_counter",
             side_effect=[10.0, 10.25],
         ):
             result = style_edit({

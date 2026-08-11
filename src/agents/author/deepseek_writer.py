@@ -54,12 +54,16 @@ class DeepSeekWriter(BaseAgent):
         chapter_plan_text: str,
         chapter_index: int,
         chapter_text: str,
-        review_reasons: list[str],
-        t1_issues: list[str],
+        review_issues: list[str],
+        human_feedback: str = "",
     ) -> str:
-        """Apply one L1 prose revision without loading future plans."""
-        issues = [*t1_issues, *review_reasons]
-        issue_text = "\n".join(f"- {issue}" for issue in issues if issue.strip())
+        """Apply one constrained local revision without loading future plans."""
+        issues = []
+        for item in [*review_issues, human_feedback]:
+            issue = str(item).strip()
+            if issue and issue not in issues:
+                issues.append(issue)
+        issue_text = "\n".join(f"- {issue}" for issue in issues)
         prompt = f"""## 已通过审阅的 Chapter Plan
 {chapter_plan_text}
 
@@ -70,7 +74,29 @@ class DeepSeekWriter(BaseAgent):
 {issue_text or '- 修复审阅指出的正文问题'}
 
 ---
-只修订当前正文以解决以上 L1 问题。不得修改 Chapter Plan，不得新增规划外事件，
+你的任务是修订当前正文，不是重新创作本章。只修改解决 Reviewer 问题所必需的句子或段落，
+保留其余已经成立的情节、节奏、角色塑造与措辞，不得把本次局部修订变成正文重新生成。
+
+Reviewer 指出的明确错误必须逐项解决。以下问题属于 MUST FIX：
+- 与 Canonical、Current State 或已经发生的正式事实冲突；
+- 时间线冲突；
+- 人物、地点、物品连续性冲突；
+- 元叙述或规划信息泄漏；
+- Reviewer 明确指出的逻辑错误。
+
+如果 Reviewer 已明确给出既有事实或正确修订方向：
+- 必须让当前正文对齐该事实；
+- 不得自行发明第三种解释；
+- 不得用新设定绕开冲突；
+- 不得修改既有正式事实来迁就当前正文。
+
+对于 Reviewer 标为建议、可接受或可保留的软问题，可以在不损害正文的前提下处理，
+但不得为了修复软问题制造新的事实冲突。
+
+修订前，在内部识别 Reviewer 提出的全部 MUST FIX；修订后逐项检查这些问题是否已真正消失。
+只有确认全部 MUST FIX 已解决后才输出最终正文；内部检查清单不得出现在正文中。
+
+不得修改 Chapter Plan，不得新增规划外事件，
 不得推测或引入 Book Plan / Volume Plan 中未出现在 Chapter Plan 的未来剧情。
 直接输出完整修订正文，不写说明。"""
         result = self.run(
