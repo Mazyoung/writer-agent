@@ -3,7 +3,7 @@
 ## Current Stage
 
 E07 Story Savepoint + Load Savepoint、自动 Savepoint、四模型槽位与小说级
-Embedding 配置及 Real Smoke 前置整改已完成。当前尚未执行真实模型凭证的 End-to-End Smoke；下一步是从 `smoke_test` 的正式 `write` 入口验证完整生产链。
+Embedding 配置及 Real Smoke 前置整改已完成。最新 `smoke_test` Chapter 1 已建立 Canonical，并恢复到 Derivation 的 `rag` 阶段；真实 Provider 的单请求最多 10 条限制已完成兼容整改。下一步是从正式 `continue` 入口恢复该 RAG 阶段。
 
 正式支持两条底层章节创作链与三种用户运行体验：
 
@@ -53,7 +53,7 @@ Story Savepoint 将正式章节完成后的完整小说创作世界保存为 imm
 - init 在创建小说数据或调用初始化 LLM 前执行实际 probe 并要求显式确认。API Key、地址、model 或 dimensions 错误均 fail fast，拒绝确认不会留下部分初始化状态。
 - mode、model、实际 dimensions 以及是否发送 dimensions 参数保存在小说内部不可变配置中，且位于 Story Savepoint Load 不覆盖的位置；API Key 与 API 地址不持久化。
 - 已初始化小说只读取其内部 Embedding 配置，忽略之后的 `.env EMBEDDING_MODE/MODEL/DIMENSIONS` 变化。缺失内部配置视为不兼容状态，不做 legacy fallback。
-- API 模式由 Writer-Agent 显式生成向量并传给 Chroma `add/query`；写入前校验向量数量和固定维度，失败不会 fallback 到 local。
+- API 模式由 Writer-Agent 显式生成向量并传给 Chroma `add/query`；`NovelEmbeddingRuntime` 按单请求最多 10 条自动分批，保持输入/向量顺序，并继续校验每批数量、最终数量和固定维度；任一批失败即传播原错误，不会 fallback 到 local 或返回部分结果。
 ## E07.9 Production Closure
 
 - The Python and Markdown call chain uses canonical_source_path / Canonical Source from Chapter Workflow through StateManager and CurrentStateStore.
@@ -126,19 +126,20 @@ Tests tied to the retired src.core.orchestrator, automatic revision, PASS-to-dir
 - 新 Fact 先由 Python按 range 提取 Canonical excerpt，再用独立 SYSTEM Verifier 一次 batch 审核。只解析明确 `VERIFIED / INCORRECT / INSUFFICIENT`；Verifier 协议非法最多一次纯协议纠正，不扫描自由分析猜 verdict，也不审核 importance/worth keeping。
 - `INCORRECT` 最多一次 targeted repair 后复核；`INSUFFICIENT` 先机械扩展每个 source range 的 ±1 段落邻域再复核，仍不足时才做未使用过的 targeted repair。每条 Fact 最多三轮真实性 verification、一次 repair；明确 DROP、repair 后无可靠独立事实或最终仍未 VERIFIED 均丢弃，不强制数量。
 - 只有 VERIFIED Fact 写入最终 Fact Digest 与 `atomic_facts_v2`。Chroma document 仅为 `fact_text`；新 metadata 为 deterministic `fact_id / chapter_index / source_path / source_ranges / canonical_hash`（另含 novel/branch/source_type/digest path 系统字段），旧 type/entities/start/end 只在 legacy data 时兼容保存/读取。
-- Chroma 按 chapter 先删除旧 ids 再写入，重试不会 duplicate；零个可靠 Fact 也可完成明确空 Digest。`quarantine_fact` 可立即把后续确认错误的 ACTIVE Fact 从正常向量索引移除，再复用 Canonical source + targeted repair + verification，fact_text 变化才需要新 embedding。
+- Chroma chapter replacement 会先准备全部新文档，并在 API 模式下完成全部新 embeddings，随后才删除旧 ids 并写入；Embedding 生成失败时旧索引保持不变，成功重试不会 duplicate。零个可靠 Fact 也可完成明确空 Digest。`quarantine_fact` 可立即把后续确认错误的 ACTIVE Fact 从正常向量索引移除，再复用 Canonical source + targeted repair + verification，fact_text 变化才需要新 embedding。
 - Derivation checkpoint 现依次为 Current State 生成/保存、Atomic Fact 生成、Fact Verification/保存、Volume Progress、Chapter Sources、Chroma。每阶段幂等；Current State 成功后 Fact 失败不会重写 Current State；write/continue 自动从首个未完成派生阶段继续，`repair-derivation` 仅保留 maintenance/debug。
 - active derivation failure 按 stage 单值保存；同 stage 同错误不重复，错误变化替换当前 active failure，stage 成功即清除。CLI 显示 Chapter、Canonical Commit、Failed Stage、真实异常、Recovery State Saved，并提示 write/continue 自动恢复。
 - TokenGuard 生产代码保持已确定 warning-only 策略；旧阻断语义测试已迁移为严格验证超限估算、文档诊断、warning、配置上限和继续完整发送提示。
-- 本轮未执行 Real Smoke、未重新生成 Chapter 1 Canonical、未调用真实模型 API。
+- Real Smoke 暴露的 `input.contents` batch size > 10 已在 Embedding Runtime transport 层收口；AtomicFactStore 不承担 Provider batch 业务规则。
+- 本轮未再次执行 Real Smoke、未重新生成 Chapter 1 Canonical、未调用真实模型 API；既有 `Canonical Commit: YES / Failed Stage: rag / Recovery State Saved: YES` 保持不变。
 
 ## Verification
 
-- 新 Derivation/RAG/TokenGuard 相关测试及迁移回归通过。
-- 完整 pytest suite：235 passed，24 subtests passed，1 warning。
+- Embedding batching、顺序/数量/维度/空输入/异常传播、Atomic Fact chapter replacement failure atomicity 及既有 Derivation/RAG/TokenGuard 回归通过。
+- 完整 pytest suite：241 passed，28 subtests passed，1 warning。
 - 唯一 warning 是 ChromaDB 依赖的既有 `asyncio.iscoroutinefunction` DeprecationWarning；本轮未处理无关技术债。
 - 本轮未调用真实模型 API；仅完成代码整改和本地回归验证。
 
 ## Next Task
 
-等待下一项明确任务。若继续真实凭证 Smoke，必须从正式 `write/continue` 入口验证新的自动 Derivation recovery；未经明确任务，不调用真实 API、不重新生成既有 Canonical。
+继续真实凭证 Smoke 时执行 `python main.py continue smoke_test`：必须复用 Chapter 1 已保存的 Canonical 与 durable Derivation 前序阶段，从未完成的 `rag` 阶段恢复，按每批不超过 10 条完成 Chroma 写入并达到 `DERIVED_READY`；未经明确任务，不调用真实 API、不重新生成既有 Canonical。

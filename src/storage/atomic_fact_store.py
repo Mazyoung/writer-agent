@@ -120,13 +120,12 @@ class AtomicFactStore:
     ) -> int:
         """Replace one chapter's facts; documents are Fact Text, never prose."""
         coll = self._ensure_collection(novel_id)
-        existing = coll.get(where=self._chapter_where(
-            novel_id, branch_id, chapter_index))
-        if existing and existing.get("ids"):
-            coll.delete(ids=existing["ids"])
-
         usable = [fact for fact in facts if fact.fact_text.strip()]
         if not usable:
+            existing = coll.get(where=self._chapter_where(
+                novel_id, branch_id, chapter_index))
+            if existing and existing.get("ids"):
+                coll.delete(ids=existing["ids"])
             return 0
         ids = []
         documents = []
@@ -163,6 +162,10 @@ class AtomicFactStore:
         runtime = self._runtime(novel_id)
         if runtime.is_api:
             add_kwargs["embeddings"] = runtime.embed(documents)
+        existing = coll.get(where=self._chapter_where(
+            novel_id, branch_id, chapter_index))
+        if existing and existing.get("ids"):
+            coll.delete(ids=existing["ids"])
         coll.add(**add_kwargs)
         return len(usable)
 

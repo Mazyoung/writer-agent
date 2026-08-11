@@ -21,6 +21,7 @@ from src.config.settings import Settings, get_settings
 
 EMBEDDING_SCHEMA = 1
 PROBE_TEXT = "writer-agent embedding initialization probe"
+API_EMBEDDING_BATCH_SIZE = 10
 
 
 @dataclass(frozen=True)
@@ -255,17 +256,25 @@ class NovelEmbeddingRuntime:
     def embed(self, texts: list[str]) -> list[list[float]]:
         if not self.is_api:
             raise ValueError("local 模式由 Chroma 内置 Embedding 处理")
-        vectors = _api_vectors(
-            api_key=self.settings.embedding_api_key,
-            base_url=self.settings.embedding_base_url,
-            model=self.config.embedding_model,
-            texts=texts,
-            dimensions=(
-                self.config.embedding_dimensions
-                if self.config.embedding_request_dimensions else None
-            ),
-            client_factory=self._api_client_factory,
-        )
+        if not texts:
+            return []
+        vectors = []
+        for start in range(0, len(texts), API_EMBEDDING_BATCH_SIZE):
+            batch = texts[start:start + API_EMBEDDING_BATCH_SIZE]
+            batch_vectors = _api_vectors(
+                api_key=self.settings.embedding_api_key,
+                base_url=self.settings.embedding_base_url,
+                model=self.config.embedding_model,
+                texts=batch,
+                dimensions=(
+                    self.config.embedding_dimensions
+                    if self.config.embedding_request_dimensions else None
+                ),
+                client_factory=self._api_client_factory,
+            )
+            if len(batch_vectors) != len(batch):
+                raise ValueError("Embedding API 返回的向量数量与输入数量不一致")
+            vectors.extend(batch_vectors)
         if len(vectors) != len(texts):
             raise ValueError("Embedding API 返回的向量数量与输入数量不一致")
         for vector in vectors:

@@ -637,6 +637,93 @@ class NovelEmbeddingConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "legacy fallback"):
             store.load("missing-novel")
 
+    def test_api_runtime_batches_requests_and_preserves_order(self):
+        cases = (
+            (1, [1]),
+            (10, [10]),
+            (11, [10, 1]),
+            (23, [10, 10, 3]),
+        )
+        for text_count, expected_batch_sizes in cases:
+            with self.subTest(text_count=text_count):
+                raw = MagicMock()
+
+                def create(**kwargs):
+                    data = []
+                    for index, text in enumerate(kwargs["input"]):
+                        ordinal = int(text.rsplit("-", 1)[1])
+                        data.append(SimpleNamespace(
+                            index=index,
+                            embedding=[float(ordinal), float(ordinal) + 0.5],
+                        ))
+                    return SimpleNamespace(data=list(reversed(data)))
+
+                raw.embeddings.create.side_effect = create
+                runtime = NovelEmbeddingRuntime(
+                    self._candidate("novel-api", "api", "model-a", 2),
+                    self._settings(
+                        "api", "secret", "https://embedding.example"
+                    ),
+                    api_client_factory=MagicMock(return_value=raw),
+                )
+                texts = [f"text-{index}" for index in range(text_count)]
+
+                vectors = runtime.embed(texts)
+
+                batch_sizes = [
+                    len(call.kwargs["input"])
+                    for call in raw.embeddings.create.call_args_list
+                ]
+                self.assertEqual(expected_batch_sizes, batch_sizes)
+                self.assertTrue(all(size <= 10 for size in batch_sizes))
+                self.assertEqual(text_count, len(vectors))
+                self.assertEqual(
+                    [float(index) for index in range(text_count)],
+                    [vector[0] for vector in vectors],
+                )
+
+    def test_api_runtime_empty_input_skips_provider_call(self):
+        raw = MagicMock()
+        runtime = NovelEmbeddingRuntime(
+            self._candidate("novel-api", "api", "model-a", 2),
+            self._settings("api", "secret", "https://embedding.example"),
+            api_client_factory=MagicMock(return_value=raw),
+        )
+
+        self.assertEqual([], runtime.embed([]))
+        raw.embeddings.create.assert_not_called()
+
+    def test_api_runtime_rejects_wrong_batch_vector_count(self):
+        raw = MagicMock()
+        raw.embeddings.create.return_value = SimpleNamespace(data=[])
+        runtime = NovelEmbeddingRuntime(
+            self._candidate("novel-api", "api", "model-a", 2),
+            self._settings("api", "secret", "https://embedding.example"),
+            api_client_factory=MagicMock(return_value=raw),
+        )
+
+        with self.assertRaisesRegex(ValueError, "向量数量与输入数量不一致"):
+            runtime.embed(["text-0"])
+
+    def test_api_runtime_propagates_later_batch_error(self):
+        raw = MagicMock()
+        provider_error = RuntimeError("provider batch failed")
+        first_batch = SimpleNamespace(data=[
+            SimpleNamespace(index=index, embedding=[0.1, 0.2])
+            for index in range(10)
+        ])
+        raw.embeddings.create.side_effect = [first_batch, provider_error]
+        runtime = NovelEmbeddingRuntime(
+            self._candidate("novel-api", "api", "model-a", 2),
+            self._settings("api", "secret", "https://embedding.example"),
+            api_client_factory=MagicMock(return_value=raw),
+        )
+
+        with self.assertRaises(RuntimeError) as raised:
+            runtime.embed([f"text-{index}" for index in range(11)])
+        self.assertIs(provider_error, raised.exception)
+        self.assertEqual(2, raw.embeddings.create.call_count)
+
     def test_api_runtime_rejects_changed_vector_dimensions(self):
         config = self._candidate("novel-api", "api", "model-a", 3)
         raw = MagicMock()
@@ -694,6 +781,58 @@ class ChromaEmbeddingPathTests(unittest.TestCase):
             ["query"], self.collection.query.call_args.kwargs["query_texts"]
         )
         runtime.embed.assert_not_called()
+
+    def test_embedding_failure_preserves_existing_chapter_vectors(self):
+        runtime = MagicMock(is_api=True)
+        provider_error = RuntimeError("embedding provider failed")
+        runtime.embed.side_effect = provider_error
+        self.store._runtimes["novel-api"] = runtime
+        self.collection.get.return_value = {"ids": ["old-vector"]}
+
+        with self.assertRaises(RuntimeError) as raised:
+            self.store.index_facts(
+                "novel-api", "main", 1, [self.fact], "chapter.md", "digest.md"
+            )
+
+        self.assertIs(provider_error, raised.exception)
+        self.collection.get.assert_not_called()
+        self.collection.delete.assert_not_called()
+        self.collection.add.assert_not_called()
+
+    def test_successful_embeddings_replace_existing_chapter_vectors(self):
+        events = []
+        runtime = MagicMock(is_api=True)
+
+        def embed(documents):
+            events.append("embed")
+            return [[0.1, 0.2] for _ in documents]
+
+        def get(**_kwargs):
+            events.append("get")
+            return {"ids": ["old-vector"]}
+
+        def delete(**_kwargs):
+            events.append("delete")
+
+        def add(**_kwargs):
+            events.append("add")
+
+        runtime.embed.side_effect = embed
+        self.store._runtimes["novel-api"] = runtime
+        self.collection.get.side_effect = get
+        self.collection.delete.side_effect = delete
+        self.collection.add.side_effect = add
+
+        indexed = self.store.index_facts(
+            "novel-api", "main", 1, [self.fact], "chapter.md", "digest.md"
+        )
+
+        self.assertEqual(1, indexed)
+        self.assertEqual(["embed", "get", "delete", "add"], events)
+        self.collection.delete.assert_called_once_with(ids=["old-vector"])
+        add_kwargs = self.collection.add.call_args.kwargs
+        self.assertEqual(["事实文本"], add_kwargs["documents"])
+        self.assertEqual([[0.1, 0.2]], add_kwargs["embeddings"])
 
     def test_dimension_error_happens_before_chroma_write(self):
         runtime = MagicMock(is_api=True)
