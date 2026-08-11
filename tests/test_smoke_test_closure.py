@@ -14,7 +14,9 @@ import main as cli
 from src.agents.author.chapter_planner import ChapterPlanner
 from src.config.settings import ModelSlot, get_settings
 from src.core.token_guard import guard_planning_context
+from src.core.novel_status import NovelStatusService
 from src.planning.novel_lifecycle import NovelLifecycleService
+from src.storage.chapter_completion import mark_derived_ready
 from src.storage.file_store import FileStore
 from src.workflows.chapter_progress import ensure_chapter_can_start
 from src.workflows.chapter_runner import ChapterWorkflowRunner
@@ -364,6 +366,94 @@ class ProgressAndContinuationTests(SmokeClosureCase):
             result = service.continue_once()
         self.assertEqual("WAITING_HUMAN", result["workflow_status"])
         run.assert_not_called()
+    def test_continue_waiting_human_enters_shared_interactive_handler(self):
+        waiting = {
+            "workflow_status": "WAITING_HUMAN",
+            "chapter_index": 2,
+            "interrupts": [{"value": {
+                "type": "plan_review",
+                "verdict": "PASS",
+                "allowed_actions": ["approve", "agent_edit", "human_edit"],
+            }}],
+        }
+        service = MagicMock()
+        service.continue_once.return_value = waiting
+        args = SimpleNamespace(name="smoke")
+        with patch.object(cli, "_get_novel_dir", return_value=Path("novel")), patch.object(
+            cli, "NovelContinuationService", return_value=service
+        ), patch.object(cli, "_run_interactive_chapter") as interactive:
+            cli.cmd_continue(args)
+
+        interactive.assert_called_once_with("smoke", 2, waiting)
+
+    def test_existing_waiting_checkpoint_enters_interaction_without_run(self):
+        service = NovelContinuationService("smoke")
+        service.fs.save_tracking_doc("volume_plan", VOLUME_DRAFT)
+        inspection = {
+            "values": {"workflow_status": "WAITING_HUMAN"},
+            "next": [],
+            "interrupts": [{"id": "i", "value": {
+                "type": "plan_review",
+                "verdict": "PASS",
+                "allowed_actions": ["approve"],
+            }}],
+        }
+        with patch.object(
+            ChapterWorkflowRunner, "inspect", return_value=inspection
+        ), patch.object(ChapterWorkflowRunner, "run") as run:
+            result = service.continue_once()
+
+        self.assertEqual("WAITING_HUMAN", result["workflow_status"])
+        self.assertEqual("plan_review", result["interrupts"][0]["value"]["type"])
+        run.assert_not_called()
+
+    def test_restart_waiting_human_enters_shared_interactive_handler(self):
+        waiting = {
+            "workflow_status": "WAITING_HUMAN",
+            "chapter_index": 2,
+            "interrupts": [{"value": {
+                "type": "plan_review", "allowed_actions": ["approve"]
+            }}],
+        }
+        args = SimpleNamespace(name="smoke", chapter=2)
+        with patch.object(cli, "_get_novel_dir", return_value=Path("novel")), patch.object(
+            cli, "restart_chapter_workflow"
+        ) as restart, patch.object(
+            cli, "run_chapter_workflow", return_value=waiting
+        ) as run, patch.object(cli, "_run_interactive_chapter") as interactive:
+            cli.cmd_restart(args)
+
+        restart.assert_called_once_with("smoke", 2)
+        run.assert_called_once_with("smoke", 2)
+        interactive.assert_called_once_with("smoke", 2, waiting)
+
+
+    def test_shared_interactive_handler_keeps_same_chapter_across_reviews(self):
+        plan_waiting = {
+            "workflow_status": "WAITING_HUMAN",
+            "interrupts": [{"value": {"type": "plan_review"}}],
+        }
+        prose_waiting = {
+            "workflow_status": "WAITING_HUMAN",
+            "interrupts": [{"value": {"type": "chapter_review"}}],
+        }
+        ready = {"workflow_status": "DERIVED_READY", "chapter_index": 2}
+        with patch.object(
+            cli, "_interactive_resume_value",
+            side_effect=[{"action": "approve"}, {"action": "approve"}],
+        ) as choice, patch.object(
+            cli, "resume_chapter_workflow",
+            side_effect=[prose_waiting, ready],
+        ) as resume, patch.object(cli, "_print_chapter_result") as rendered:
+            cli._run_interactive_chapter("smoke", 2, plan_waiting)
+
+        self.assertEqual(2, choice.call_count)
+        self.assertEqual(
+            [("smoke", 2, {"action": "approve"}),
+             ("smoke", 2, {"action": "approve"})],
+            [call.args for call in resume.call_args_list],
+        )
+        rendered.assert_called_once_with("smoke", 2, ready)
 
     def test_continue_resumes_checkpoint_without_restart(self):
         service = NovelContinuationService("smoke")
@@ -480,6 +570,68 @@ class ProgressAndContinuationTests(SmokeClosureCase):
         self.assertTrue(intent.exists())
         self.assertTrue(all(not path.exists() for path in candidates))
 
+    def test_status_distinguishes_error_ready_and_waiting_without_writes(self):
+        cases = (
+            (
+                "error",
+                False,
+                {"values": {
+                    "workflow_status": "DERIVATION_ERROR",
+                    "failed_derivation_stage": "rag",
+                    "derivation_error": "provider failed",
+                }, "next": [], "interrupts": []},
+                ("最新章节: 第 1 章", "正式正文: YES",
+                 "派生状态: DERIVATION_ERROR", "失败阶段: rag",
+                 "下一动作: continue（恢复未完成派生）"),
+            ),
+            (
+                "ready",
+                True,
+                {"values": {}, "next": [], "interrupts": []},
+                ("最新章节: 第 1 章", "正式正文: YES",
+                 "派生状态: DERIVED_READY",
+                 "下一动作: continue（开始第 2 章）"),
+            ),
+            (
+                "waiting",
+                True,
+                {"values": {"workflow_status": "WAITING_HUMAN"},
+                 "next": [], "interrupts": [{"value": {
+                     "type": "plan_review", "verdict": "PASS"
+                 }}]},
+                ("最新章节: 第 2 章", "正式正文: NO",
+                 "状态: WAITING_HUMAN", "检查点: Plan Review",
+                 "下一动作: continue（进入人工交互）"),
+            ),
+        )
+        for suffix, ready, inspection, expected in cases:
+            with self.subTest(status=suffix):
+                novel_id = f"status-{suffix}"
+                fs = FileStore(novel_id, self.settings.data_dir)
+                fs.commit_canonical_chapter(1, "正文")
+                if ready:
+                    mark_derived_ready(fs, 1)
+                service = NovelStatusService(novel_id)
+                before = {
+                    path.relative_to(fs.root): path.read_bytes()
+                    for path in fs.root.rglob("*") if path.is_file()
+                }
+                output = io.StringIO()
+                with patch.object(
+                    service, "_inspect_chapter", return_value=inspection
+                ), redirect_stdout(output):
+                    service.print_status()
+                rendered = output.getvalue()
+                for marker in expected:
+                    self.assertIn(marker, rendered)
+                after = {
+                    path.relative_to(fs.root): path.read_bytes()
+                    for path in fs.root.rglob("*") if path.is_file()
+                }
+                self.assertEqual(before, after)
+                self.assertFalse(service.sqlite_path.exists())
+                self.assertFalse(service.checkpoint_path.exists())
+
     def test_review_cli_prints_all_issues_and_actions(self):
         result = {
             "workflow_status": "WAITING_HUMAN",
@@ -495,8 +647,12 @@ class ProgressAndContinuationTests(SmokeClosureCase):
         with redirect_stdout(output):
             cli._print_chapter_result("smoke", 3, result)
         rendered = output.getvalue()
-        for marker in ("问题一", "问题二", "agent edit", "regenerate prose", "restart"):
+        for marker in (
+            "问题一", "问题二", "agent_edit", "human_edit",
+            "regenerate_prose", "restart",
+        ):
             self.assertIn(marker, rendered)
+        self.assertNotIn("agent edit", rendered)
 
 
 if __name__ == "__main__":

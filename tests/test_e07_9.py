@@ -158,12 +158,19 @@ class TestRepair(E079Case):
         graph.invoke.return_value = {**values, "workflow_status": "DERIVED_READY"}
         runner._open_graph = MagicMock(return_value=(connection, MagicMock(), graph))
 
-        result = runner.repair_derivation()
+        with patch("builtins.print") as output:
+            result = runner.repair_derivation()
 
         self.assertEqual(result["workflow_status"], "DERIVED_READY")
         self.assertEqual(graph.update_state.call_args.kwargs["as_node"],
                          "persist_current_state")
         graph.invoke.assert_called_once_with(None, config=runner.config)
+        rendered = "\n".join(
+            " ".join(str(arg) for arg in call.args)
+            for call in output.call_args_list
+        )
+        self.assertNotIn("首个未完成阶段", rendered)
+        self.assertIn("已恢复到 checkpoint：persist_current_state", rendered)
 
 
 class TestVolumeLifecycle(E079Case):

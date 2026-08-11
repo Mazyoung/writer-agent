@@ -1922,18 +1922,46 @@ def sync_chroma(state: ChapterWorkflowState) -> dict[str, Any]:
                 stage="rag",
             ),
         }
-    ready_event = record_generation_event(
+    recovery_events = _recovery_event(state, "rag")
+    ready_events = record_generation_event(
         state,
         "DERIVED_READY",
         details={"completion_marker_path": str(completion.relative_to(fs.root)).replace("\\", "/")},
     )
-    return {
-        "rag_facts": count,
-        "rag_chunks": 0,
+    cleared_failure = _clear_derived_failure(state, "rag")
+    event_updates = [*recovery_events, *ready_events]
+    final_state = {
+        **state,
+        **cleared_failure,
         "completion_marker_path": str(
             completion.relative_to(fs.root)
         ).replace("\\", "/"),
-        "generation_events": [*_recovery_event(state, "rag"), *ready_event],
+        "generation_events": merge_generation_events(
+            state.get("generation_events", []), event_updates
+        ),
+        "workflow_status": "DERIVED_READY",
+    }
+    try:
+        source_result = save_chapter_sources.__wrapped__(final_state)
+    except Exception as exc:
+        completion.unlink(missing_ok=True)
+        return {
+            "rag_facts": count,
+            "rag_chunks": 0,
+            **_derived_failure(
+                state,
+                "Chapter sources finalization failed: "
+                f"{type(exc).__name__}: {exc}",
+                stage="chapter-sources",
+            ),
+        }
+    return {
+        "rag_facts": count,
+        "rag_chunks": 0,
+        "completion_marker_path": final_state["completion_marker_path"],
+        "chapter_sources_path": source_result["chapter_sources_path"],
+        **cleared_failure,
+        "generation_events": event_updates,
         "workflow_status": "DERIVED_READY",
     }
 

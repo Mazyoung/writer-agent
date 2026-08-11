@@ -325,12 +325,12 @@ def _print_chapter_result(name: str, chapter: int, result: dict) -> None:
             print(f"{index}. {issue}")
     print("\n可选操作：")
     display = {
-        "agent_edit": "agent edit",
-        "human_edit": "human edit",
-        "regenerate_prose": "regenerate prose",
+        "agent_edit": "agent_edit",
+        "human_edit": "human_edit",
+        "regenerate_prose": "regenerate_prose",
         "restart": "restart",
         "approve": "approve",
-        "confirm_override": "confirm override",
+        "confirm_override": "confirm_override",
         "back": "back",
     }
     for action in payload.get("allowed_actions", []):
@@ -503,10 +503,15 @@ def _interactive_resume_value(
     return {"action": action, "feedback": ""}
 
 
-def _run_interactive_chapter(args, result: dict) -> None:
+def _run_interactive_chapter(
+    novel_id: str,
+    chapter: int,
+    result: dict,
+    chapter_intent: str = "",
+) -> None:
     while result.get("workflow_status") == "WAITING_HUMAN":
         resume_value = _interactive_resume_value(
-            args.name, args.chapter, _waiting_payload(result)
+            novel_id, chapter, _waiting_payload(result)
         )
         if resume_value is None:
             return
@@ -514,7 +519,7 @@ def _run_interactive_chapter(args, result: dict) -> None:
             continue
         try:
             result = resume_chapter_workflow(
-                args.name, args.chapter, resume_value
+                novel_id, chapter, resume_value
             )
         except ValueError as exc:
             print(f"\n  章节工作流恢复请求被拒绝：{exc}")
@@ -522,11 +527,11 @@ def _run_interactive_chapter(args, result: dict) -> None:
             continue
         if result.get("workflow_status") == "RESTARTED":
             result = run_chapter_workflow(
-                args.name,
-                args.chapter,
-                chapter_intent=getattr(args, "chapter_intent", "") or "",
+                novel_id,
+                chapter,
+                chapter_intent=chapter_intent,
             )
-    _print_chapter_result(args.name, args.chapter, result)
+    _print_chapter_result(novel_id, chapter, result)
 
 
 def cmd_write(args):
@@ -573,11 +578,11 @@ def cmd_write(args):
             args.chapter,
             chapter_intent=getattr(args, "chapter_intent", "") or "",
         )
-        if result.get("workflow_status") == "WAITING_HUMAN":
-            _run_interactive_chapter(args, result)
-            return
-    if not requested_action and result.get("workflow_status") == "WAITING_HUMAN":
-        _run_interactive_chapter(args, result)
+    if result.get("workflow_status") == "WAITING_HUMAN":
+        _run_interactive_chapter(
+            args.name, args.chapter, result,
+            getattr(args, "chapter_intent", "") or "",
+        )
         return
     _print_chapter_result(args.name, args.chapter, result)
 
@@ -610,6 +615,9 @@ def cmd_restart(args):
     except ValueError as exc:
         print(f"restart 被拒绝：{exc}")
         return
+    if result.get("workflow_status") == "WAITING_HUMAN":
+        _run_interactive_chapter(args.name, args.chapter, result)
+        return
     _print_chapter_result(args.name, args.chapter, result)
 
 
@@ -622,6 +630,9 @@ def cmd_continue(args):
         print(f"continue 被拒绝：{exc}")
         return
     chapter = int(result.get("chapter_index", 0) or 0)
+    if result.get("workflow_status") == "WAITING_HUMAN":
+        _run_interactive_chapter(args.name, chapter, result)
+        return
     _print_chapter_result(args.name, chapter, result)
 
 

@@ -112,11 +112,11 @@ def _maybe_create_auto_savepoint(
 class ChapterWorkflowRunner:
     """Start or resume one chapter on its deterministic LangGraph thread."""
 
-    def __init__(self, novel_id: str, chapter_index: int):
+    def __init__(self, novel_id: str, chapter_index: int, *, ensure_dirs: bool = True):
         self.novel_id = novel_id
         self.chapter_index = chapter_index
         settings = get_settings()
-        self.file_store = FileStore(novel_id, settings.data_dir)
+        self.file_store = FileStore(novel_id, settings.data_dir, ensure_dirs=ensure_dirs)
         self.checkpoint_path = (
             settings.data_dir / "novels" / novel_id / "workflow_checkpoints.sqlite"
         )
@@ -140,9 +140,16 @@ class ChapterWorkflowRunner:
             ],
         }
 
-    def _open_graph(self):
-        self.checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-        connection = sqlite3.connect(self.checkpoint_path, check_same_thread=False)
+    def _open_graph(self, *, read_only: bool = False):
+        if read_only:
+            connection = sqlite3.connect(
+                f"file:{self.checkpoint_path.as_posix()}?mode=ro",
+                uri=True,
+                check_same_thread=False,
+            )
+        else:
+            self.checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+            connection = sqlite3.connect(self.checkpoint_path, check_same_thread=False)
         checkpointer = SqliteSaver(connection)
         return connection, checkpointer, build_chapter_workflow(
             checkpointer=checkpointer)
@@ -169,7 +176,7 @@ class ChapterWorkflowRunner:
 
     def inspect(self) -> dict[str, Any]:
         """Return durable checkpoint state without advancing it."""
-        connection, _checkpointer, graph = self._open_graph()
+        connection, _checkpointer, graph = self._open_graph(read_only=True)
         try:
             snapshot = graph.get_state(self.config)
             return {
@@ -182,6 +189,46 @@ class ChapterWorkflowRunner:
             }
         finally:
             connection.close()
+
+    @_novel_mutation_locked
+    def refresh_derived_ready_sources(self) -> dict[str, Any]:
+        """Refresh only the deterministic report for an already-ready chapter."""
+        from src.storage.chapter_completion import is_derived_ready
+
+        if not is_derived_ready(self.file_store, self.chapter_index):
+            return {"refreshed": False}
+        if not self.checkpoint_path.is_file():
+            return {"refreshed": False}
+        inspection = self.inspect()
+        values = dict(inspection.get("values", {}))
+        if not values or values.get("commit_success") is not True:
+            return {"refreshed": False}
+        final_state = {
+            **values,
+            "workflow_status": "DERIVED_READY",
+            "failed_derivation_stage": "",
+            "derivation_error": "",
+            "active_derivation_errors": {},
+            "derived_state_errors": [],
+        }
+        path = (
+            self.file_store.root / "sources"
+            / f"chapter_{self.chapter_index:04d}" / "chapter_sources.md"
+        )
+        content = render_chapter_sources(final_state)
+        if path.is_file() and path.read_text(encoding="utf-8") == content:
+            return {"refreshed": False}
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(".md.tmp")
+        temporary.write_text(content, encoding="utf-8")
+        temporary.replace(path)
+        return {
+            "refreshed": True,
+            "chapter_sources_path": str(
+                path.relative_to(self.file_store.root)
+            ).replace("\\", "/"),
+        }
+
 
     @_novel_mutation_locked
     def run(
@@ -467,7 +514,10 @@ class ChapterWorkflowRunner:
                 {"workflow_status": status, "error": None},
                 as_node=as_node,
             )
-            print(f"  [LangGraph] 正在从首个未完成阶段继续：{as_node}")
+            print(
+                f"  [LangGraph] 已恢复到 checkpoint：{as_node}，"
+                "正在继续后续 Derivation。"
+            )
             return self._result_or_interrupt(
                 graph, graph.invoke(None, config=self.config)
             )

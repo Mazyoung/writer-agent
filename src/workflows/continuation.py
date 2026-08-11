@@ -98,6 +98,17 @@ class NovelContinuationService:
         decision = self.route()
         action = decision["action"]
         chapter = decision.get("chapter_index", 0)
+        completed_chapter = chapter - 1 if action == "waiting_human" else 0
+        if completed_chapter and is_derived_ready(self.fs, completed_chapter):
+            try:
+                ChapterWorkflowRunner(
+                    self.novel_id, completed_chapter
+                ).refresh_derived_ready_sources()
+            except Exception as exc:
+                print(
+                    "  [chapter_sources warning] 已完成章节的最终来源报告刷新失败："
+                    f"{type(exc).__name__}: {exc}"
+                )
         if action == "waiting_human":
             return decision["result"]
         if action == "repair_derivation":

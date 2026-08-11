@@ -34,11 +34,11 @@
 - Volume Plan 校验只保留非空、卷号、status enum/lifecycle 等机器约束，不再用字段提取结果或关键词判断“内容缺失/写成章纲”。
 - Plan/Prose/Consistency Review 的显式 verdict 是唯一语义结论；Python 不再根据 major/minor/T1/T2/T3 或自然语言正文二次改写 verdict。缺失或非法 verdict 仍 fail closed。
 - StyleChecker 已退出正式 Chapter Workflow，仅保留手动 lint/debug 用途；旧 `quality_reviewer.txt` 与 `consistency_guard.txt` 已删除。
-- Chapter State 已包含 checkpointed、幂等的 `generation_events`；`chapter_sources.md` 统一记录 Intent、Query Intent、Retrieval 来源、正式上下文、Review/Edit/Regenerate/Override、Canonical 和 Derivation/recovery，不扫描 Markdown 猜测事实。
+- Chapter State 已包含 checkpointed、幂等的 `generation_events`；`chapter_sources.md` 统一记录 Intent、Query Intent、Retrieval 来源、正式上下文、Review/Edit/Regenerate/Override、Canonical 和 Derivation/recovery，并在 `DERIVED_READY` 后按 durable checkpoint 幂等刷新最终状态，不扫描 Markdown 猜测事实。
 - Current State 是 Human/LLM Raw Markdown，由独立 SYSTEM Updater 基于 Previous Current State + Canonical 生成完整文档；StateDelta/semantic parser 已退出正式 Current State 路径。
 - Atomic Facts 新协议仅含 source ranges + 自包含 fact_text；Python 校验地址并生成 deterministic metadata，独立 batch Verifier 与有限 corrective pass 后才进入 Chroma。API Embedding 由 Runtime 按最多 10 条分批，全部成功后才替换章节旧索引；write/continue 自动恢复首个未完成 Derivation stage。
 - Proposal 已不再承诺生成“前50章章纲”；Book Plan 初始化输出的 `vv1` 已修复为 `v1`。
-- 2026-08-11 最近一次完整测试结果：`241 passed, 28 subtests passed, 1 warning`；唯一 warning 是未处理的 ChromaDB 依赖弃用提示，无测试失败。
+- 2026-08-11 最近一次完整测试结果：`248 passed, 31 subtests passed, 1 warning`；唯一 warning 是未处理的 ChromaDB 依赖弃用提示，无测试失败。
 - 当前详细状态、验证记录和 `Next Task` 仍以 `docs/CURRENT_DEVELOPMENT.md` 为准；不要在本文件继续累积阶段历史。
 
 ## Continuing Development

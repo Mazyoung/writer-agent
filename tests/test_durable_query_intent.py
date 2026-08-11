@@ -20,6 +20,7 @@ from src.storage.chapter_completion import (
 from src.storage.file_store import FileStore
 from src.workflows.chapter_runner import ChapterWorkflowRunner
 from src.workflows.chapter_workflow import (
+    merge_generation_events,
     _route_after_human_chapter,
     _route_after_human_plan,
     await_human_chapter,
@@ -77,7 +78,122 @@ class DurableCompletionTests(FocusCase):
                 "canonical_source_path": "chapters/chapter_0001.md",
             })
         self.assertEqual("DERIVED_READY", result["workflow_status"])
+        report = (
+            self.fs.root / "sources" / "chapter_0001" / "chapter_sources.md"
+        ).read_text(encoding="utf-8")
+        self.assertIn("- DERIVED_READY: 是", report)
+
+    def test_recovery_finalizes_sources_without_duplicate_events(self):
+        self.fs.commit_canonical_chapter(1, "正式正文")
+        digest = self.fs.save("states", "fact_digest_ch0001", ATOMIC_MD)
+        failure = {
+            "event_id": "1:DERIVATION_FAILED:rag",
+            "event_type": "DERIVATION_FAILED",
+            "chapter_index": 1,
+            "discriminator": "rag",
+            "details": {"stage": "rag", "message": "provider failed"},
+        }
+        state = {
+            "novel_id": "focus",
+            "chapter_index": 1,
+            "commit_success": True,
+            "fact_digest_path": str(
+                digest.relative_to(self.fs.root)
+            ).replace("\\", "/"),
+            "canonical_source_path": "chapters/chapter_0001.md",
+            "workflow_status": "DERIVATION_ERROR",
+            "failed_derivation_stage": "rag",
+            "derivation_error": "provider failed",
+            "active_derivation_errors": {"rag": "provider failed"},
+            "derived_state_errors": ["provider failed"],
+            "warnings": ["provider failed"],
+            "generation_events": [failure],
+        }
+        with patch(
+            "src.storage.atomic_fact_store.AtomicFactStore.index_facts",
+            return_value=2,
+        ):
+            first = sync_chroma(state)
+            merged = merge_generation_events(
+                state["generation_events"], first["generation_events"]
+            )
+            second_state = {**state, **first, "generation_events": merged}
+            second = sync_chroma(second_state)
+
+        report = (
+            self.fs.root / "sources" / "chapter_0001" / "chapter_sources.md"
+        ).read_text(encoding="utf-8")
+        self.assertEqual("DERIVED_READY", first["workflow_status"])
+        self.assertEqual("", first["failed_derivation_stage"])
+        self.assertEqual("", first["derivation_error"])
+        self.assertEqual({}, first["active_derivation_errors"])
+        self.assertIn("`DERIVATION_FAILED`", report)
+        self.assertIn("`DERIVATION_RECOVERED`", report)
+        self.assertEqual(1, report.count("`DERIVATION_FAILED`"))
+        self.assertEqual(1, report.count("`DERIVATION_RECOVERED`"))
+        self.assertEqual(1, report.count("`DERIVED_READY`"))
+        self.assertIn("- DERIVED_READY: 是", report)
+        merged_twice = merge_generation_events(
+            merged, second["generation_events"]
+        )
+        self.assertEqual(
+            len(merged_twice), len({event["event_id"] for event in merged_twice})
+        )
         self.assertTrue(is_derived_ready(self.fs, 1))
+
+    def test_existing_ready_checkpoint_refreshes_stale_sources_idempotently(self):
+        self.fs.commit_canonical_chapter(1, "正式正文")
+        mark_derived_ready(self.fs, 1)
+        runner = ChapterWorkflowRunner("focus", 1)
+        runner.checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        runner.checkpoint_path.touch()
+        source_path = (
+            self.fs.root / "sources" / "chapter_0001" / "chapter_sources.md"
+        )
+        source_path.parent.mkdir(parents=True, exist_ok=True)
+        source_path.write_text(
+            "Canonical Commit: 是\nDERIVED_READY: 否\n", encoding="utf-8"
+        )
+        events = [
+            {
+                "event_id": "1:DERIVATION_FAILED:rag",
+                "event_type": "DERIVATION_FAILED",
+                "chapter_index": 1,
+                "discriminator": "rag",
+                "details": {"stage": "rag", "message": "failed"},
+            },
+            {
+                "event_id": "1:DERIVATION_RECOVERED:rag",
+                "event_type": "DERIVATION_RECOVERED",
+                "chapter_index": 1,
+                "discriminator": "rag",
+                "details": {"stage": "rag"},
+            },
+            {
+                "event_id": "1:DERIVED_READY",
+                "event_type": "DERIVED_READY",
+                "chapter_index": 1,
+                "details": {},
+            },
+        ]
+        inspection = {"values": {
+            "novel_id": "focus", "chapter_index": 1,
+            "commit_success": True, "workflow_status": "DERIVED_READY",
+            "failed_derivation_stage": "rag",
+            "derivation_error": "failed", "generation_events": events,
+        }, "next": [], "interrupts": []}
+        with patch.object(runner, "inspect", return_value=inspection):
+            first = runner.refresh_derived_ready_sources()
+            first_content = source_path.read_text(encoding="utf-8")
+            second = runner.refresh_derived_ready_sources()
+
+        self.assertTrue(first["refreshed"])
+        self.assertFalse(second["refreshed"])
+        self.assertEqual(first_content, source_path.read_text(encoding="utf-8"))
+        self.assertIn("`DERIVATION_FAILED`", first_content)
+        self.assertIn("`DERIVATION_RECOVERED`", first_content)
+        self.assertIn("- DERIVED_READY: 是", first_content)
+
 
     def test_continue_uses_markers_and_selects_next_chapter(self):
         for chapter in range(1, 81):

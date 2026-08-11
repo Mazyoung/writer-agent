@@ -3,7 +3,7 @@
 ## Current Stage
 
 E07 Story Savepoint + Load Savepoint、自动 Savepoint、四模型槽位与小说级
-Embedding 配置及 Real Smoke 前置整改已完成。最新 `smoke_test` Chapter 1 已建立 Canonical，并恢复到 Derivation 的 `rag` 阶段；真实 Provider 的单请求最多 10 条限制已完成兼容整改。下一步是从正式 `continue` 入口恢复该 RAG 阶段。
+Embedding 配置及 Real Smoke 前置整改已完成。最新 `smoke_test` Chapter 1 已达到 `DERIVED_READY`；Chapter 2 已完成 Plan 与 PASS Review，当前 durable 状态为 `WAITING_HUMAN`。下一步是从正式 `continue` 入口直接进入现有人工 checkpoint。
 
 正式支持两条底层章节创作链与三种用户运行体验：
 
@@ -131,15 +131,23 @@ Tests tied to the retired src.core.orchestrator, automatic revision, PASS-to-dir
 - active derivation failure 按 stage 单值保存；同 stage 同错误不重复，错误变化替换当前 active failure，stage 成功即清除。CLI 显示 Chapter、Canonical Commit、Failed Stage、真实异常、Recovery State Saved，并提示 write/continue 自动恢复。
 - TokenGuard 生产代码保持已确定 warning-only 策略；旧阻断语义测试已迁移为严格验证超限估算、文档诊断、warning、配置上限和继续完整发送提示。
 - Real Smoke 暴露的 `input.contents` batch size > 10 已在 Embedding Runtime transport 层收口；AtomicFactStore 不承担 Provider batch 业务规则。
-- 本轮未再次执行 Real Smoke、未重新生成 Chapter 1 Canonical、未调用真实模型 API；既有 `Canonical Commit: YES / Failed Stage: rag / Recovery State Saved: YES` 保持不变。
+- 本轮未再次执行 Real Smoke、未重新生成 Chapter 1/2、未调用真实模型 API；既有 Chapter 1 `DERIVED_READY` 与 Chapter 2 Plan Review PASS / `WAITING_HUMAN` checkpoint 保持不变。
+
+## Real Smoke WAITING / Provenance Closure
+
+- `write`、`continue`、`restart` 的前台单章结果统一把 `WAITING_HUMAN` 交给同一个 in-process interactive handler；helper 使用明确的 novel/chapter/result 参数，不依赖 `args.chapter`，并可在 Plan Review、Prose Review 等多次 interrupt 间保持同一进程与章号。
+- `continue` 仍由 `NovelContinuationService.route()` 优先返回现有 interrupt；已有 Chapter 2 WAITING checkpoint 不运行 Planning、Retrieval、Review，也不会自动 approve。CLI 显示的 action 使用 parser 可直接接受的 `agent_edit / human_edit / regenerate_prose / confirm_override` 名称。
+- `sync_chroma` 成功写入 durable marker 后会用已合并的 checkpoint events 刷新 `chapter_sources.md`，清除已恢复 RAG 的当前错误字段，并保留 `DERIVATION_FAILED / DERIVATION_RECOVERED` 历史。对本轮之前已经 READY 的 stale report，`continue` 仅在内容不同的时候按现有 checkpoint 幂等修正，不推进节点或新增 event。
+- Derivation recovery 日志不再把 `update_state(..., as_node=predecessor)` 称为“首个未完成阶段”，改为明确显示恢复到哪个 checkpoint 并继续后续 Derivation；恢复算法未变。
+- `status` 新增最新相关章节、Canonical 正文、派生/WAITING 状态、失败阶段或人工检查点及下一动作。状态读取使用不建目录的 FileStore、SQLite `mode=ro` 与只读 checkpoint 连接，不运行或恢复 workflow。
 
 ## Verification
 
-- Embedding batching、顺序/数量/维度/空输入/异常传播、Atomic Fact chapter replacement failure atomicity 及既有 Derivation/RAG/TokenGuard 回归通过。
-- 完整 pytest suite：241 passed，28 subtests passed，1 warning。
+- Embedding batching、WAITING_HUMAN 前台交互、既有 checkpoint 恢复、chapter_sources finalization、recovery 日志、只读 status 及既有 Derivation/RAG/TokenGuard 回归通过。
+- 完整 pytest suite：248 passed，31 subtests passed，1 warning。
 - 唯一 warning 是 ChromaDB 依赖的既有 `asyncio.iscoroutinefunction` DeprecationWarning；本轮未处理无关技术债。
 - 本轮未调用真实模型 API；仅完成代码整改和本地回归验证。
 
 ## Next Task
 
-继续真实凭证 Smoke 时执行 `python main.py continue smoke_test`：必须复用 Chapter 1 已保存的 Canonical 与 durable Derivation 前序阶段，从未完成的 `rag` 阶段恢复，按每批不超过 10 条完成 Chroma 写入并达到 `DERIVED_READY`；未经明确任务，不调用真实 API、不重新生成既有 Canonical。
+继续真实凭证 Smoke 时执行 `python main.py continue smoke_test`：必须识别 Chapter 2 已有 Plan Review PASS / `WAITING_HUMAN` checkpoint，在当前进程显示现有 Review 并进入人工操作；不得重跑 Query Intent、Retrieval、Planning 或 Review。用户可直接 `approve` 继续 Writer；未经明确任务，不调用真实 API、不重建现有小说。
