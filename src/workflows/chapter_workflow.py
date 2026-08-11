@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import time
 from collections.abc import Callable
 from functools import wraps
 from typing import Annotated, Any, TypedDict
@@ -43,6 +44,11 @@ GENERATION_EVENT_TYPES = frozenset({
     "DERIVATION_FAILED",
     "DERIVATION_RECOVERED",
     "DERIVED_READY",
+    "STYLE_COMPLETED",
+    "CURRENT_STATE_UPDATED",
+    "ATOMIC_FACTS_DERIVED",
+    "FACT_VERIFICATION_COMPLETED",
+    "RAG_UPDATED",
     "AUTO_SAVEPOINT_CREATED",
 })
 
@@ -54,6 +60,7 @@ class GenerationEvent(TypedDict, total=False):
     attempt: int
     discriminator: str
     details: dict[str, Any]
+    duration_ms: float
 
 
 def merge_generation_events(
@@ -86,6 +93,7 @@ def record_generation_event(
     counter: int | None = None,
     discriminator: str = "",
     details: dict[str, Any] | None = None,
+    duration_ms: float | None = None,
 ) -> list[GenerationEvent]:
     """Create one event whose ID comes only from durable workflow identity."""
     if event_type not in GENERATION_EVENT_TYPES:
@@ -104,6 +112,8 @@ def record_generation_event(
         "chapter_index": chapter_index,
         "details": details or {},
     }
+    if duration_ms is not None:
+        event["duration_ms"] = max(0.0, float(duration_ms))
     if counter is not None:
         event["attempt"] = counter
     if discriminator:
@@ -112,6 +122,37 @@ def record_generation_event(
         if existing.get("event_id") == event["event_id"]:
             return [existing]
     return [event]
+
+
+def _stage_start(state: "ChapterWorkflowState", message: str) -> float | None:
+    chapter = state.get("chapter_index", 0)
+    print(f"[Chapter {chapter}] 正在{message}...")
+    try:
+        return time.perf_counter()
+    except Exception:
+        return None
+
+
+def _stage_finish(
+    state: "ChapterWorkflowState",
+    started: float | None,
+    message: str,
+) -> float:
+    duration_ms = 0.0
+    if started is not None:
+        try:
+            duration_ms = max(0.0, (time.perf_counter() - started) * 1000)
+        except Exception:
+            duration_ms = 0.0
+    chapter = state.get("chapter_index", 0)
+    try:
+        print(
+            f"[Chapter {chapter}] {message}完成，用时 "
+            f"{duration_ms / 1000:.1f} 秒。"
+        )
+    except Exception:
+        pass
+    return duration_ms
 
 
 class ChapterWorkflowState(TypedDict, total=False):
@@ -126,6 +167,10 @@ class ChapterWorkflowState(TypedDict, total=False):
     chapter_intent: str
     chapter_mode: str
     agent_execution: str
+    auto_savepoint_every: int
+    rag_top_k: int
+    plan_review_duration_ms: float
+    prose_review_duration_ms: float
 
     chapter_plan_text: str
     historical_evidence: str
@@ -421,10 +466,17 @@ def prepare_human_context(state: ChapterWorkflowState) -> dict[str, Any]:
         return _error_result(
             "Human Mode 执行历史检索前必须提供非空 Chapter Intent。"
         )
+    query_started = _stage_start(state, "生成 Query Intent")
     query_intent, query_attempt, query_events = _build_query_intent(state)
-    retrieval = ChapterRetrievalService(state["novel_id"]).retrieve(
+    query_duration = _stage_finish(state, query_started, "Query Intent 生成")
+    retrieval_started = _stage_start(state, "检索历史资料")
+    retrieval = ChapterRetrievalService(
+        state["novel_id"],
+        top_k=int(state.get("rag_top_k", get_settings().rag_top_k)),
+    ).retrieve(
         state["chapter_index"], query_intent
     )
+    retrieval_duration = _stage_finish(state, retrieval_started, "历史资料检索")
     if not retrieval.trace.success:
         return _error_result(
             "历史检索失败：" + retrieval.trace.error_message
@@ -471,11 +523,13 @@ def prepare_human_context(state: ChapterWorkflowState) -> dict[str, Any]:
         "QUERY_INTENT_FINALIZED",
         counter=query_attempt,
         details={"query_intent": query_intent},
+        duration_ms=query_duration,
     ))
     query_events.extend(record_generation_event(
         state,
         "RETRIEVAL_COMPLETED",
         details=_retrieval_event_details(retrieval),
+        duration_ms=retrieval_duration,
     ))
     return {
         "historical_evidence": retrieval.evidence,
@@ -617,10 +671,17 @@ def plan_chapter(state: ChapterWorkflowState) -> dict[str, Any]:
     instructions = state.get("extra_instructions", "")
     intent = state.get("chapter_intent", "")
 
+    query_started = _stage_start(state, "生成 Query Intent")
     query_intent, query_attempt, query_events = _build_query_intent(state)
-    retrieval = ChapterRetrievalService(novel_id).retrieve(
+    query_duration = _stage_finish(state, query_started, "Query Intent 生成")
+    retrieval_started = _stage_start(state, "检索历史资料")
+    retrieval = ChapterRetrievalService(
+        novel_id,
+        top_k=int(state.get("rag_top_k", get_settings().rag_top_k)),
+    ).retrieve(
         chapter_index, query_intent
     )
+    retrieval_duration = _stage_finish(state, retrieval_started, "历史资料检索")
     if not retrieval.trace.success:
         return _error_result(
             "历史检索失败：" + retrieval.trace.error_message
@@ -629,6 +690,7 @@ def plan_chapter(state: ChapterWorkflowState) -> dict[str, Any]:
         return _error_result("; ".join(retrieval.warnings))
 
     planner = ChapterPlanner(novel_id)
+    planning_started = _stage_start(state, "生成章节规划")
     planner.plan_chapter(
         chapter_index,
         outline,
@@ -638,6 +700,7 @@ def plan_chapter(state: ChapterWorkflowState) -> dict[str, Any]:
         chapter_intent=intent,
         current_state_text=state.get("current_state_text", ""),
     )
+    planning_duration = _stage_finish(state, planning_started, "章节规划生成")
     fs = FileStore(novel_id, get_settings().data_dir)
     world_setting = fs.load_canonical("settings", "world_setting") or ""
     book_plan = fs.load_tracking_doc("book_plan") or ""
@@ -655,11 +718,13 @@ def plan_chapter(state: ChapterWorkflowState) -> dict[str, Any]:
         "QUERY_INTENT_FINALIZED",
         counter=query_attempt,
         details={"query_intent": query_intent},
+        duration_ms=query_duration,
     ))
     query_events.extend(record_generation_event(
         state,
         "RETRIEVAL_COMPLETED",
         details=_retrieval_event_details(retrieval),
+        duration_ms=retrieval_duration,
     ))
     query_events.extend(record_generation_event(
         state,
@@ -676,6 +741,7 @@ def plan_chapter(state: ChapterWorkflowState) -> dict[str, Any]:
                 "rag_context": bool(retrieval.evidence.strip()),
             },
         },
+        duration_ms=planning_duration,
     ))
     return {
         "chapter_plan_text": plan_text,
@@ -704,6 +770,7 @@ def review_plan(state: ChapterWorkflowState) -> dict[str, Any]:
 
     fs = FileStore(state["novel_id"], get_settings().data_dir)
     attempt = state.get("plan_review_attempt", 0) + 1
+    review_started = _stage_start(state, "审阅章节规划")
     analysis = PlanReviewer(state["novel_id"]).review_plan(
         chapter_index=state["chapter_index"],
         plan_text=plan_text,
@@ -715,9 +782,11 @@ def review_plan(state: ChapterWorkflowState) -> dict[str, Any]:
         historical_evidence=state.get("historical_evidence", ""),
         review_attempt=attempt,
     )
+    review_duration = _stage_finish(state, review_started, "章节规划审阅")
     return {
         "plan_raw_analysis": analysis,
         "plan_review_attempt": attempt,
+        "plan_review_duration_ms": review_duration,
         "workflow_status": "PLAN_REVIEWED",
     }
 
@@ -773,6 +842,7 @@ def parse_plan_decision(state: ChapterWorkflowState) -> dict[str, Any]:
                 ],
                 "planning_level": decision.planning_level,
             },
+            duration_ms=state.get("plan_review_duration_ms", 0.0),
         ),
         "workflow_status": f"PLAN_DECISION_{decision.verdict}",
     }
@@ -948,12 +1018,14 @@ def write_draft(state: ChapterWorkflowState) -> dict[str, Any]:
         return _error_result("Chapter Plan 为空，无法写作")
 
     fs = FileStore(state["novel_id"], get_settings().data_dir)
+    writing_started = _stage_start(state, "生成正文")
     draft = DeepSeekWriter(state["novel_id"]).write_chapter(
         plan_text,
         state["chapter_index"],
         fs.load_canonical("settings", "world_setting") or "",
         _load_prev_chapter_end(fs, state["chapter_index"]),
     )
+    writing_duration = _stage_finish(state, writing_started, "正文生成")
     regenerated = state.get("human_decision") == "regenerate_prose"
     regeneration_count = state.get("prose_regeneration_count", 0) + 1
     event_type = "PROSE_REGENERATED" if regenerated else "PROSE_CREATED"
@@ -967,6 +1039,7 @@ def write_draft(state: ChapterWorkflowState) -> dict[str, Any]:
             event_type,
             counter=regeneration_count if regenerated else None,
             details={"source": "agent"},
+            duration_ms=writing_duration,
         ),
         "workflow_status": "DRAFTED",
     }
@@ -986,12 +1059,22 @@ def style_edit(state: ChapterWorkflowState) -> dict[str, Any]:
     if not draft:
         return _error_result("draft_text 为空，无法执行 style_edit")
     plan_text = state.get("chapter_plan_text", "")
+    styling_started = _stage_start(state, "润色正文")
     styled = ClaudeStylist(state["novel_id"]).edit_chapter(
         draft,
         state["chapter_index"],
         chapter_plan_text=plan_text,
     )
-    return {"styled_text": styled, "workflow_status": "STYLED"}
+    styling_duration = _stage_finish(state, styling_started, "正文润色")
+    return {
+        "styled_text": styled,
+        "generation_events": record_generation_event(
+            state, "STYLE_COMPLETED",
+            counter=max(1, state.get("prose_regeneration_count", 0) + 1),
+            duration_ms=styling_duration,
+        ),
+        "workflow_status": "STYLED",
+    }
 
 
 @_guard_node
@@ -1051,6 +1134,7 @@ def review_chapter(state: ChapterWorkflowState) -> dict[str, Any]:
     fs = FileStore(novel_id, get_settings().data_dir)
     sqlite = SQLiteStore(fs.root / "state.db")
     try:
+        review_started = _stage_start(state, "审阅正文")
         analysis = StateManager(novel_id, sqlite).review_chapter(
             styled,
             state["chapter_index"],
@@ -1062,8 +1146,13 @@ def review_chapter(state: ChapterWorkflowState) -> dict[str, Any]:
         )
     finally:
         sqlite.close()
+    review_duration = _stage_finish(state, review_started, "正文审阅")
     print(f"  [review_chapter] Review #{state.get('review_round', 1)}")
-    return {"raw_analysis": analysis["raw_analysis"], "workflow_status": "REVIEWED"}
+    return {
+        "raw_analysis": analysis["raw_analysis"],
+        "prose_review_duration_ms": review_duration,
+        "workflow_status": "REVIEWED",
+    }
 
 
 @_guard_node
@@ -1117,6 +1206,7 @@ def parse_chapter_decision(state: ChapterWorkflowState) -> dict[str, Any]:
                     *decision.reasons,
                 ],
             },
+            duration_ms=state.get("prose_review_duration_ms", 0.0),
         ),
         "workflow_status": f"DECISION_{decision.verdict}",
     }
@@ -1450,8 +1540,10 @@ def commit_canonical_prose(state: ChapterWorkflowState) -> dict[str, Any]:
             "commit_error": "candidate prose missing",
         }
     fs = FileStore(state["novel_id"], get_settings().data_dir)
+    commit_started = _stage_start(state, "提交正式正文")
     path = fs.commit_canonical_chapter(state["chapter_index"], candidate)
     relative = str(path.relative_to(fs.root)).replace("\\", "/")
+    commit_duration = _stage_finish(state, commit_started, "正式正文提交")
     return {
         "commit_success": True,
         "canonical_source_path": relative,
@@ -1459,6 +1551,7 @@ def commit_canonical_prose(state: ChapterWorkflowState) -> dict[str, Any]:
             state,
             "CANONICAL_COMMITTED",
             details={"canonical_source_path": relative},
+            duration_ms=commit_duration,
         ),
         "workflow_status": "CANONICAL_COMMITTED",
     }
@@ -1550,6 +1643,7 @@ def derive_semantics(state: ChapterWorkflowState) -> dict[str, Any]:
             state, "Canonical prose missing after commit", stage="update_current_state"
         )
     sqlite = SQLiteStore(fs.root / "state.db")
+    current_state_started = _stage_start(state, "更新故事状态")
     try:
         raw = StateManager(state["novel_id"], sqlite).update_current_state(
             canonical, state["chapter_index"], state.get("current_state_text", "")
@@ -1563,10 +1657,17 @@ def derive_semantics(state: ChapterWorkflowState) -> dict[str, Any]:
         )
     finally:
         sqlite.close()
+    current_state_duration = _stage_finish(state, current_state_started, "Current State 更新")
     return {
         "updated_current_state_text": raw,
         **_clear_derived_failure(state, "update_current_state"),
-        "generation_events": _recovery_event(state, "update_current_state"),
+        "generation_events": [
+            *_recovery_event(state, "update_current_state"),
+            *record_generation_event(
+                state, "CURRENT_STATE_UPDATED",
+                duration_ms=current_state_duration,
+            ),
+        ],
         "workflow_status": "SEMANTICS_DERIVED",
     }
 
@@ -1636,6 +1737,7 @@ def persist_fact_digest(state: ChapterWorkflowState) -> dict[str, Any]:
 
     fs = FileStore(state["novel_id"], get_settings().data_dir)
     sqlite = SQLiteStore(fs.root / "state.db")
+    fact_started = _stage_start(state, "提取历史事实")
     try:
         canonical = fs.load_canonical_chapter(state["chapter_index"]) or ""
         manager = StateManager(state["novel_id"], sqlite)
@@ -1680,11 +1782,17 @@ def persist_fact_digest(state: ChapterWorkflowState) -> dict[str, Any]:
         }
     finally:
         sqlite.close()
+    fact_duration = _stage_finish(state, fact_started, "Atomic Facts 提取")
     return {
         "atomic_fact_candidates": candidates,
         "atomic_facts_derived": True,
         **_clear_derived_failure(state, "derive_atomic_facts"),
-        "generation_events": _recovery_event(state, "derive_atomic_facts"),
+        "generation_events": [
+            *_recovery_event(state, "derive_atomic_facts"),
+            *record_generation_event(
+                state, "ATOMIC_FACTS_DERIVED", duration_ms=fact_duration
+            ),
+        ],
         "workflow_status": "ATOMIC_FACTS_DERIVED",
     }
 
@@ -1748,6 +1856,7 @@ def verify_atomic_facts(state: ChapterWorkflowState) -> dict[str, Any]:
 
     fs = FileStore(state["novel_id"], get_settings().data_dir)
     sqlite = SQLiteStore(fs.root / "state.db")
+    verification_started = _stage_start(state, "验证历史事实")
     try:
         canonical = fs.load_canonical_chapter(state["chapter_index"]) or ""
         paragraphs = chapter_paragraphs(canonical)
@@ -1821,6 +1930,7 @@ def verify_atomic_facts(state: ChapterWorkflowState) -> dict[str, Any]:
         }
     finally:
         sqlite.close()
+    verification_duration = _stage_finish(state, verification_started, "历史事实验证")
     return {
         "verified_atomic_facts": [_fact_dict(fact) for fact in accepted],
         "fact_verification_complete": True,
@@ -1828,7 +1938,13 @@ def verify_atomic_facts(state: ChapterWorkflowState) -> dict[str, Any]:
         "fact_digest_path": str(digest_path.relative_to(fs.root)).replace("\\", "/"),
         "atomic_fact_count": len(accepted),
         **_clear_derived_failure(state, "verify_atomic_facts"),
-        "generation_events": _recovery_event(state, "verify_atomic_facts"),
+        "generation_events": [
+            *_recovery_event(state, "verify_atomic_facts"),
+            *record_generation_event(
+                state, "FACT_VERIFICATION_COMPLETED",
+                duration_ms=verification_duration,
+            ),
+        ],
         "workflow_status": "FACT_DIGEST_PERSISTED",
     }
 
@@ -1897,6 +2013,7 @@ def sync_chroma(state: ChapterWorkflowState) -> dict[str, Any]:
     from src.storage.chapter_completion import mark_derived_ready
     from src.storage.document_formats import FactDigest
 
+    rag_started = _stage_start(state, "更新 RAG")
     try:
         fs = FileStore(state["novel_id"], get_settings().data_dir)
         digest_rel = state.get("fact_digest_path", "")
@@ -1922,6 +2039,7 @@ def sync_chroma(state: ChapterWorkflowState) -> dict[str, Any]:
                 stage="rag",
             ),
         }
+    rag_duration = _stage_finish(state, rag_started, "RAG / Embedding 更新")
     recovery_events = _recovery_event(state, "rag")
     ready_events = record_generation_event(
         state,
@@ -1929,7 +2047,10 @@ def sync_chroma(state: ChapterWorkflowState) -> dict[str, Any]:
         details={"completion_marker_path": str(completion.relative_to(fs.root)).replace("\\", "/")},
     )
     cleared_failure = _clear_derived_failure(state, "rag")
-    event_updates = [*recovery_events, *ready_events]
+    rag_events = record_generation_event(
+        state, "RAG_UPDATED", duration_ms=rag_duration
+    )
+    event_updates = [*recovery_events, *rag_events, *ready_events]
     final_state = {
         **state,
         **cleared_failure,

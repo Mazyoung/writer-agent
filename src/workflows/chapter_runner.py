@@ -12,6 +12,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.types import Command, StateSnapshot
 
 from src.config.settings import get_settings
+from src.config.runtime_policy import NovelRuntimePolicy, load_novel_runtime_policy
 from src.storage.file_store import FileStore
 from src.storage.story_savepoint import (
     NovelOperationLock,
@@ -42,7 +43,11 @@ def _maybe_create_auto_savepoint(
         result.get("workflow_status", "")
     ).upper() != "DERIVED_READY":
         return result
-    interval = get_settings().auto_savepoint_every
+    policy = getattr(runner, "runtime_policy", None)
+    interval = (
+        policy.auto_savepoint_every if policy is not None
+        else get_settings().auto_savepoint_every
+    )
     if interval == 0 or runner.chapter_index % interval != 0:
         return result
 
@@ -112,10 +117,20 @@ def _maybe_create_auto_savepoint(
 class ChapterWorkflowRunner:
     """Start or resume one chapter on its deterministic LangGraph thread."""
 
-    def __init__(self, novel_id: str, chapter_index: int, *, ensure_dirs: bool = True):
+    def __init__(
+        self,
+        novel_id: str,
+        chapter_index: int,
+        *,
+        ensure_dirs: bool = True,
+        runtime_policy: NovelRuntimePolicy | None = None,
+    ):
         self.novel_id = novel_id
         self.chapter_index = chapter_index
         settings = get_settings()
+        self.runtime_policy = runtime_policy or load_novel_runtime_policy(
+            novel_id, settings
+        )
         self.file_store = FileStore(novel_id, settings.data_dir, ensure_dirs=ensure_dirs)
         self.checkpoint_path = (
             settings.data_dir / "novels" / novel_id / "workflow_checkpoints.sqlite"
@@ -278,8 +293,10 @@ class ChapterWorkflowRunner:
                 "chapter_intent": chapter_intent,
                 # Freeze the resolved mode into the first checkpoint. Resume never
                 # consults later environment/config changes for this execution.
-                "chapter_mode": get_settings().chapter_mode,
-                "agent_execution": get_settings().agent_execution,
+                "chapter_mode": self.runtime_policy.chapter_mode,
+                "agent_execution": self.runtime_policy.agent_execution,
+                "auto_savepoint_every": self.runtime_policy.auto_savepoint_every,
+                "rag_top_k": self.runtime_policy.rag_top_k,
                 "workflow_status": "running",
                 "warnings": [],
             }
@@ -529,8 +546,11 @@ def run_chapter_workflow(
     chapter_outline: str = "",
     extra_instructions: str = "",
     chapter_intent: str = "",
+    runtime_policy: NovelRuntimePolicy | None = None,
 ) -> dict[str, Any]:
-    return ChapterWorkflowRunner(novel_id, chapter_index).run(
+    return ChapterWorkflowRunner(
+        novel_id, chapter_index, runtime_policy=runtime_policy
+    ).run(
         chapter_outline=chapter_outline,
         extra_instructions=extra_instructions,
         chapter_intent=chapter_intent,
@@ -549,5 +569,11 @@ def repair_chapter_derivation(novel_id: str, chapter_index: int) -> dict[str, An
     return ChapterWorkflowRunner(novel_id, chapter_index).repair_derivation()
 
 
-def restart_chapter_workflow(novel_id: str, chapter_index: int) -> dict[str, Any]:
-    return ChapterWorkflowRunner(novel_id, chapter_index).restart()
+def restart_chapter_workflow(
+    novel_id: str,
+    chapter_index: int,
+    runtime_policy: NovelRuntimePolicy | None = None,
+) -> dict[str, Any]:
+    return ChapterWorkflowRunner(
+        novel_id, chapter_index, runtime_policy=runtime_policy
+    ).restart()

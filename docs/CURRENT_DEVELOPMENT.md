@@ -3,7 +3,7 @@
 ## Current Stage
 
 E07 Story Savepoint + Load Savepoint、自动 Savepoint、四模型槽位与小说级
-Embedding 配置及 Real Smoke 前置整改已完成。最新 `smoke_test` Chapter 1 已达到 `DERIVED_READY`；Chapter 2 已完成 Plan 与 PASS Review，当前 durable 状态为 `WAITING_HUMAN`。下一步是从正式 `continue` 入口直接进入现有人工 checkpoint。
+Embedding 配置、小说级运行策略隔离及节点耗时可观测性已完成。只读 status 显示 `smoke_test` Chapter 1-2 已完成，Chapter 3 当前 durable 状态为 Prose Review / `WAITING_HUMAN`；相关文件时间早于本轮检查，本轮未推进该 checkpoint。
 
 正式支持两条底层章节创作链与三种用户运行体验：
 
@@ -141,13 +141,24 @@ Tests tied to the retired src.core.orchestrator, automatic revision, PASS-to-dir
 - Derivation recovery 日志不再把 `update_state(..., as_node=predecessor)` 称为“首个未完成阶段”，改为明确显示恢复到哪个 checkpoint 并继续后续 Derivation；恢复算法未变。
 - `status` 新增最新相关章节、Canonical 正文、派生/WAITING 状态、失败阶段或人工检查点及下一动作。状态读取使用不建目录的 FileStore、SQLite `mode=ro` 与只读 checkpoint 连接，不运行或恢复 workflow。
 
+## Novel Runtime Policy & Observability Closure
+
+- 新小说初始化后创建 `data/novels/<novel_id>/.env`，materialize Root `.env` 当前有效的 `CHAPTER_MODE / AGENT_EXECUTION / AUTO_SAVEPOINT_EVERY / RAG_TOP_K`。既有小说缺少该文件时不自动创建或迁移。
+- `NovelRuntimePolicy` 是 immutable command-level snapshot；使用 allowlist `dotenv_values` 解析，不调用 `load_dotenv(..., override=True)`，不修改 `os.environ` 或 global Settings，也不能覆盖 Provider、Model、Key、Base URL 或 immutable Embedding identity。
+- 优先级为 Novel `.env` > Root `.env` 的有效 Settings > 代码默认值。`write / continue / restart / run --to-chapter` 每次命令读取一次；同一次 continuous run 的所有新章节共享同一 snapshot，不热加载。
+- 新章节把 `chapter_mode / agent_execution`（以及本章 RAG/Savepoint 策略值）写入初始 checkpoint。已有 checkpoint 恢复时直接 `invoke(None)`，继续使用已冻结模式；restart 删除 pre-canonical workflow 后使用该命令读取的最新策略。
+- Query Intent、Retrieval、Planning、Plan Review、Writing、Styling、Prose Review、Canonical Commit、Current State、Atomic Fact Derivation、Fact Verification、RAG/Embedding 均输出带 Chapter Index 的开始/完成提示。
+- 计时使用 `time.perf_counter()`，`duration_ms` 复用 checkpointed `generation_events`。Plan/Prose Review 的耗时先进入 state，再由对应 Review event 持久化；多轮 Writing/Styling/Review 使用稳定 attempt identity 幂等累计。
+- CLI 在 `DERIVED_READY` 后按 event 汇总系统节点执行时间。LangGraph interrupt 外部等待不在任何 node timing 区间内，因此 `WAITING_HUMAN` 停留时间不会污染阶段或 Total。
+- 本轮未增加并发、第二套 tracing、热加载或 Provider/Embedding 配置迁移，也未修改 Canonical、Derivation、Review、TokenGuard 和章节生成语义。
+
 ## Verification
 
 - Embedding batching、WAITING_HUMAN 前台交互、既有 checkpoint 恢复、chapter_sources finalization、recovery 日志、只读 status 及既有 Derivation/RAG/TokenGuard 回归通过。
-- 完整 pytest suite：248 passed，31 subtests passed，1 warning。
+- 完整 pytest suite：253 passed，31 subtests passed，1 warning。
 - 唯一 warning 是 ChromaDB 依赖的既有 `asyncio.iscoroutinefunction` DeprecationWarning；本轮未处理无关技术债。
 - 本轮未调用真实模型 API；仅完成代码整改和本地回归验证。
 
 ## Next Task
 
-继续真实凭证 Smoke 时执行 `python main.py continue smoke_test`：必须识别 Chapter 2 已有 Plan Review PASS / `WAITING_HUMAN` checkpoint，在当前进程显示现有 Review 并进入人工操作；不得重跑 Query Intent、Retrieval、Planning 或 Review。用户可直接 `approve` 继续 Writer；未经明确任务，不调用真实 API、不重建现有小说。
+后续真实凭证模式隔离 Smoke 直接新建 `smoke_auto`（agent + autonomous）与 `smoke_human`（human），分别编辑其小说级 `.env`；原 `smoke_test` 保留为 supervised 已验收样本，Chapter 3 的现有 Prose Review / `WAITING_HUMAN` checkpoint 不得被本地测试推进。未经明确任务，不调用真实 API。

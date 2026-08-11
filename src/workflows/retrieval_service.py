@@ -74,10 +74,11 @@ class RetrievalOutcome:
 class ChapterRetrievalService:
     """Execute one supplied Query Intent through RAG and trace persistence."""
 
-    def __init__(self, novel_id: str):
+    def __init__(self, novel_id: str, *, top_k: int | None = None):
         settings = get_settings()
         self.novel_id = novel_id
         self.settings = settings
+        self.top_k = settings.rag_top_k if top_k is None else top_k
         self.fs = FileStore(novel_id, settings.data_dir)
         self.chroma = AtomicFactStore(settings.data_dir / "chroma_db")
         self.author_chroma = AuthorRAGStore(settings.data_dir / "chroma_db")
@@ -93,7 +94,7 @@ class ChapterRetrievalService:
             chapter_index=chapter_index,
             branch_id=branch_id,
             query=normalized_query,
-            top_k=self.settings.rag_top_k,
+            top_k=getattr(self, "top_k", self.settings.rag_top_k),
             filters={
                 "novel_id": self.novel_id,
                 "branch_id": branch_id,

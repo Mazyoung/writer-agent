@@ -384,7 +384,9 @@ class ProgressAndContinuationTests(SmokeClosureCase):
         ), patch.object(cli, "_run_interactive_chapter") as interactive:
             cli.cmd_continue(args)
 
-        interactive.assert_called_once_with("smoke", 2, waiting)
+        interactive.assert_called_once_with(
+            "smoke", 2, waiting, runtime_policy=service.runtime_policy
+        )
 
     def test_existing_waiting_checkpoint_enters_interaction_without_run(self):
         service = NovelContinuationService("smoke")
@@ -416,16 +418,21 @@ class ProgressAndContinuationTests(SmokeClosureCase):
             }}],
         }
         args = SimpleNamespace(name="smoke", chapter=2)
+        policy = object()
         with patch.object(cli, "_get_novel_dir", return_value=Path("novel")), patch.object(
             cli, "restart_chapter_workflow"
         ) as restart, patch.object(
             cli, "run_chapter_workflow", return_value=waiting
-        ) as run, patch.object(cli, "_run_interactive_chapter") as interactive:
+        ) as run, patch.object(
+            cli, "load_novel_runtime_policy", return_value=policy
+        ), patch.object(cli, "_run_interactive_chapter") as interactive:
             cli.cmd_restart(args)
 
-        restart.assert_called_once_with("smoke", 2)
-        run.assert_called_once_with("smoke", 2)
-        interactive.assert_called_once_with("smoke", 2, waiting)
+        restart.assert_called_once_with("smoke", 2, policy)
+        run.assert_called_once_with("smoke", 2, runtime_policy=policy)
+        interactive.assert_called_once_with(
+            "smoke", 2, waiting, runtime_policy=policy
+        )
 
 
     def test_shared_interactive_handler_keeps_same_chapter_across_reviews(self):
@@ -524,6 +531,7 @@ class ProgressAndContinuationTests(SmokeClosureCase):
 
         service.fs.save_tracking_doc("volume_plan", VOLUME_DRAFT)
         self.settings.chapter_mode = "human"
+        service = NovelContinuationService("smoke")
         with patch.object(
             ChapterWorkflowRunner, "inspect",
             return_value={"values": {}, "next": [], "interrupts": []},

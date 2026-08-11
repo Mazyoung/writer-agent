@@ -6,6 +6,7 @@ import re
 from typing import Any
 
 from src.config.settings import get_settings
+from src.config.runtime_policy import NovelRuntimePolicy, load_novel_runtime_policy
 from src.storage.chapter_completion import is_derived_ready
 from src.storage.volume_metadata import read_volume_metadata
 from src.storage.file_store import FileStore
@@ -13,9 +14,14 @@ from src.workflows.chapter_runner import ChapterWorkflowRunner
 
 
 class NovelContinuationService:
-    def __init__(self, novel_id: str):
+    def __init__(
+        self, novel_id: str, runtime_policy: NovelRuntimePolicy | None = None
+    ):
         self.novel_id = novel_id
         self.settings = get_settings()
+        self.runtime_policy = runtime_policy or load_novel_runtime_policy(
+            novel_id, self.settings
+        )
         self.fs = FileStore(novel_id, self.settings.data_dir)
 
     def _canonical_indexes(self) -> list[int]:
@@ -37,7 +43,8 @@ class NovelContinuationService:
         for canonical_index in self._canonical_indexes():
             if not is_derived_ready(self.fs, canonical_index):
                 canonical_state = ChapterWorkflowRunner(
-                    self.novel_id, canonical_index
+                    self.novel_id, canonical_index,
+                    runtime_policy=self.runtime_policy,
                 ).inspect()
                 canonical_status = str(
                     canonical_state["values"].get("workflow_status", "")
@@ -49,7 +56,9 @@ class NovelContinuationService:
                 }
 
         chapter_index = latest + 1
-        runner = ChapterWorkflowRunner(self.novel_id, chapter_index)
+        runner = ChapterWorkflowRunner(
+            self.novel_id, chapter_index, runtime_policy=self.runtime_policy
+        )
         state = runner.inspect()
         if state["interrupts"]:
             return {
@@ -82,7 +91,7 @@ class NovelContinuationService:
                     "请先生成、审阅并编辑下一卷 Volume Plan。"
                 ),
             }
-        if self.settings.chapter_mode == "human":
+        if self.runtime_policy.chapter_mode == "human":
             return {
                 "action": "waiting_human_intent",
                 "chapter_index": chapter_index,
@@ -117,14 +126,18 @@ class NovelContinuationService:
                 "正在继续未完成的 Derivation……"
             )
             return ChapterWorkflowRunner(
-                self.novel_id, chapter
+                self.novel_id, chapter, runtime_policy=self.runtime_policy
             ).repair_derivation()
         if action == "resume_workflow":
             print(f"检测到第 {chapter} 章存在未完成工作流。从现有 checkpoint 继续……")
-            return ChapterWorkflowRunner(self.novel_id, chapter).run()
+            return ChapterWorkflowRunner(
+                self.novel_id, chapter, runtime_policy=self.runtime_policy
+            ).run()
         if action == "start_chapter":
             print(f"继续第 {chapter} 章规划……")
-            return ChapterWorkflowRunner(self.novel_id, chapter).run()
+            return ChapterWorkflowRunner(
+                self.novel_id, chapter, runtime_policy=self.runtime_policy
+            ).run()
         return {
             "workflow_status": "BLOCKED",
             "continuation_action": action,
@@ -135,8 +148,8 @@ class NovelContinuationService:
         if target <= 0:
             raise ValueError("--to-chapter 必须是正整数")
         if (
-            self.settings.chapter_mode != "agent"
-            or self.settings.agent_execution != "autonomous"
+            self.runtime_policy.chapter_mode != "agent"
+            or self.runtime_policy.agent_execution != "autonomous"
         ):
             raise ValueError(
                 "run --to-chapter 仅适用于 Agent Mode + autonomous execution"

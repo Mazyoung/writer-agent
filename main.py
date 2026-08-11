@@ -35,6 +35,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from src.config.settings import get_settings
+from src.config.runtime_policy import (
+    NovelRuntimePolicy, create_novel_runtime_env,
+    load_novel_runtime_policy,
+)
 from src.core.novel_status import NovelStatusService
 from src.planning.chapter_planning_service import ChapterPlanningService
 from src.planning.novel_lifecycle import NovelLifecycleService
@@ -116,6 +120,7 @@ def _confirm_and_bind_embedding(novel_id: str) -> bool:
         print("已取消初始化；未创建小说或内部 Embedding 配置。")
         return False
     store.create(candidate)
+    create_novel_runtime_env(novel_id, settings)
     print(
         f"已固定 Embedding 配置：{candidate.embedding_mode} / "
         f"{candidate.embedding_model} / {candidate.embedding_dimensions}"
@@ -261,10 +266,53 @@ def _cmd_plan_interactive(planning, args):
     print("\n  standalone/debug plan 已完成；正式 write 会重新生成本次章节规划，不接续此结果。")
 
 
+_TIMING_EVENT_LABELS = {
+    "QUERY_INTENT_FINALIZED": "Query Intent",
+    "RETRIEVAL_COMPLETED": "Retrieval",
+    "PLAN_CREATED": "Planning",
+    "PLAN_REVIEWED": "Plan Review",
+    "PROSE_CREATED": "Writing",
+    "PROSE_REGENERATED": "Writing",
+    "STYLE_COMPLETED": "Styling",
+    "PROSE_REVIEWED": "Prose Review",
+    "CANONICAL_COMMITTED": "Canonical Commit",
+    "CURRENT_STATE_UPDATED": "Current State",
+    "ATOMIC_FACTS_DERIVED": "Atomic Fact Derivation",
+    "FACT_VERIFICATION_COMPLETED": "Fact Verification",
+    "RAG_UPDATED": "RAG / Embedding",
+}
+
+
+def _print_timing_summary(result: dict) -> None:
+    totals: dict[str, float] = {}
+    for event in result.get("generation_events", []):
+        label = _TIMING_EVENT_LABELS.get(str(event.get("event_type", "")))
+        if label is None or "duration_ms" not in event:
+            continue
+        try:
+            duration = max(0.0, float(event["duration_ms"]))
+        except (TypeError, ValueError):
+            continue
+        totals[label] = totals.get(label, 0.0) + duration
+    if not totals:
+        return
+    print("\n本次系统执行耗时（不含人工等待）：")
+    ordered = [
+        "Query Intent", "Retrieval", "Planning", "Plan Review", "Writing",
+        "Styling", "Prose Review", "Canonical Commit", "Current State",
+        "Atomic Fact Derivation", "Fact Verification", "RAG / Embedding",
+    ]
+    for label in ordered:
+        if label in totals:
+            print(f"  {label:<24} {totals[label] / 1000:.1f}s")
+    print(f"  {'Total':<24} {sum(totals.values()) / 1000:.1f}s")
+
+
 def _print_chapter_result(name: str, chapter: int, result: dict) -> None:
     status = result.get("workflow_status", "error")
     if status == "DERIVED_READY":
         print(f"\n第 {chapter} 章已完整完成（DERIVED_READY）。")
+        _print_timing_summary(result)
         return
     if status == "DERIVATION_ERROR":
         stage = result.get("failed_derivation_stage", "UNKNOWN")
@@ -508,6 +556,7 @@ def _run_interactive_chapter(
     chapter: int,
     result: dict,
     chapter_intent: str = "",
+    runtime_policy: NovelRuntimePolicy | None = None,
 ) -> None:
     while result.get("workflow_status") == "WAITING_HUMAN":
         resume_value = _interactive_resume_value(
@@ -530,6 +579,7 @@ def _run_interactive_chapter(
                 novel_id,
                 chapter,
                 chapter_intent=chapter_intent,
+                runtime_policy=runtime_policy,
             )
     _print_chapter_result(novel_id, chapter, result)
 
@@ -537,6 +587,7 @@ def _run_interactive_chapter(
 def cmd_write(args):
     if not _get_novel_dir(args.name):
         return
+    runtime_policy = load_novel_runtime_policy(args.name)
 
     feedback = getattr(args, "feedback", "") or ""
     requested_action = getattr(args, "action", None)
@@ -567,6 +618,7 @@ def cmd_write(args):
                 args.chapter,
                 chapter_outline=getattr(args, "outline", "") or "",
                 chapter_intent=getattr(args, "chapter_intent", "") or "",
+                runtime_policy=runtime_policy,
             )
     except ValueError as exc:
         print(f"\n  章节工作流恢复请求被拒绝：{exc}")
@@ -577,11 +629,13 @@ def cmd_write(args):
             args.name,
             args.chapter,
             chapter_intent=getattr(args, "chapter_intent", "") or "",
+            runtime_policy=runtime_policy,
         )
     if result.get("workflow_status") == "WAITING_HUMAN":
         _run_interactive_chapter(
             args.name, args.chapter, result,
             getattr(args, "chapter_intent", "") or "",
+            runtime_policy,
         )
         return
     _print_chapter_result(args.name, args.chapter, result)
@@ -609,14 +663,19 @@ def cmd_repair_derivation(args):
 def cmd_restart(args):
     if not _get_novel_dir(args.name):
         return
+    runtime_policy = load_novel_runtime_policy(args.name)
     try:
-        restart_chapter_workflow(args.name, args.chapter)
-        result = run_chapter_workflow(args.name, args.chapter)
+        restart_chapter_workflow(args.name, args.chapter, runtime_policy)
+        result = run_chapter_workflow(
+            args.name, args.chapter, runtime_policy=runtime_policy
+        )
     except ValueError as exc:
         print(f"restart 被拒绝：{exc}")
         return
     if result.get("workflow_status") == "WAITING_HUMAN":
-        _run_interactive_chapter(args.name, args.chapter, result)
+        _run_interactive_chapter(
+            args.name, args.chapter, result, runtime_policy=runtime_policy
+        )
         return
     _print_chapter_result(args.name, args.chapter, result)
 
@@ -625,13 +684,16 @@ def cmd_continue(args):
     if not _get_novel_dir(args.name):
         return
     try:
-        result = NovelContinuationService(args.name).continue_once()
+        service = NovelContinuationService(args.name)
+        result = service.continue_once()
     except ValueError as exc:
         print(f"continue 被拒绝：{exc}")
         return
     chapter = int(result.get("chapter_index", 0) or 0)
     if result.get("workflow_status") == "WAITING_HUMAN":
-        _run_interactive_chapter(args.name, chapter, result)
+        _run_interactive_chapter(
+            args.name, chapter, result, runtime_policy=service.runtime_policy
+        )
         return
     _print_chapter_result(args.name, chapter, result)
 
@@ -640,7 +702,8 @@ def cmd_run(args):
     if not _get_novel_dir(args.name):
         return
     try:
-        result = NovelContinuationService(args.name).run_to_chapter(
+        service = NovelContinuationService(args.name)
+        result = service.run_to_chapter(
             args.to_chapter
         )
     except ValueError as exc:
