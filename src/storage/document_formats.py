@@ -737,10 +737,19 @@ class AtomicFact:
     entities: list[str] = field(default_factory=list)
     paragraph_start: int = 0
     paragraph_end: int = 0
+    source_ranges: list[dict[str, int]] = field(default_factory=list)
     fact_text: str = ""
 
     @property
     def paragraph_range(self) -> str:
+        if self.source_ranges:
+            first = self.source_ranges[0]
+            if len(self.source_ranges) == 1:
+                start, end = first["start"], first["end"]
+                return str(start) if start == end else f"{start}-{end}"
+            return ";".join(
+                f"{item['start']}-{item['end']}" for item in self.source_ranges
+            )
         if self.paragraph_start <= 0:
             return "unknown"
         if self.paragraph_end <= self.paragraph_start:
@@ -790,6 +799,17 @@ class FactDigest:
             _extract_section(text, "### 明确未出现的内容")
         )
         fd.pending_suspense = _extract_section(text, "### 待解悬念")
+        atomic_section = _extract_section(text, "## Atomic Facts")
+        if atomic_section.strip():
+            try:
+                from src.storage.atomic_fact_protocol import parse_atomic_facts
+                fd.atomic_facts = parse_atomic_facts(
+                    "## Atomic Facts\n" + atomic_section, fd.chapter_index
+                )
+            except ValueError:
+                # New production parses strictly before persistence. Falling
+                # through preserves optional legacy read compatibility.
+                pass
         for match in re.finditer(
             r"###\s+(FACT-\d{4}-\d{3})\s*\n(.*?)(?=\n###\s+FACT-|\Z)",
             text,
@@ -842,15 +862,22 @@ class FactDigest:
             for sequence, fact in enumerate(self.atomic_facts, 1):
                 fact.fact_id = f"FACT-{self.chapter_index:04d}-{sequence:03d}"
                 fact.chapter_index = self.chapter_index
-                lines.extend([
-                    f"### {fact.fact_id}",
-                    f"- **Chapter**: {self.chapter_index}",
-                    f"- **Fact Type**: {fact.fact_type or 'event'}",
-                    f"- **Entities**: {', '.join(fact.entities) or '-'}",
-                    f"- **Paragraph Range**: {fact.paragraph_range}",
-                    f"- **Fact Text**: {fact.fact_text}",
-                    "",
-                ])
+                if fact.source_ranges:
+                    from src.storage.atomic_fact_protocol import format_source_ranges
+                    lines.append(
+                        f"- [{format_source_ranges(fact.source_ranges)}] {fact.fact_text}"
+                    )
+                else:
+                    lines.extend([
+                        f"### {fact.fact_id}",
+                        f"- **Chapter**: {self.chapter_index}",
+                        f"- **Fact Type**: {fact.fact_type or 'event'}",
+                        f"- **Entities**: {', '.join(fact.entities) or '-'}",
+                        f"- **Paragraph Range**: {fact.paragraph_range}",
+                        f"- **Fact Text**: {fact.fact_text}",
+                        "",
+                    ])
+            lines.append("")
             return "\n".join(lines)
         lines = [f"# 第{self.chapter_index}章 事实摘要", ""]
         for title, content in [

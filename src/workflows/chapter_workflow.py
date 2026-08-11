@@ -6,6 +6,7 @@ are separate boundaries.
 
 from __future__ import annotations
 
+import hashlib
 import re
 from collections.abc import Callable
 from functools import wraps
@@ -136,7 +137,15 @@ class ChapterWorkflowState(TypedDict, total=False):
     candidate_path: str
     canonical_source_path: str
     derivation_raw_analysis: str
+    updated_current_state_text: str
     current_state_persisted: bool
+    atomic_facts_derived: bool
+    atomic_fact_candidates: list[dict]
+    verified_atomic_facts: list[dict]
+    fact_verification_complete: bool
+    failed_derivation_stage: str
+    derivation_error: str
+    active_derivation_errors: dict[str, str]
     volume_progress: str
     volume_progress_updated: bool
     volume_progress_path: str
@@ -301,9 +310,9 @@ def load_current_state(state: ChapterWorkflowState) -> dict[str, Any]:
     fs = FileStore(state["novel_id"], get_settings().data_dir)
     sqlite = SQLiteStore(fs.root / "state.db")
     try:
-        _current, text, digest = CurrentStateStore(
+        text, digest = CurrentStateStore(
             state["novel_id"], fs, sqlite
-        ).ensure_initialized()
+        ).ensure_raw_initialized()
     finally:
         sqlite.close()
     return {
@@ -1490,10 +1499,19 @@ def _derived_failure(
     *,
     stage: str,
 ) -> dict[str, Any]:
+    active = dict(state.get("active_derivation_errors", {}))
+    previous = active.get(stage)
+    active[stage] = message
+    warnings = [item for item in state.get("warnings", []) if item != previous]
+    if message not in warnings:
+        warnings.append(message)
     return {
         "workflow_status": "DERIVATION_ERROR",
-        "warnings": [*state.get("warnings", []), message],
-        "derived_state_errors": [*state.get("derived_state_errors", []), message],
+        "warnings": warnings,
+        "derived_state_errors": list(active.values()),
+        "active_derivation_errors": active,
+        "failed_derivation_stage": stage,
+        "derivation_error": message,
         "generation_events": record_generation_event(
             state,
             "DERIVATION_FAILED",
@@ -1503,69 +1521,70 @@ def _derived_failure(
     }
 
 
+def _clear_derived_failure(state: ChapterWorkflowState, stage: str) -> dict[str, Any]:
+    active = dict(state.get("active_derivation_errors", {}))
+    previous = active.pop(stage, None)
+    return {
+        "warnings": [
+            item for item in state.get("warnings", []) if item != previous
+        ],
+        "active_derivation_errors": active,
+        "derived_state_errors": list(active.values()),
+        "failed_derivation_stage": "",
+        "derivation_error": "",
+    }
+
+
 def derive_semantics(state: ChapterWorkflowState) -> dict[str, Any]:
-    """Call semantic derivation once and checkpoint its complete raw result."""
+    """Generate one complete raw Markdown Current State with SYSTEM."""
     from src.agents.state_manager.state_manager import StateManager
 
     if state.get("commit_success") is not True:
-        return _derived_failure(state, "Derivation 需要 Canonical 正文", stage="semantic")
+        return _derived_failure(
+            state, "Derivation 需要 Canonical 正文", stage="update_current_state"
+        )
     fs = FileStore(state["novel_id"], get_settings().data_dir)
     canonical = fs.load_canonical_chapter(state["chapter_index"]) or ""
     if not canonical:
-        return _derived_failure(state, "Canonical prose missing after commit", stage="semantic")
-    volume_plan = fs.load_tracking_doc("volume_plan") or ""
-    if volume_plan:
-        from src.storage.volume_metadata import read_volume_metadata
-        try:
-            if read_volume_metadata(volume_plan).status != "ACTIVE":
-                volume_plan = ""
-        except ValueError:
-            volume_plan = ""
+        return _derived_failure(
+            state, "Canonical prose missing after commit", stage="update_current_state"
+        )
     sqlite = SQLiteStore(fs.root / "state.db")
     try:
-        raw = StateManager(state["novel_id"], sqlite).derive_chapter(
-            canonical,
-            state["chapter_index"],
-            state.get("current_state_text", ""),
-            current_volume_plan=volume_plan,
-        ).get("raw_analysis", "")
+        raw = StateManager(state["novel_id"], sqlite).update_current_state(
+            canonical, state["chapter_index"], state.get("current_state_text", "")
+        ).get("updated_current_state", "")
         if not raw.strip():
-            raise ValueError("Deriver returned empty analysis")
+            raise ValueError("Current State Updater returned empty Markdown")
     except Exception as exc:
         return _derived_failure(
-            state, f"Semantic derivation failed: {type(exc).__name__}: {exc}",
-            stage="semantic",
+            state, f"Current State 更新生成失败：{type(exc).__name__}: {exc}",
+            stage="update_current_state",
         )
     finally:
         sqlite.close()
     return {
-        "derivation_raw_analysis": raw,
-        "generation_events": _recovery_event(state, "semantic"),
+        "updated_current_state_text": raw,
+        **_clear_derived_failure(state, "update_current_state"),
+        "generation_events": _recovery_event(state, "update_current_state"),
         "workflow_status": "SEMANTICS_DERIVED",
     }
 
 
 def persist_current_state(state: ChapterWorkflowState) -> dict[str, Any]:
-    """Deterministically apply the checkpointed State Delta exactly once."""
-    from src.agents.state_manager.state_manager import StateManager
+    """Atomically save checkpointed raw Markdown without semantic parsing."""
+    from src.storage.current_state_store import CurrentStateStore
 
     fs = FileStore(state["novel_id"], get_settings().data_dir)
     canonical = fs.load_canonical_chapter(state["chapter_index"]) or ""
     sqlite = SQLiteStore(fs.root / "state.db")
     try:
-        chapter_title = ""
-        if state.get("chapter_mode", "agent") != "human":
-            first_line = state.get("chapter_plan_text", "").lstrip().splitlines()[:1]
-            if first_line and first_line[0].startswith("# "):
-                chapter_title = first_line[0][2:].strip()
-        changes = StateManager(state["novel_id"], sqlite).update_tracking_docs(
-            state["chapter_index"], canonical,
-            state.get("derivation_raw_analysis", ""),
-            expected_state_sha256=state.get("current_state_sha256", ""),
-            chapter_title=chapter_title,
-            canonical_source_path=state.get("canonical_source_path", ""),
+        result = CurrentStateStore(state["novel_id"], fs, sqlite).commit_raw(
+            state.get("current_state_sha256", ""),
+            state.get("updated_current_state_text", ""),
+            state["chapter_index"],
+            state.get("canonical_source_path", ""),
         )
-        result = changes.get("_commit_result")
         if not result or not result.success:
             raise RuntimeError(
                 "_commit_result missing" if result is None else result.error_message
@@ -1581,55 +1600,235 @@ def persist_current_state(state: ChapterWorkflowState) -> dict[str, Any]:
     return {
         "current_state_persisted": True,
         "completion_marker_path": str(marker),
+        **_clear_derived_failure(state, "current-state"),
         "generation_events": _recovery_event(state, "current-state"),
         "workflow_status": "CURRENT_STATE_PERSISTED",
     }
 
 
+def _fact_dict(fact: Any, *, repair_used: bool = False) -> dict[str, Any]:
+    return {
+        "fact_id": fact.fact_id,
+        "chapter_index": fact.chapter_index,
+        "source_ranges": fact.source_ranges,
+        "fact_text": fact.fact_text,
+        "repair_used": repair_used,
+    }
+
+
+def _fact_object(data: dict[str, Any]) -> Any:
+    from src.storage.document_formats import AtomicFact
+    return AtomicFact(
+        fact_id=str(data.get("fact_id", "")),
+        chapter_index=int(data.get("chapter_index", 0)),
+        source_ranges=list(data.get("source_ranges", [])),
+        fact_text=str(data.get("fact_text", "")),
+    )
+
+
 def persist_fact_digest(state: ChapterWorkflowState) -> dict[str, Any]:
-    """Persist one deterministic Fact Digest from checkpointed semantics."""
+    """Derive and checkpoint address-validated Atomic Fact candidates."""
     from src.agents.state_manager.state_manager import StateManager
-    from src.storage.document_formats import FactDigest
+    from src.storage.atomic_fact_protocol import (
+        chapter_paragraphs, format_source_ranges, parse_atomic_facts,
+        validate_source_ranges,
+    )
 
     fs = FileStore(state["novel_id"], get_settings().data_dir)
     sqlite = SQLiteStore(fs.root / "state.db")
     try:
-        raw = state.get("derivation_raw_analysis", "")
-        if not raw:
-            raise ValueError("derivation_raw_analysis is empty")
-        digest = StateManager(state["novel_id"], sqlite).extract_fact_digest_from_analysis(
-            raw, state["chapter_index"]
+        canonical = fs.load_canonical_chapter(state["chapter_index"]) or ""
+        manager = StateManager(state["novel_id"], sqlite)
+        raw = manager.derive_atomic_facts(
+            canonical, state["chapter_index"]
+        ).get("raw_analysis", "")
+        facts = parse_atomic_facts(raw, state["chapter_index"])
+        paragraphs = chapter_paragraphs(canonical)
+        numbered = "\n\n".join(
+            f"[P{index:04d}] {paragraph}"
+            for index, paragraph in enumerate(paragraphs, 1)
         )
-        generated = bool(digest.atomic_facts) or any([
-            digest.confirmed_items.strip(), digest.confirmed_character_states.strip(),
-            digest.confirmed_events.strip(), digest.confirmed_numbers.strip(),
-            digest.explicitly_absent.strip(), digest.pending_suspense.strip(),
-        ])
-        if not generated:
-            raise ValueError("Fact Digest contains no derived facts")
-        paths = sorted((fs.root / "states").glob(
-            f"fact_digest_ch{state['chapter_index']:04d}_*.md"), reverse=True)
-        if not paths:
-            paths = [fs.save("states", f"fact_digest_ch{state['chapter_index']:04d}",
-                             digest.to_markdown())]
-        digest_path = paths[0]
-        canonical_digest = FactDigest.from_markdown(
-            digest_path.read_text(encoding="utf-8"))
+        candidates = []
+        for fact in facts:
+            repair_used = False
+            try:
+                validate_source_ranges(fact, len(paragraphs))
+            except ValueError as address_error:
+                repaired_raw = manager.repair_atomic_fact(
+                    fact.fact_text, format_source_ranges(fact.source_ranges), numbered,
+                    f"Source address invalid: {address_error}", state["chapter_index"],
+                    len(candidates) + 1,
+                ).get("raw_analysis", "").strip()
+                repair_used = True
+                if repaired_raw.upper() == "DROP":
+                    continue
+                repaired = parse_atomic_facts(
+                    "## Atomic Facts\n\n" + repaired_raw, state["chapter_index"]
+                )
+                if len(repaired) != 1:
+                    raise ValueError("Address repair must return one fact or DROP")
+                fact = repaired[0]
+                validate_source_ranges(fact, len(paragraphs))
+            candidates.append(_fact_dict(fact, repair_used=repair_used))
     except Exception as exc:
         return {
             "fact_digest_generated": False,
             **_derived_failure(
-                state, f"Fact Digest persistence failed: {type(exc).__name__}: {exc}",
-                stage="fact-digest",
+                state, f"Atomic Fact derivation failed: {type(exc).__name__}: {exc}",
+                stage="derive_atomic_facts",
             ),
         }
     finally:
         sqlite.close()
     return {
+        "atomic_fact_candidates": candidates,
+        "atomic_facts_derived": True,
+        **_clear_derived_failure(state, "derive_atomic_facts"),
+        "generation_events": _recovery_event(state, "derive_atomic_facts"),
+        "workflow_status": "ATOMIC_FACTS_DERIVED",
+    }
+
+
+def _verification_payload(facts: list[Any], paragraphs: list[str]) -> str:
+    from src.storage.atomic_fact_protocol import format_source_ranges, source_excerpt
+    blocks = []
+    for index, fact in enumerate(facts, 1):
+        blocks.append(
+            f"FACT {index}\nFact Text: {fact.fact_text}\n"
+            f"Source Range: {format_source_ranges(fact.source_ranges)}\n"
+            f"Canonical Source Excerpt:\n{source_excerpt(fact, paragraphs)}"
+        )
+    return "\n\n---\n\n".join(blocks)
+
+
+def _run_verification_batch(manager: Any, facts: list[Any], paragraphs: list[str],
+                            chapter_index: int, attempt: int) -> list[Any]:
+    from src.storage.atomic_fact_protocol import parse_verification_decisions
+    payload = _verification_payload(facts, paragraphs)
+    raw = manager.verify_atomic_facts(
+        payload, chapter_index, attempt=attempt
+    ).get("raw_analysis", "")
+    try:
+        return parse_verification_decisions(raw, len(facts))
+    except ValueError as exc:
+        corrected = manager.verify_atomic_facts(
+            payload, chapter_index,
+            protocol_correction=f"{type(exc).__name__}: {exc}\n\n上次输出：\n{raw}",
+            attempt=attempt,
+        ).get("raw_analysis", "")
+        return parse_verification_decisions(corrected, len(facts))
+
+
+def _repair_failed_fact(manager: Any, fact: Any, paragraphs: list[str],
+                        reason: str, chapter_index: int,
+                        fact_number: int) -> Any | None:
+    from src.storage.atomic_fact_protocol import (
+        format_source_ranges, parse_atomic_facts, source_excerpt,
+        validate_source_ranges,
+    )
+    raw = manager.repair_atomic_fact(
+        fact.fact_text, format_source_ranges(fact.source_ranges),
+        source_excerpt(fact, paragraphs), reason, chapter_index, fact_number,
+    ).get("raw_analysis", "").strip()
+    if raw.upper() == "DROP":
+        return None
+    repaired = parse_atomic_facts("## Atomic Facts\n\n" + raw, chapter_index)
+    if len(repaired) != 1:
+        raise ValueError("Targeted Fact Repair must return one fact or DROP")
+    validate_source_ranges(repaired[0], len(paragraphs))
+    repaired[0].fact_id = fact.fact_id
+    return repaired[0]
+
+
+def verify_atomic_facts(state: ChapterWorkflowState) -> dict[str, Any]:
+    """Verify, correct, and persist facts with finite per-fact passes."""
+    from src.agents.state_manager.state_manager import StateManager
+    from src.storage.atomic_fact_protocol import chapter_paragraphs, expand_source_ranges
+    from src.storage.document_formats import FactDigest
+
+    fs = FileStore(state["novel_id"], get_settings().data_dir)
+    sqlite = SQLiteStore(fs.root / "state.db")
+    try:
+        canonical = fs.load_canonical_chapter(state["chapter_index"]) or ""
+        paragraphs = chapter_paragraphs(canonical)
+        manager = StateManager(state["novel_id"], sqlite)
+        initial_data = list(state.get("atomic_fact_candidates", []))
+        facts = [_fact_object(item) for item in initial_data]
+        repair_used = {
+            fact.fact_id: bool(data.get("repair_used", False))
+            for fact, data in zip(facts, initial_data)
+        }
+        accepted: list[Any] = []
+        round_two: list[Any] = []
+        if facts:
+            decisions = _run_verification_batch(
+                manager, facts, paragraphs, state["chapter_index"], 1
+            )
+            for number, (fact, decision) in enumerate(zip(facts, decisions), 1):
+                if decision.decision == "VERIFIED":
+                    accepted.append(fact)
+                elif decision.decision == "INSUFFICIENT":
+                    round_two.append(expand_source_ranges(fact, len(paragraphs)))
+                else:
+                    repaired = _repair_failed_fact(
+                        manager, fact, paragraphs, decision.reason,
+                        state["chapter_index"], number,
+                    )
+                    repair_used[fact.fact_id] = True
+                    if repaired is not None:
+                        round_two.append(repaired)
+
+        round_three: list[Any] = []
+        if round_two:
+            decisions = _run_verification_batch(
+                manager, round_two, paragraphs, state["chapter_index"], 2
+            )
+            for number, (fact, decision) in enumerate(zip(round_two, decisions), 1):
+                if decision.decision == "VERIFIED":
+                    accepted.append(fact)
+                elif not repair_used.get(fact.fact_id, False):
+                    repaired = _repair_failed_fact(
+                        manager, fact, paragraphs, decision.reason,
+                        state["chapter_index"], number,
+                    )
+                    repair_used[fact.fact_id] = True
+                    if repaired is not None:
+                        round_three.append(repaired)
+        if round_three:
+            decisions = _run_verification_batch(
+                manager, round_three, paragraphs, state["chapter_index"], 3
+            )
+            accepted.extend(
+                fact for fact, decision in zip(round_three, decisions)
+                if decision.decision == "VERIFIED"
+            )
+
+        digest = FactDigest(chapter_index=state["chapter_index"], atomic_facts=accepted)
+        content = digest.to_markdown() if accepted else (
+            f"# 第{state['chapter_index']}章 Fact Digest\n\n"
+            "## Atomic Facts\n\n- 无\n"
+        )
+        digest_path = fs.save(
+            "states", f"fact_digest_ch{state['chapter_index']:04d}", content
+        )
+    except Exception as exc:
+        return {
+            "fact_digest_generated": False,
+            **_derived_failure(
+                state, f"Atomic Fact verification failed: {type(exc).__name__}: {exc}",
+                stage="verify_atomic_facts",
+            ),
+        }
+    finally:
+        sqlite.close()
+    return {
+        "verified_atomic_facts": [_fact_dict(fact) for fact in accepted],
+        "fact_verification_complete": True,
         "fact_digest_generated": True,
         "fact_digest_path": str(digest_path.relative_to(fs.root)).replace("\\", "/"),
-        "atomic_fact_count": len(canonical_digest.atomic_facts),
-        "generation_events": _recovery_event(state, "fact-digest"),
+        "atomic_fact_count": len(accepted),
+        **_clear_derived_failure(state, "verify_atomic_facts"),
+        "generation_events": _recovery_event(state, "verify_atomic_facts"),
         "workflow_status": "FACT_DIGEST_PERSISTED",
     }
 
@@ -1708,9 +1907,10 @@ def sync_chroma(state: ChapterWorkflowState) -> dict[str, Any]:
             chapter_index=state["chapter_index"], facts=digest.atomic_facts,
             source_path=state.get("canonical_source_path", ""),
             digest_path=digest_rel,
+            canonical_hash=hashlib.sha256(
+                (fs.load_canonical_chapter(state["chapter_index"]) or "").encode("utf-8")
+            ).hexdigest(),
         )
-        if count <= 0:
-            raise ValueError("Atomic Fact list is empty")
         completion = mark_derived_ready(
             fs, state["chapter_index"]
         )
@@ -1774,6 +1974,7 @@ def build_chapter_workflow(checkpointer: Any = None) -> Any:
         ("derive_semantics", derive_semantics),
         ("persist_current_state", persist_current_state),
         ("persist_fact_digest", persist_fact_digest),
+        ("verify_atomic_facts", verify_atomic_facts),
         ("persist_volume_progress", persist_volume_progress),
         ("persist_chapter_sources", persist_chapter_sources),
         ("sync_chroma", sync_chroma),
@@ -1881,7 +2082,8 @@ def build_chapter_workflow(checkpointer: Any = None) -> Any:
     for node, status, target in (
         ("derive_semantics", "SEMANTICS_DERIVED", "persist_current_state"),
         ("persist_current_state", "CURRENT_STATE_PERSISTED", "persist_fact_digest"),
-        ("persist_fact_digest", "FACT_DIGEST_PERSISTED", "persist_volume_progress"),
+        ("persist_fact_digest", "ATOMIC_FACTS_DERIVED", "verify_atomic_facts"),
+        ("verify_atomic_facts", "FACT_DIGEST_PERSISTED", "persist_volume_progress"),
         ("persist_volume_progress", "VOLUME_PROGRESS_PERSISTED", "persist_chapter_sources"),
         ("persist_chapter_sources", "CHAPTER_SOURCES_PERSISTED", "sync_chroma"),
     ):

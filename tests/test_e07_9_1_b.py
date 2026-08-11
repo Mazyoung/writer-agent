@@ -139,8 +139,8 @@ class HumanFlowCase(E0791Case):
             "src.agents.state_manager.state_manager.StateManager"
         ).start()
         self.current_state = patch(
-            "src.storage.current_state_store.CurrentStateStore.ensure_initialized",
-            return_value=(SimpleNamespace(), "# Current State\n林默在旧宅。", "hash"),
+            "src.storage.current_state_store.CurrentStateStore.ensure_raw_initialized",
+            return_value=("# Current State\n林默在旧宅。", ""),
         ).start()
         self.query_intent = patch(
             "src.agents.author.query_intent_builder.QueryIntentBuilder.build",
@@ -227,7 +227,7 @@ class HumanFlowCase(E0791Case):
             self.manager_class.return_value.review_consistency.call_count, 1
         )
 
-        self.manager_class.return_value.derive_chapter.side_effect = RuntimeError("down")
+        self.manager_class.return_value.update_current_state.side_effect = RuntimeError("down")
         result = self.runner.resume({"action": "confirm_override"})
         self.assertEqual(result["workflow_status"], "DERIVATION_ERROR")
         self.assertEqual(result["consistency_verdict"], "WARN")
@@ -260,21 +260,15 @@ class HumanFlowCase(E0791Case):
         self._start(CLEAN)
         self._submit(self._candidate_file("最终人工正文。"))
         manager = self.manager_class.return_value
-        manager.derive_chapter.return_value = {"raw_analysis": "DERIVED"}
-        manager.update_tracking_docs.return_value = {
-            "_commit_result": SimpleNamespace(success=True, error_message="")
+        manager.update_current_state.return_value = {
+            "updated_current_state": "# Current State\n林默检查了门锁。"
         }
-        manager.extract_fact_digest_from_analysis.return_value = FactDigest(
-            chapter_index=2,
-            atomic_facts=[AtomicFact(
-                fact_id="FACT-0002-001",
-                chapter_index=2,
-                fact_type="event",
-                paragraph_start=1,
-                paragraph_end=1,
-                fact_text="林默检查门锁。",
-            )],
-        )
+        manager.derive_atomic_facts.return_value = {
+            "raw_analysis": "## Atomic Facts\n\n- [P1-P1] 林默检查门锁。"
+        }
+        manager.verify_atomic_facts.return_value = {
+            "raw_analysis": "FACT 1\nDecision: VERIFIED\nReason: 原文明示。"
+        }
         with patch.object(AtomicFactStore, "index_facts", return_value=1) as index:
             result = self.runner.resume({"action": "approve"})
 
@@ -282,9 +276,9 @@ class HumanFlowCase(E0791Case):
         self.assertEqual(result["consistency_verdict"], "CLEAN")
         self.assertFalse(result["review_override_confirmed"])
         self.assertEqual(self.fs.load_canonical_chapter(2), "最终人工正文。")
-        manager.derive_chapter.assert_called_once()
-        manager.update_tracking_docs.assert_called_once()
-        manager.extract_fact_digest_from_analysis.assert_called_once()
+        manager.update_current_state.assert_called_once()
+        manager.derive_atomic_facts.assert_called_once()
+        manager.verify_atomic_facts.assert_called_once()
         index.assert_called_once()
         self.assertTrue((self.fs.root / "tracking" / "volume_progress.md").is_file())
         sources = self.fs.root / result["chapter_sources_path"]

@@ -105,9 +105,9 @@ class ChapterPlanner(BaseAgent):
 
             sqlite = SQLiteStore(self.fs.root / "state.db")
             try:
-                _state, current_state_text, _digest = CurrentStateStore(
+                current_state_text, _digest = CurrentStateStore(
                     self.novel_id, self.fs, sqlite
-                ).ensure_initialized()
+                ).ensure_raw_initialized()
             finally:
                 sqlite.close()
 
@@ -293,9 +293,9 @@ class ChapterPlanner(BaseAgent):
 
         sqlite = SQLiteStore(self.fs.root / "state.db")
         try:
-            _state, current_state, _digest = CurrentStateStore(
+            current_state, _digest = CurrentStateStore(
                 self.novel_id, self.fs, sqlite
-            ).ensure_initialized()
+            ).ensure_raw_initialized()
         finally:
             sqlite.close()
         fact_context = self._load_recent_fact_digests(chapter_index)

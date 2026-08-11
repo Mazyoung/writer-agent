@@ -94,16 +94,16 @@ class TestContracts(E079Case):
         ):
             self.assertIn(marker, prompt)
 
-    def test_workflow_passes_only_active_volume_plan_to_deriver(self):
+    def test_workflow_current_state_updater_receives_no_volume_plan(self):
         self.fs.commit_canonical_chapter(1, "CANONICAL EVENT")
-        for status, expected in (("ACTIVE", True), ("DRAFT", False)):
+        for status in ("ACTIVE", "DRAFT"):
             plan = VOLUME_DRAFT.replace("DRAFT", status)
             self.fs.save_tracking_doc("volume_plan", plan)
             with patch.object(
                 StateManager,
-                "derive_chapter",
-                return_value={"raw_analysis": "DERIVED"},
-            ) as derive:
+                "update_current_state",
+                return_value={"updated_current_state": "# Updated State"},
+            ) as update:
                 result = derive_semantics({
                     "novel_id": "e079",
                     "chapter_index": 1,
@@ -111,8 +111,7 @@ class TestContracts(E079Case):
                     "current_state_text": "PREVIOUS STATE",
                 })
             self.assertEqual(result["workflow_status"], "SEMANTICS_DERIVED")
-            supplied = derive.call_args.kwargs["current_volume_plan"]
-            self.assertEqual(bool(supplied), expected)
+            update.assert_called_once_with("CANONICAL EVENT", 1, "PREVIOUS STATE")
     def test_top_level_markdown_ignores_edited_shadow(self):
         cases = [
             ("settings", "world_setting"), ("tracking", "book_plan"),
@@ -148,9 +147,9 @@ class TestRepair(E079Case):
         values = {
             "novel_id": "e079", "chapter_index": 1,
             "commit_success": True, "workflow_status": "DERIVATION_ERROR",
-            "derivation_raw_analysis": "DERIVED",
+            "updated_current_state_text": "# Updated State",
             "current_state_persisted": True,
-            "fact_digest_generated": False,
+            "atomic_fact_candidates": [],
         }
         snapshot = SimpleNamespace(values=values, interrupts=[])
         connection = MagicMock()

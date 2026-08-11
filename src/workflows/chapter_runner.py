@@ -426,6 +426,7 @@ class ChapterWorkflowRunner:
                 "CANONICAL_COMMITTED",
                 "SEMANTICS_DERIVED",
                 "CURRENT_STATE_PERSISTED",
+                "ATOMIC_FACTS_DERIVED",
                 "FACT_DIGEST_PERSISTED",
                 "VOLUME_PROGRESS_PERSISTED",
                 "CHAPTER_SOURCES_PERSISTED",
@@ -446,14 +447,16 @@ class ChapterWorkflowRunner:
                     graph, graph.invoke(None, config=self.config)
                 )
 
-            if not values.get("derivation_raw_analysis"):
+            if not values.get("updated_current_state_text"):
                 as_node, status = "commit_canonical_prose", "CANONICAL_COMMITTED"
             elif values.get("current_state_persisted") is not True:
                 as_node, status = "derive_semantics", "SEMANTICS_DERIVED"
-            elif values.get("fact_digest_generated") is not True:
+            elif values.get("atomic_facts_derived") is not True:
                 as_node, status = "persist_current_state", "CURRENT_STATE_PERSISTED"
+            elif values.get("fact_verification_complete") is not True:
+                as_node, status = "persist_fact_digest", "ATOMIC_FACTS_DERIVED"
             elif values.get("volume_progress_updated") is not True:
-                as_node, status = "persist_fact_digest", "FACT_DIGEST_PERSISTED"
+                as_node, status = "verify_atomic_facts", "FACT_DIGEST_PERSISTED"
             elif not values.get("chapter_sources_path"):
                 as_node, status = "persist_volume_progress", "VOLUME_PROGRESS_PERSISTED"
             else:

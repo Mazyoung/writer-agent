@@ -178,6 +178,76 @@ class CurrentStateStore:
             self.novel_id, state, digest, commit=True)
         return state, text, digest
 
+    def ensure_raw_initialized(self) -> tuple[str, str]:
+        """Load the human/LLM Markdown artifact without semantic parsing."""
+        text = self.load_text()
+        if not text.strip():
+            text = "# Current State\n\n暂无已建立状态。\n"
+            self.fs.save_generated_tracking_doc(self.REPORT_NAME, text)
+        return text, self.content_hash(text)
+
+    def commit_raw(
+        self,
+        base_sha256: str,
+        updated_markdown: str,
+        chapter_index: int,
+        canonical_source_path: str,
+    ) -> StateCommitResult:
+        """Mechanically validate and atomically replace raw Current State."""
+        result = StateCommitResult(success=False)
+        candidate = updated_markdown.strip()
+        if not candidate:
+            result.error_message = "Updated Current State is empty"
+            return result
+        candidate += "\n"
+        previous = self.load_text()
+        current_sha256 = self.content_hash(previous) if previous else ""
+        candidate_sha256 = self.content_hash(candidate)
+        if current_sha256 not in {base_sha256, candidate_sha256}:
+            result.error_message = (
+                "Current State base hash changed during checkpointed execution"
+            )
+            return result
+        marker = self.fs.root / "states" / f"chapter_{chapter_index:04d}_derived"
+        try:
+            if current_sha256 != candidate_sha256:
+                self.fs.save_generated_tracking_doc(self.REPORT_NAME, candidate)
+            if not marker.exists():
+                temporary = marker.with_suffix(".tmp")
+                try:
+                    temporary.write_text(
+                        "Derivation Current State success\n"
+                        f"Chapter: {chapter_index}\n"
+                        f"Canonical-Source: {canonical_source_path}\n"
+                        f"Current-State-SHA256: {candidate_sha256}\n",
+                        encoding="utf-8",
+                    )
+                    temporary.replace(marker)
+                finally:
+                    temporary.unlink(missing_ok=True)
+        except Exception as exc:
+            if current_sha256 != candidate_sha256:
+                try:
+                    if previous:
+                        self.fs.save_generated_tracking_doc(self.REPORT_NAME, previous)
+                    else:
+                        self.path.unlink(missing_ok=True)
+                except Exception as rollback_exc:
+                    result.warnings.append(
+                        "rollback current_state.md failed: "
+                        f"{type(rollback_exc).__name__}: {rollback_exc}"
+                    )
+            result.error_message = (
+                f"Current State commit failed: {type(exc).__name__}: {exc}"
+            )
+            return result
+        result.success = True
+        result.changed_files = [
+            "tracking/current_state.md",
+            f"states/chapter_{chapter_index:04d}_derived",
+        ]
+        return result
+
     def ensure_initialized(self) -> tuple[CurrentState, str, str]:
         text = self.load_text()
         if not text:

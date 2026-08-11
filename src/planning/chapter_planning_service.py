@@ -41,9 +41,9 @@ class ChapterPlanningService:
 
         sqlite = SQLiteStore(self.file_store.root / "state.db")
         try:
-            _state, current_state, _digest = CurrentStateStore(
+            current_state, _digest = CurrentStateStore(
                 self.novel_id, self.file_store, sqlite
-            ).ensure_initialized()
+            ).ensure_raw_initialized()
         finally:
             sqlite.close()
         query_intent = QueryIntentBuilder(self.novel_id).build(

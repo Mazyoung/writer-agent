@@ -1,11 +1,9 @@
 """
-StateManager — prose quality review plus post-canonical semantic derivation.
+StateManager — review plus isolated post-canonical SYSTEM transformations.
 
-E06 核心变更：
-- review_chapter 接收 world_setting，确保 T1 一致性检查有真实依据
-- update_tracking_docs 维护 Current Structured State（不只是 change log）
-- parse_review_decision 从 raw_analysis 确定性提取 ReviewDecision（无额外 LLM）
-- 状态变更采用 State Delta → deterministic apply 模式
+正式 Derivation 只使用独立的 Current State Updater、Atomic Fact Deriver、
+Fact Verifier 与有界 targeted repair。旧 combined deriver、StateDelta parser
+及 structured Current State apply 仅保留 migration/compatibility，不控制生产路径。
 """
 
 from pathlib import Path
@@ -174,7 +172,7 @@ class StateManager(BaseAgent):
     def derive_chapter(self, canonical_prose: str, chapter_index: int,
                        previous_current_state: str,
                        current_volume_plan: str = "") -> dict:
-        """Derive StateDelta and Fact Digest only after canonical commit."""
+        """Legacy combined deriver retained for compatibility tooling only."""
         if not canonical_prose.strip():
             raise ValueError("Canonical prose is required for Derivation")
         numbered_text = _number_chapter_paragraphs(canonical_prose)
@@ -196,6 +194,106 @@ class StateManager(BaseAgent):
             save_prefix=f"derivation_ch{chapter_index:04d}",
         )
         return {"raw_analysis": result.content, "filepath": result.filepath}
+
+    def update_current_state(
+        self, canonical_prose: str, chapter_index: int, previous_current_state: str
+    ) -> dict:
+        """Produce the complete raw Current State artifact in one SYSTEM call."""
+        if not canonical_prose.strip():
+            raise ValueError("Canonical prose is required for Current State update")
+        numbered = _number_chapter_paragraphs(canonical_prose)
+        user_msg = (
+            "## Previous Current State\n\n"
+            f"{previous_current_state or '# Current State\n\n暂无已建立状态。'}"
+            "\n\n---\n\n"
+            f"## Canonical Chapter {chapter_index}\n\n{numbered}"
+        )
+        guard_planning_context(self.model_slot, {
+            "previous_current_state.md": previous_current_state,
+            "canonical_chapter.md": canonical_prose,
+        })
+        self.system_prompt = self.load_prompt("current_state_updater.txt")
+        result = self.run(
+            user_message=user_msg,
+            save_category="states",
+            save_prefix=f"current_state_update_ch{chapter_index:04d}",
+        )
+        if not result.content.strip():
+            raise ValueError("Current State Updater returned empty Markdown")
+        return {"updated_current_state": result.content, "filepath": result.filepath}
+
+    def derive_atomic_facts(self, canonical_prose: str, chapter_index: int) -> dict:
+        """Generate only source-addressed natural-language fact candidates."""
+        if not canonical_prose.strip():
+            raise ValueError("Canonical prose is required for Atomic Fact derivation")
+        numbered = _number_chapter_paragraphs(canonical_prose)
+        guard_planning_context(self.model_slot, {"canonical_chapter.md": canonical_prose})
+        self.system_prompt = self.load_prompt("atomic_fact_deriver.txt")
+        result = self.run(
+            user_message=f"## Canonical Chapter {chapter_index}\n\n{numbered}",
+            save_category="states",
+            save_prefix=f"atomic_fact_candidates_ch{chapter_index:04d}",
+        )
+        if not result.content.strip():
+            raise ValueError("Atomic Fact Deriver returned empty output")
+        return {"raw_analysis": result.content, "filepath": result.filepath}
+
+    def verify_atomic_facts(
+        self,
+        verification_payload: str,
+        chapter_index: int,
+        *,
+        protocol_correction: str = "",
+        attempt: int = 1,
+    ) -> dict:
+        """Run one batch truth/evidence verification request."""
+        if not verification_payload.strip():
+            raise ValueError("Fact Verification payload is empty")
+        suffix = ""
+        if protocol_correction:
+            suffix = (
+                "\n\n---\n\n上次输出机器协议不合法。只纠正协议，不改变任何"
+                f"事实判断：\n{protocol_correction}"
+            )
+        self.system_prompt = self.load_prompt("atomic_fact_verifier.txt")
+        result = self.run(
+            user_message=verification_payload + suffix,
+            save_category="states",
+            save_prefix=(
+                f"atomic_fact_verification_ch{chapter_index:04d}_attempt{attempt}"
+            ),
+        )
+        if not result.content.strip():
+            raise ValueError("Atomic Fact Verifier returned empty output")
+        return {"raw_analysis": result.content, "filepath": result.filepath}
+
+    def repair_atomic_fact(
+        self,
+        fact_text: str,
+        source_ranges: str,
+        canonical_source: str,
+        verifier_reason: str,
+        chapter_index: int,
+        fact_number: int,
+    ) -> dict:
+        """Perform one bounded repair of one failed fact; DROP is explicit."""
+        payload = (
+            f"## Original Fact\n{fact_text}\n\n"
+            f"## Source Range\n{source_ranges}\n\n"
+            f"## Canonical Source\n{canonical_source}\n\n"
+            f"## Verifier Reason\n{verifier_reason or '未提供'}"
+        )
+        self.system_prompt = self.load_prompt("atomic_fact_repair.txt")
+        result = self.run(
+            user_message=payload,
+            save_category="states",
+            save_prefix=(
+                f"atomic_fact_repair_ch{chapter_index:04d}_{fact_number:03d}"
+            ),
+        )
+        if not result.content.strip():
+            raise ValueError("Atomic Fact Repair returned empty output")
+        return {"raw_analysis": result.content.strip(), "filepath": result.filepath}
 
     def extract_fact_digest(self, chapter_text: str, chapter_index: int) -> FactDigest:
         """从章节正文提取事实摘要（LLM 调用 — 保留用于独立 fact-digest 场景）。
@@ -270,7 +368,7 @@ class StateManager(BaseAgent):
                              analysis_text: str, expected_state_sha256: str = "",
                              chapter_title: str = "",
                              canonical_source_path: str = "") -> dict:
-        """Apply one derived State Delta to Markdown and SQLite deterministically."""
+        """Legacy structured StateDelta apply retained for compatibility only."""
         if self.sqlite is None:
             return {"_commit_result": StateCommitResult(
                 success=False, error_message="SQLiteStore is required for Current State commit")}

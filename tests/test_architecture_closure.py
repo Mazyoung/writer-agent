@@ -180,8 +180,8 @@ class TestSemanticSeparation(ClosureCase):
         mocks["manager"].return_value.review_chapter.return_value = {
             "raw_analysis": pass_decision(), "filepath": None,
         }
-        mocks["manager"].return_value.derive_chapter.side_effect = RuntimeError(
-            "deriver unavailable")
+        mocks["manager"].return_value.update_current_state.side_effect = RuntimeError(
+            "current-state updater unavailable")
 
         runner = ChapterWorkflowRunner("closure", 1)
         waiting = runner.run()

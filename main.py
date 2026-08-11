@@ -267,13 +267,17 @@ def _print_chapter_result(name: str, chapter: int, result: dict) -> None:
         print(f"\n第 {chapter} 章已完整完成（DERIVED_READY）。")
         return
     if status == "DERIVATION_ERROR":
+        stage = result.get("failed_derivation_stage", "UNKNOWN")
+        error = result.get("derivation_error", "未知派生错误")
+        print("\nDERIVATION_ERROR")
+        print(f"Chapter: {chapter}")
+        print("Canonical Commit: YES")
+        print(f"Failed Stage: {stage}")
+        print(f"Error: {error}")
+        print("Recovery State Saved: YES")
         print(
-            f"\n第 {chapter} 章正文已经 Canonical Commit，"
-            "但派生过程尚未完成。"
-        )
-        print(
-            f"请执行：python main.py repair-derivation {name} "
-            f"--chapter {chapter}"
+            "再次运行 write 或 continue 将从该派生阶段继续；"
+            "repair-derivation 仅保留作 debug/maintenance。"
         )
         return
     if status == "RESTARTED":
@@ -532,6 +536,16 @@ def cmd_write(args):
     feedback = getattr(args, "feedback", "") or ""
     requested_action = getattr(args, "action", None)
     try:
+        if not requested_action:
+            from src.storage.chapter_completion import is_derived_ready
+            fs = FileStore(args.name, get_settings().data_dir)
+            if (
+                fs.canonical_chapter_path(args.chapter).exists()
+                and not is_derived_ready(fs, args.chapter)
+            ):
+                result = repair_chapter_derivation(args.name, args.chapter)
+                _print_chapter_result(args.name, args.chapter, result)
+                return
         if requested_action:
             result = resume_chapter_workflow(
                 args.name,

@@ -41,7 +41,7 @@ class NovelStatusService:
         try:
             CurrentStateStore(
                 self.novel_id, self.file_store, sqlite
-            ).ensure_initialized()
+            ).ensure_raw_initialized()
             current_meta = sqlite.get_current_chapter_meta(self.novel_id) or {}
             status["sqlite_chapter_count"] = int(
                 current_meta.get("chapter_index", 0))

@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+import json
 from pathlib import Path
 from typing import Optional
 
@@ -27,6 +28,8 @@ class FactSearchResult:
     entities: str = ""
     paragraph_start: int = 0
     paragraph_end: int = 0
+    source_ranges: list[dict[str, int]] = field(default_factory=list)
+    canonical_hash: str = ""
     source_path: str = ""
     digest_path: str = ""
     distance: float = 0.0
@@ -40,6 +43,8 @@ class FactSearchResult:
             "entities": self.entities,
             "paragraph_start": self.paragraph_start,
             "paragraph_end": self.paragraph_end,
+            "source_ranges": self.source_ranges,
+            "canonical_hash": self.canonical_hash,
             "source_path": self.source_path,
             "digest_path": self.digest_path,
             "distance": self.distance,
@@ -111,6 +116,7 @@ class AtomicFactStore:
         facts: list[AtomicFact],
         source_path: str,
         digest_path: str,
+        canonical_hash: str = "",
     ) -> int:
         """Replace one chapter's facts; documents are Fact Text, never prose."""
         coll = self._ensure_collection(novel_id)
@@ -129,19 +135,28 @@ class AtomicFactStore:
             fact_id = f"FACT-{chapter_index:04d}-{sequence:03d}"
             ids.append(f"{novel_id}_{branch_id}_{fact_id}")
             documents.append(fact.fact_text.strip())
-            metadatas.append({
+            metadata = {
                 "novel_id": novel_id,
                 "branch_id": branch_id,
                 "source_type": SOURCE_TYPE,
                 "fact_id": fact_id,
                 "chapter_index": chapter_index,
-                "fact_type": fact.fact_type or "event",
-                "entities": ", ".join(fact.entities),
-                "paragraph_start": int(fact.paragraph_start or 0),
-                "paragraph_end": int(fact.paragraph_end or 0),
+                "source_ranges": json.dumps(
+                    fact.source_ranges, ensure_ascii=False, separators=(",", ":")
+                ),
+                "canonical_hash": canonical_hash,
                 "source_path": source_path,
                 "digest_path": digest_path,
-            })
+            }
+            if not fact.source_ranges:
+                # Optional read compatibility for pre-protocol Markdown digests.
+                metadata.update({
+                    "fact_type": fact.fact_type or "event",
+                    "entities": ", ".join(fact.entities),
+                    "paragraph_start": int(fact.paragraph_start or 0),
+                    "paragraph_end": int(fact.paragraph_end or 0),
+                })
+            metadatas.append(metadata)
         add_kwargs = {
             "ids": ids, "documents": documents, "metadatas": metadatas,
         }
@@ -183,6 +198,16 @@ class AtomicFactStore:
         distances = raw.get("distances", [[]])[0] if raw and raw.get("distances") else []
         for index, _ in enumerate(ids):
             meta = metas[index] if index < len(metas) else {}
+            raw_ranges = meta.get("source_ranges", "")
+            try:
+                source_ranges = (
+                    json.loads(raw_ranges) if isinstance(raw_ranges, str)
+                    else list(raw_ranges or [])
+                )
+                if not isinstance(source_ranges, list):
+                    source_ranges = []
+            except (TypeError, ValueError, json.JSONDecodeError):
+                source_ranges = []
             parsed.append(FactSearchResult(
                 fact_id=str(meta.get("fact_id", "")),
                 chapter_index=int(meta.get("chapter_index", 0)),
@@ -190,12 +215,28 @@ class AtomicFactStore:
                 entities=str(meta.get("entities", "")),
                 paragraph_start=int(meta.get("paragraph_start", 0)),
                 paragraph_end=int(meta.get("paragraph_end", 0)),
+                source_ranges=source_ranges,
+                canonical_hash=str(meta.get("canonical_hash", "")),
                 source_path=str(meta.get("source_path", "")),
                 digest_path=str(meta.get("digest_path", "")),
                 distance=float(distances[index]) if index < len(distances) else 1.0,
                 text=str(docs[index]) if index < len(docs) else "",
             ))
         return parsed
+
+    def quarantine_fact(self, novel_id: str, branch_id: str, fact_id: str) -> bool:
+        """Immediately remove a confirmed-bad fact from the active vector index."""
+        coll = self._ensure_collection(novel_id)
+        existing = coll.get(where={"$and": [
+            {"novel_id": {"$eq": novel_id}},
+            {"branch_id": {"$eq": branch_id}},
+            {"fact_id": {"$eq": fact_id}},
+        ]})
+        ids = existing.get("ids", []) if existing else []
+        if ids:
+            coll.delete(ids=ids)
+            return True
+        return False
 
     def rebuild_branch(self, novel_id: str, branch_id: str) -> bool:
         self._runtime(novel_id)

@@ -148,9 +148,9 @@ class InteractivePlanEngine:
 
         sqlite = SQLiteStore(self.fs.root / "state.db")
         try:
-            _state, current_state, _digest = CurrentStateStore(
+            current_state, _digest = CurrentStateStore(
                 self.fs.novel_id, self.fs, sqlite
-            ).ensure_initialized()
+            ).ensure_raw_initialized()
         finally:
             sqlite.close()
 
@@ -233,7 +233,7 @@ class InteractivePlanEngine:
         try:
             CurrentStateStore(
                 self.fs.novel_id, self.fs, sqlite
-            ).ensure_initialized()
+            ).ensure_raw_initialized()
             rows = sqlite.get_current_pending_foreshadows(self.fs.novel_id)
         finally:
             sqlite.close()

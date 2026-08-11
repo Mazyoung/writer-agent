@@ -200,29 +200,35 @@ class ChapterRetrievalService:
         """Expand only located ranges, with one neighboring paragraph per side."""
         excerpts = []
         for result in results:
-            if result.paragraph_start <= 0:
-                continue
             path = self._resolve_source_path(result)
             if path is None:
                 continue
             paragraphs = self._split_paragraphs(path.read_text(encoding="utf-8"))
-            start = max(1, result.paragraph_start - context_paragraphs)
-            fact_end = result.paragraph_end or result.paragraph_start
-            end = min(len(paragraphs), fact_end + context_paragraphs)
-            if start > len(paragraphs) or end < start:
-                continue
-            numbered = [
-                f"[P{number:04d}] {paragraphs[number - 1]}"
-                for number in range(start, end + 1)
-            ]
-            excerpts.append(SourceExcerpt(
-                fact_id=result.fact_id,
-                chapter_index=result.chapter_index,
-                source_path=str(path.relative_to(self.fs.root)).replace("\\", "/"),
-                paragraph_start=start,
-                paragraph_end=end,
-                text="\n\n".join(numbered),
-            ))
+            ranges = result.source_ranges or ([{
+                "start": result.paragraph_start,
+                "end": result.paragraph_end or result.paragraph_start,
+            }] if result.paragraph_start > 0 else [])
+            for address in ranges:
+                fact_start = int(address.get("start", 0))
+                fact_end = int(address.get("end", 0))
+                if fact_start < 1 or fact_end < fact_start:
+                    continue
+                start = max(1, fact_start - context_paragraphs)
+                end = min(len(paragraphs), fact_end + context_paragraphs)
+                if start > len(paragraphs) or end < start:
+                    continue
+                numbered = [
+                    f"[P{number:04d}] {paragraphs[number - 1]}"
+                    for number in range(start, end + 1)
+                ]
+                excerpts.append(SourceExcerpt(
+                    fact_id=result.fact_id,
+                    chapter_index=result.chapter_index,
+                    source_path=str(path.relative_to(self.fs.root)).replace("\\", "/"),
+                    paragraph_start=start,
+                    paragraph_end=end,
+                    text="\n\n".join(numbered),
+                ))
         return excerpts
 
     def _save_trace(self, trace: FactRetrievalTrace) -> Path:

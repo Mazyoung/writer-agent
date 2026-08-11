@@ -208,18 +208,26 @@ class ProposalAndPlanningContextTests(SmokeClosureCase):
         self.assertIn(world_tail, volume_prompt)
         self.assertIn(book_tail, volume_prompt)
 
-    def test_token_guard_blocks_before_llm_and_lists_documents(self):
+    def test_token_guard_warns_without_blocking_and_reports_diagnostics(self):
         slot = ModelSlot(
             name="architect", provider="deepseek", api_key="x",
             base_url="https://api.deepseek.com", model="m", max_tokens=32768,
         )
-        with self.assertRaisesRegex(ValueError, "不会自动截断") as raised:
-            guard_planning_context(slot, {
+        output = io.StringIO()
+        with redirect_stdout(output):
+            estimates = guard_planning_context(slot, {
                 "proposal.md": "甲" * 300_000,
                 "world_setting.md": "乙" * 10,
             })
-        self.assertIn("proposal.md", str(raised.exception))
-        self.assertIn("world_setting.md", str(raised.exception))
+        rendered = output.getvalue()
+        self.assertGreater(sum(estimates.values()), slot.max_tokens)
+        self.assertGreater(estimates["proposal.md"], slot.max_tokens)
+        self.assertIn("world_setting.md", estimates)
+        self.assertIn("[Token Warning] ARCHITECT 输入上下文较大", rendered)
+        self.assertIn("Estimated Input Tokens: 345012", rendered)
+        self.assertIn("Configured ARCHITECT_MAX_TOKENS: 32768", rendered)
+        self.assertIn("不会截断、压缩或阻断正式上下文", rendered)
+        self.assertIn("将继续完整发送", rendered)
 
     def test_draft_volume_becomes_active_when_planning_starts(self):
         fs = FileStore("smoke", self.settings.data_dir)

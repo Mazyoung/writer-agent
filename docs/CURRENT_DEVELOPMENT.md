@@ -3,7 +3,7 @@
 ## Current Stage
 
 E07 Story Savepoint + Load Savepoint、自动 Savepoint、四模型槽位与小说级
-Embedding 配置已完成。
+Embedding 配置及 Real Smoke 前置整改已完成。当前尚未执行真实模型凭证的 End-to-End Smoke；下一步是从 `smoke_test` 的正式 `write` 入口验证完整生产链。
 
 正式支持两条底层章节创作链与三种用户运行体验：
 
@@ -111,18 +111,34 @@ Tests tied to the retired src.core.orchestrator, automatic revision, PASS-to-dir
 
 ## Real Smoke Remediation Closure
 
+- 最近提交：`a4af8fe 修复空响应并收口章节入口`，已推送到 `origin/main`；当前工作树应保持干净。
 - `ModelProviderClient` 对 OpenAI-compatible、DeepSeek 和 Anthropic 的 None、空字符串、纯空白或无文本响应 fail closed；错误仅保留 provider、model、finish/stop reason 等非敏感诊断。`BaseAgent` 在任何 save/save_canonical 和 interceptor 前保留 provider-independent 非空最后防线，空响应不得创建或覆盖文件。
 - 正式章节入口统一为 `python main.py write <novel> --chapter N`；`init --confirm` 直接引导 write。`plan` 保留为 standalone/debug 工具，其 Chapter Plan 不会被正式 write 接续或采用，不写 generation_events 或独立 provenance。
 - Chapter Planner、Writer 与 Query Intent 提示词已移除旧项目的固定题材、文风、范文和节奏硬编码。Query Intent 明确 Current State/Canonical History 是已发生历史，Book/Volume Plan 仅是未来规划参考，不得将未来事件包装成历史检索目标。
 - 正式 Workflow 的 `PLAN_CREATED.details.context_sources` 直接记录 Planner 本次实际输入的 World Setting、Book Plan、Volume Plan、Current State、Previous Chapter End、Human Intent 与 RAG flags；`render_chapter_sources()` 仅机械投影这些 flags，不再从 RAG 或其他 state 推断来源。旧 checkpoint 无 flags 时显示未记录。
 - 已删除本次 smoke 产生的 0-byte `data/novels/smoke_test/outlines/chapter_plan_ch0001.md`；Proposal、World Setting、Book Plan、Volume Plan 和 Current State 保持不变。本轮未调用真实模型 API。
 
+## Canonical 后 Derivation / RAG Closure
+
+- `tracking/current_state.md` 现为面向 Human/LLM 的 Raw Markdown；正式路径由独立 SYSTEM Current State Updater 读取 Previous Current State + Canonical Chapter，生成完整 Updated Current State，Python 只做非空、checkpoint、hash compare 与原子保存。`StateDelta.from_analysis`、`CurrentState.from_markdown` 与 SQLite semantic projection 仅保留 legacy compatibility，不再控制正式 Derivation。
+- Atomic Fact Deriver 是与 Updater 分离的 SYSTEM 请求，只输出 `## Atomic Facts` 下的一 fact 一 bullet：`- [P0001-P0002; P0010-P0011] 自包含自然语言事实。` LLM 不再生成 fact_id、chapter、path、type、entities、relationship/status 等 metadata。
+- Source Range parser 机械兼容补零、可选方括号、空格、`- / ~ / — / –` 与合理多范围分隔；统一成 `[{start, end}]`。Python 严格验证 start >= 1、end >= start、地址存在，并从当前 Canonical/source path 构造 source metadata；自然语言位置描述不会被猜测，非法地址只做一次定向 LLM repair 或 DROP。
+- 新 Fact 先由 Python按 range 提取 Canonical excerpt，再用独立 SYSTEM Verifier 一次 batch 审核。只解析明确 `VERIFIED / INCORRECT / INSUFFICIENT`；Verifier 协议非法最多一次纯协议纠正，不扫描自由分析猜 verdict，也不审核 importance/worth keeping。
+- `INCORRECT` 最多一次 targeted repair 后复核；`INSUFFICIENT` 先机械扩展每个 source range 的 ±1 段落邻域再复核，仍不足时才做未使用过的 targeted repair。每条 Fact 最多三轮真实性 verification、一次 repair；明确 DROP、repair 后无可靠独立事实或最终仍未 VERIFIED 均丢弃，不强制数量。
+- 只有 VERIFIED Fact 写入最终 Fact Digest 与 `atomic_facts_v2`。Chroma document 仅为 `fact_text`；新 metadata 为 deterministic `fact_id / chapter_index / source_path / source_ranges / canonical_hash`（另含 novel/branch/source_type/digest path 系统字段），旧 type/entities/start/end 只在 legacy data 时兼容保存/读取。
+- Chroma 按 chapter 先删除旧 ids 再写入，重试不会 duplicate；零个可靠 Fact 也可完成明确空 Digest。`quarantine_fact` 可立即把后续确认错误的 ACTIVE Fact 从正常向量索引移除，再复用 Canonical source + targeted repair + verification，fact_text 变化才需要新 embedding。
+- Derivation checkpoint 现依次为 Current State 生成/保存、Atomic Fact 生成、Fact Verification/保存、Volume Progress、Chapter Sources、Chroma。每阶段幂等；Current State 成功后 Fact 失败不会重写 Current State；write/continue 自动从首个未完成派生阶段继续，`repair-derivation` 仅保留 maintenance/debug。
+- active derivation failure 按 stage 单值保存；同 stage 同错误不重复，错误变化替换当前 active failure，stage 成功即清除。CLI 显示 Chapter、Canonical Commit、Failed Stage、真实异常、Recovery State Saved，并提示 write/continue 自动恢复。
+- TokenGuard 生产代码保持已确定 warning-only 策略；旧阻断语义测试已迁移为严格验证超限估算、文档诊断、warning、配置上限和继续完整发送提示。
+- 本轮未执行 Real Smoke、未重新生成 Chapter 1 Canonical、未调用真实模型 API。
+
 ## Verification
 
-- 整改相关既有测试：81 passed，21 subtests passed，1 warning。
-- 完整 pytest suite：226 passed，24 subtests passed，1 warning。
+- 新 Derivation/RAG/TokenGuard 相关测试及迁移回归通过。
+- 完整 pytest suite：235 passed，24 subtests passed，1 warning。
 - 唯一 warning 是 ChromaDB 依赖的既有 `asyncio.iscoroutinefunction` DeprecationWarning；本轮未处理无关技术债。
+- 本轮未调用真实模型 API；仅完成代码整改和本地回归验证。
 
 ## Next Task
 
-使用真实模型凭证执行：`python main.py write smoke_test --chapter 1` Real End-to-End Smoke Test。未经明确任务，不调用真实 API。
+等待下一项明确任务。若继续真实凭证 Smoke，必须从正式 `write/continue` 入口验证新的自动 Derivation recovery；未经明确任务，不调用真实 API、不重新生成既有 Canonical。
