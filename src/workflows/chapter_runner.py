@@ -416,6 +416,15 @@ class ChapterWorkflowRunner:
                 raise ValueError(
                     f"操作 '{action}' 不适用于 {pending.get('type', 'interrupt')}"
                 )
+            feedback = str(resume_value.get("feedback", "")).strip()
+            if (
+                action == "agent_edit"
+                and str(pending.get("verdict", "")).strip().upper() == "PASS"
+                and not feedback
+            ):
+                raise ValueError(
+                    "Review 已通过，Agent 自动修改需要提供修改意见"
+                )
             if action == "restart":
                 return {
                     "workflow_status": "RESTARTED",
@@ -424,7 +433,7 @@ class ChapterWorkflowRunner:
                 }
             command_value = {
                 "action": action,
-                "feedback": str(resume_value.get("feedback", "")).strip(),
+                "feedback": feedback,
             }
             # Validate before Command(resume=...) so a bad/missing edit does not
             # consume the pending checkpoint interrupt.

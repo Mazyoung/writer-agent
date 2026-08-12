@@ -495,16 +495,23 @@ def _interactive_resume_value(
         break
 
     if action == "agent_edit":
+        passed = str(payload.get("verdict", "")).strip().upper() == "PASS"
+        guidance = (
+            "Review 已通过，请输入希望 Agent 修改的具体意见；此处不能为空"
+            if passed else
+            "直接回车则仅使用 Reviewer 已给出的修改问题"
+        )
         try:
             feedback = input(
                 "\n请输入给 Agent 的补充修改意见：\n"
-                "（直接回车则仅使用 Reviewer 已给出的修改问题）\n\n> "
+                f"（{guidance}）\n\n> "
             ).strip()
         except (EOFError, KeyboardInterrupt, OSError):
             print("\n已暂停，当前 WAITING_HUMAN checkpoint 保持不变。")
             return None
-        if not feedback and payload.get("verdict") == "PASS":
-            feedback = "请在保持已通过内容的前提下，根据当前作者选择进行局部优化。"
+        if passed and not feedback:
+            print("\nReview 已通过，Agent 自动修改需要提供修改意见。")
+            return None
         return {"action": action, "feedback": feedback}
 
     if action == "human_edit":
