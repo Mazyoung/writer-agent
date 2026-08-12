@@ -58,6 +58,7 @@ from src.workflows.chapter_runner import (
     run_chapter_workflow,
 )
 from src.workflows.continuation import NovelContinuationService
+from src.utils.command_timing import command_timing_session, current_command_timing
 
 
 def _safe_print(text: str, max_len: int = 500):
@@ -287,13 +288,12 @@ _TIMING_EVENT_LABELS = {
 
 def _print_timing_summary(result: dict) -> None:
     totals: dict[str, float] = {}
-    for event in result.get("generation_events", []):
-        label = _TIMING_EVENT_LABELS.get(str(event.get("event_type", "")))
-        if label is None or "duration_ms" not in event:
-            continue
-        try:
-            duration = max(0.0, float(event["duration_ms"]))
-        except (TypeError, ValueError):
+    session = current_command_timing()
+    if session is None:
+        return
+    for event_type, duration in session.totals_ms.items():
+        label = _TIMING_EVENT_LABELS.get(event_type)
+        if label is None:
             continue
         totals[label] = totals.get(label, 0.0) + duration
     if not totals:
@@ -923,7 +923,8 @@ def main():
     }
     if args.command in cmds:
         try:
-            cmds[args.command](args)
+            with command_timing_session():
+                cmds[args.command](args)
         except ValueError as exc:
             print(f"错误：{exc}")
     else:

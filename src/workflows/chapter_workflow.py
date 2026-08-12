@@ -126,8 +126,12 @@ def record_generation_event(
     for existing in state.get("generation_events", []):
         if existing.get("event_id") == event["event_id"]:
             return [existing]
-    return [event]
+    if duration_ms is not None:
+        from src.utils.command_timing import record_command_timing
 
+        record_command_timing(event_type, event["duration_ms"])
+
+    return [event]
 
 def _stage_start(state: "ChapterWorkflowState", message: str) -> LiveStageTimer:
     chapter = state.get("chapter_index", 0)

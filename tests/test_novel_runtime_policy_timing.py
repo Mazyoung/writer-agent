@@ -17,6 +17,7 @@ from src.config.runtime_policy import (
 )
 from src.workflows.chapter_runner import ChapterWorkflowRunner
 from src.workflows.chapter_workflow import style_edit
+from src.utils.command_timing import command_timing_session
 
 
 class NovelRuntimePolicyTests(unittest.TestCase):
@@ -130,7 +131,7 @@ class StageTimingTests(unittest.TestCase):
     def test_style_node_records_monotonic_duration_and_summary_uses_only_nodes(self):
         stylist = MagicMock()
         stylist.edit_chapter.return_value = "润色后正文"
-        with patch(
+        with command_timing_session(), patch(
             "src.agents.author.claude_stylist.ClaudeStylist",
             return_value=stylist,
         ), patch(
@@ -143,17 +144,17 @@ class StageTimingTests(unittest.TestCase):
                 "draft_text": "正文",
                 "chapter_plan_text": "规划",
             })
+            output = io.StringIO()
+            with redirect_stdout(output):
+                cli._print_timing_summary(result)
+            rendered = output.getvalue()
 
         event = result["generation_events"][0]
         self.assertEqual("STYLE_COMPLETED", event["event_type"])
         self.assertGreaterEqual(event["duration_ms"], 0)
         self.assertEqual(250.0, event["duration_ms"])
-
-        output = io.StringIO()
-        with redirect_stdout(output):
-            cli._print_timing_summary({"generation_events": [event]})
-        rendered = output.getvalue()
         self.assertIn("不含人工等待", rendered)
+
         self.assertIn("0.2s", rendered)
 
 

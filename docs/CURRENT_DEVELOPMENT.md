@@ -167,7 +167,7 @@ Tests tied to the retired src.core.orchestrator, automatic revision, PASS-to-dir
 ## Verification
 
 - Embedding batching、WAITING_HUMAN 前台交互、既有 checkpoint 恢复、chapter_sources finalization、recovery 日志、只读 status 及既有 Derivation/RAG/TokenGuard 回归通过。
-- 完整 pytest suite：258 passed，31 subtests passed，1 warning。
+- 完整 pytest suite：259 passed，31 subtests passed，1 warning。
 - 唯一 warning 是 ChromaDB 依赖的既有 `asyncio.iscoroutinefunction` DeprecationWarning；本轮未处理无关技术债。
 - 本轮未调用真实模型 API；仅完成代码整改和本地回归验证。
 
