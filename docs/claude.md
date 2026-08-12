@@ -56,7 +56,6 @@ Current runtime components roughly include:
 - ChapterPlanner
 - DeepSeekWriter
 - ClaudeStylist
-- StyleChecker
 - StateManager
 
 Do NOT recreate the old nine-Agent architecture merely to make the system look more "multi-agent".

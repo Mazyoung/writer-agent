@@ -77,7 +77,7 @@ Story Savepoint 将正式章节完成后的完整小说创作世界保存为 imm
 - Human 与 Agent 统一使用 `chapter_sources.md` 记录 Intent、Query Intent、Retrieval sources、正式上下文、Review/Edit/Regenerate/Override、Canonical 与 Derivation；报告只机械汇总 checkpointed `generation_events` 和 Retrieval 结构化结果，不再扫描 Chapter Plan 猜测 adopted/candidate-only。
 - `generation_events` 位于 Chapter Workflow State，使用稳定 workflow counter/round/revision/retry 或固定 lifecycle stage 构造 event ID；checkpoint replay、continue 和 derivation recovery 按 ID 幂等合并。
 - ReviewDecision 不再因 analysis prose 中的 major/minor/T1/T2/T3 推翻显式 verdict；Consistency 只消费 `## 一致性结论` 的明确 CLEAN/WARN，缺失或非法仍 fail closed。
-- StyleChecker 已退出正式 Chapter Workflow，仅保留手动 lint/debug 用途；无生产引用的 `quality_reviewer.txt` 与 `consistency_guard.txt` 已删除。
+- StyleChecker 及独立手动 style 入口已删除；Stylist 只处理首次 Writer Draft，Review 后修改只由 Writer revision 处理。
 ## Architecture CI Baseline
 
 The push/PR gate is frozen around stable functional contracts and safety invariants:
@@ -166,9 +166,10 @@ Tests tied to the retired src.core.orchestrator, automatic revision, PASS-to-dir
 
 ## Verification
 
+- Atomic Fact source range parser 会在边界将单个地址项中的 ASCII/全角分号复合地址拆成既有 `{start, end}` list，并对每段继续严格 fullmatch；全部 ranges 均进入 Canonical excerpt 与 ±1 paragraph historical expansion。StyleChecker、独立 style 入口及 Stylist human-feedback 残留已删除。
 - Supervised Plan/Prose Review 的 `PASS + agent_edit` 现在于统一 runner resume seam 在 `Command(resume=...)` 前强制要求非空 feedback；拒绝时 checkpoint 不消费、Graph/LLM 不执行。`NEEDS_REVISION` 仍允许空 feedback 并只使用 Reviewer issues，PASS 中 advisory/T3 notes 不替代作者修改意见。
 - Embedding batching、WAITING_HUMAN 前台交互、既有 checkpoint 恢复、chapter_sources finalization、recovery 日志、只读 status 及既有 Derivation/RAG/TokenGuard 回归通过。
-- 完整 pytest suite：264 passed，37 subtests passed，1 warning。
+- 完整 pytest suite：269 passed，45 subtests passed，1 warning。
 - 唯一 warning 是 ChromaDB 依赖的既有 `asyncio.iscoroutinefunction` DeprecationWarning；本轮未处理无关技术债。
 - 本轮未调用真实模型 API；仅完成代码整改和本地回归验证。
 

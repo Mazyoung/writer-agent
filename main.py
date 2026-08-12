@@ -17,10 +17,6 @@
     # 写作
     python main.py write <小说名> --chapter N       # DeepSeekWriter → ClaudeStylist → Prose Review
 
-    # 风格修改
-    python main.py style <小说名> --chapter N       # 对已写章节做风格编辑
-    python main.py style <小说名> --chapter N --feedback "..."  # 带人工反馈
-
     # write 已包含审阅、canonical commit、Fact Digest 与 RAG
 
     # 状态
@@ -50,7 +46,6 @@ from src.storage.embedding_config import (
 )
 from src.storage.rag_maintenance_v2 import RAGMaintenanceService
 from src.storage.story_savepoint import SavepointError, StorySavepointManager
-from src.workflows.chapter_editing import ChapterEditingService
 from src.workflows.chapter_runner import (
     repair_chapter_derivation,
     restart_chapter_workflow,
@@ -651,14 +646,6 @@ def cmd_write(args):
     _print_chapter_result(args.name, args.chapter, result)
 
 
-def cmd_style(args):
-    if not _get_novel_dir(args.name):
-        return
-    feedback = getattr(args, 'feedback', "") or ""
-    ChapterEditingService(args.name).style_edit(args.chapter, feedback)
-    print(f"\n风格修改完成。如需继续调整: python main.py style {args.name} --chapter {args.chapter} --feedback \"...\"")
-
-
 def cmd_repair_derivation(args):
     if not _get_novel_dir(args.name):
         return
@@ -864,10 +851,6 @@ def main():
     p.add_argument("name")
     p.add_argument("--chapter", type=int, required=True)
 
-    # style
-    p = subparsers.add_parser("style", help="Claude风格编辑")
-    p.add_argument("name"); p.add_argument("--chapter", type=int, required=True)
-    p.add_argument("--feedback", help="人工风格反馈")
 
     # repair-derivation
     p = subparsers.add_parser("repair-derivation", help="恢复 canonical 后未完成的 derivation")
@@ -918,7 +901,6 @@ def main():
     cmds = {
         "init": cmd_init, "status": cmd_status,
         "plan": cmd_plan, "write": cmd_write,
-        "style": cmd_style,
         "new-volume": cmd_new_volume,
         "close-volume": cmd_close_volume,
         "repair-derivation": cmd_repair_derivation,

@@ -34,7 +34,6 @@
 - `ChapterPlanner`：消费 Book → Volume → Chapter 三层规划、structured memory、近期 Fact Digest、上一章结尾与 RAG evidence，生成 Chapter Plan。
 - `DeepSeekWriter`：根据 ChapterPlan 写 draft。
 - `ClaudeStylist`：风格编辑；整章 workflow 中返回文本，保存由上层统一负责。
-- `StyleChecker`：确定性风格检查。
 - `StateManager`：单次 review 分析、ReviewDecision 解析、State Delta/Change Log 解析、四份 structured-memory 文档原子提交、SQLite cache 同步、Fact Digest 确定性提取。
 - `ChapterRetrievalService`：LangGraph 路径中的确定性 query、Chroma search、evidence 格式化与 retrieval trace 生命周期。
 

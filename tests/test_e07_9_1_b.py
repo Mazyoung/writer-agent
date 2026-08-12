@@ -371,7 +371,6 @@ class TestAgentReviewActions(E0791Case):
         plan_review = patch("src.agents.author.plan_reviewer.PlanReviewer").start()
         writer = patch("src.agents.author.deepseek_writer.DeepSeekWriter").start()
         stylist = patch("src.agents.author.claude_stylist.ClaudeStylist").start()
-        checker = patch("src.agents.author.style_checker.StyleChecker").start()
         manager_class = patch(
             "src.agents.state_manager.state_manager.StateManager"
         ).start()
@@ -397,9 +396,6 @@ class TestAgentReviewActions(E0791Case):
         plan_review.return_value.review_plan.return_value = pass_decision()
         writer.return_value.write_chapter.return_value = "draft"
         stylist.return_value.edit_chapter.return_value = "agent candidate"
-        report = MagicMock(errors=0, warnings=0)
-        report.summary.return_value = "OK"
-        checker.return_value.check_all.return_value = report
         manager = manager_class.return_value
         manager.review_chapter.return_value = {
             "raw_analysis": NEEDS_REVISION, "filepath": None

@@ -9,7 +9,7 @@ from src.storage.document_formats import AtomicFact
 
 
 _RANGE = re.compile(
-    r"P?\s*0*(\d+)\s*(?:-|~|—|–)\s*P?\s*0*(\d+)",
+    r"^\s*P?\s*0*(\d+)\s*(?:-|~|—|–)\s*P?\s*0*(\d+)\s*$",
     re.IGNORECASE,
 )
 _SINGLE = re.compile(r"^\s*P?\s*0*(\d+)\s*$", re.IGNORECASE)
@@ -26,21 +26,23 @@ def parse_source_ranges(value: str) -> list[dict[str, int]]:
     if not raw:
         raise ValueError("Atomic Fact source range is empty")
     ranges: list[dict[str, int]] = []
-    position = 0
-    for match in _RANGE.finditer(raw):
-        separator = raw[position:match.start()].strip(" \t,，;；/|")
-        if separator:
+    segments = re.split(r"[,，;；/|]", raw)
+    for segment in segments:
+        segment = segment.strip()
+        if not segment:
             raise ValueError(f"Unrecognized source range address: {value}")
-        ranges.append({"start": int(match.group(1)), "end": int(match.group(2))})
-        position = match.end()
-    tail = raw[position:].strip(" \t,，;；/|")
-    if not ranges:
-        single = _SINGLE.fullmatch(raw)
+        match = _RANGE.fullmatch(segment)
+        if match:
+            ranges.append({
+                "start": int(match.group(1)),
+                "end": int(match.group(2)),
+            })
+            continue
+        single = _SINGLE.fullmatch(segment)
         if single:
             number = int(single.group(1))
-            ranges = [{"start": number, "end": number}]
-            tail = ""
-    if tail or not ranges:
+            ranges.append({"start": number, "end": number})
+            continue
         raise ValueError(f"Unrecognized source range address: {value}")
     return ranges
 

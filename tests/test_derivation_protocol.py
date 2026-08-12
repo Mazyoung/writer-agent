@@ -162,10 +162,10 @@ class TestRAGSourceRanges(DerivationProtocolCase):
             ],
             text="第一段与第三段共同支持该事实。",
         )
-        excerpts = service._expand_sources([result], context_paragraphs=0)
+        excerpts = service._expand_sources([result], context_paragraphs=1)
         self.assertEqual(
             [(item.paragraph_start, item.paragraph_end) for item in excerpts],
-            [(1, 1), (3, 3)],
+            [(1, 2), (2, 3)],
         )
         self.assertIn("[P0001]", excerpts[0].text)
         self.assertIn("[P0003]", excerpts[1].text)
