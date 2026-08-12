@@ -1558,14 +1558,7 @@ def commit_canonical_prose(state: ChapterWorkflowState) -> dict[str, Any]:
         }
     fs = FileStore(state["novel_id"], get_settings().data_dir)
     commit_started = _stage_start(state, "提交正式正文")
-    try:
-        path = fs.commit_canonical_chapter(state["chapter_index"], candidate)
-    except FileExistsError as exc:
-        return {
-            **_error_result(str(exc)),
-            "commit_success": False,
-            "commit_error": "canonical already exists",
-        }
+    path = fs.commit_canonical_chapter(state["chapter_index"], candidate)
     relative = str(path.relative_to(fs.root)).replace("\\", "/")
     commit_duration = _stage_finish(state, commit_started, "正式正文提交")
     return {

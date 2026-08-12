@@ -3,14 +3,13 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
-from typing import TypedDict
-
 from langgraph.checkpoint.sqlite import SqliteSaver
-from langgraph.graph import END, START, StateGraph
 
 from src.config.settings import get_settings
 from src.storage.file_store import FileStore
-from src.workflows.chapter_workflow import prepare_human_context
+from src.workflows.chapter_workflow import (
+    build_chapter_workflow, load_chapter_intent, prepare_human_context,
+)
 from src.workflows.retrieval_service import (
     ChapterRetrievalService, FactRetrievalTrace, RetrievalOutcome,
 )
@@ -80,25 +79,94 @@ class RetrievalServiceFailureCase(unittest.TestCase):
         self.assertEqual(result["warnings"], outcome.warnings)
 
 
-class RetrievalState(TypedDict, total=False):
-    query: str
-    retrieved: bool
+class ProductionRetrievalCheckpointCase(RetrievalServiceFailureCase):
+    def _graph_at_intent_boundary(self, mode: str, thread_id: str):
+        connection = sqlite3.connect(":memory:", check_same_thread=False)
+        self.addCleanup(connection.close)
+        saver = SqliteSaver(connection)
+        intent_spy = patch(
+            "src.workflows.chapter_workflow.load_chapter_intent",
+            wraps=load_chapter_intent,
+        ).start()
+        self.addCleanup(patch.stopall)
+        graph = build_chapter_workflow(checkpointer=saver)
+        config = {"configurable": {"thread_id": thread_id}}
+        graph.update_state(config, {
+            "novel_id": "retrieval",
+            "chapter_index": 2,
+            "chapter_mode": mode,
+            "agent_execution": "supervised",
+            "chapter_intent": "Inspect door.",
+            "current_state_text": "# Current State",
+            "generation_events": [],
+            "rag_top_k": 5,
+            "workflow_status": "CURRENT_STATE_LOADED",
+        }, as_node="load_current_state")
+        return graph, config, intent_spy
 
+    @staticmethod
+    def _successful_outcome():
+        return RetrievalOutcome(
+            trace=FactRetrievalTrace(query="query", success=True),
+        )
 
-class TestRetrievalCheckpoint(unittest.TestCase):
-    def test_continue_retries_retrieval_not_durable_query_intent(self):
-        calls = {"query": 0, "retrieval": 0}
-        fail = {"value": True}
-        def query(state):
-            calls["query"] += 1
-            return {"query": "durable"}
-        def retrieval(state):
-            calls["retrieval"] += 1
-            if fail["value"]:
-                raise TimeoutError("timeout")
-            return {"retrieved": True}
-        builder = StateGraph(RetrievalState)
-        builder.add_node("query_intent", query)
-        builder.add_node("retrieval", retrieval)
-        builder.add_edge(START, "query_intent")
-        builder.add_edge("query_intent", "retrieval")
+    def test_agent_retry_reexecutes_complete_plan_node_only(self):
+        graph, config, intent_spy = self._graph_at_intent_boundary(
+            "agent", "agent-retrieval"
+        )
+        planner = MagicMock()
+
+        def save_plan(*_args, **_kwargs):
+            self.fs.save_canonical(
+                "outlines", "chapter_plan_ch0002", "# Chapter Plan\n\nPlan."
+            )
+
+        planner.plan_chapter.side_effect = save_plan
+        with patch(
+            "src.agents.author.query_intent_builder.QueryIntentBuilder.build",
+            return_value="query",
+        ) as query, patch(
+            "src.workflows.retrieval_service.ChapterRetrievalService.retrieve",
+            side_effect=[TimeoutError("timeout"), self._successful_outcome()],
+        ) as retrieval, patch(
+            "src.agents.author.chapter_planner.ChapterPlanner",
+            return_value=planner,
+        ), patch(
+            "src.agents.author.plan_reviewer.PlanReviewer.review_plan",
+            return_value="## 审阅决策\n- **决策**: PASS\n- **主要问题**: 无",
+        ):
+            with self.assertRaises(TimeoutError):
+                graph.invoke(None, config=config)
+            failed = graph.get_state(config)
+            self.assertEqual(failed.next, ("plan_chapter",))
+
+            graph.invoke(None, config=config)
+
+        self.assertEqual(intent_spy.call_count, 1)
+        self.assertEqual(query.call_count, 2)
+        self.assertEqual(retrieval.call_count, 2)
+        self.assertEqual(planner.plan_chapter.call_count, 1)
+
+    def test_human_retry_reexecutes_complete_context_node_only(self):
+        graph, config, intent_spy = self._graph_at_intent_boundary(
+            "human", "human-retrieval"
+        )
+        with patch(
+            "src.agents.author.query_intent_builder.QueryIntentBuilder.build",
+            return_value="query",
+        ) as query, patch(
+            "src.workflows.retrieval_service.ChapterRetrievalService.retrieve",
+            side_effect=[TimeoutError("timeout"), self._successful_outcome()],
+        ) as retrieval:
+            with self.assertRaises(TimeoutError):
+                graph.invoke(None, config=config)
+            failed = graph.get_state(config)
+            self.assertEqual(failed.next, ("prepare_human_context",))
+
+            graph.invoke(None, config=config)
+
+        waiting = graph.get_state(config)
+        self.assertEqual(waiting.interrupts[0].value["type"], "human_writing")
+        self.assertEqual(intent_spy.call_count, 1)
+        self.assertEqual(query.call_count, 2)
+        self.assertEqual(retrieval.call_count, 2)

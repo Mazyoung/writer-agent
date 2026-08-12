@@ -99,11 +99,11 @@ class TestCanonicalIdentity(ClosureCase):
             self.fs.load_canonical_chapter(1), "正式正文")
         self.assertFalse(
             (self.fs.root / "states" / "chapter_0001_derived").exists())
-        duplicate = commit_canonical_prose({
-            **base, "final_author_approved": True,
-            "styled_text": "覆盖尝试",
-        })
-        self.assertEqual(duplicate["workflow_status"], "error")
+        with self.assertRaises(FileExistsError):
+            commit_canonical_prose({
+                **base, "final_author_approved": True,
+                "styled_text": "覆盖尝试",
+            })
         self.assertEqual(self.fs.load_canonical_chapter(1), "正式正文")
 
     def test_formal_history_ignores_styled_candidates(self):

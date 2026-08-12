@@ -367,6 +367,18 @@ class ChapterWorkflowRunner:
             relative_novel = path.relative_to(novels_root)
         except ValueError:
             relative_novel = None
+        canonical = self.file_store.canonical_chapter_path(
+            self.chapter_index
+        ).resolve()
+        if path == canonical:
+            relative = str(canonical.relative_to(self.file_store.root)).replace(
+                "\\", "/"
+            )
+            raise ValueError(
+                "Canonical chapter path cannot be used as a Human Candidate:\n"
+                f"{relative}\n\nThis path is managed by Writer-Agent during "
+                "Canonical Commit. Save the Candidate elsewhere and submit again."
+            )
         if relative_novel is not None and (
             not relative_novel.parts or relative_novel.parts[0] != self.novel_id
         ):

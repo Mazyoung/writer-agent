@@ -109,33 +109,28 @@ class ChapterRetrievalService:
             trace.success = False
             trace.error_message = "\u5386\u53f2\u68c0\u7d22\u9700\u8981\u975e\u7a7a Query Intent"
             return outcome
-        try:
-            if not normalized_query:
-                raise ValueError("历史检索需要非空 Query Intent")
-            trace.results = self.chroma.search(
-                novel_id=self.novel_id,
-                branch_id=branch_id,
-                query=trace.query,
-                chapter_index=chapter_index,
-                top_k=trace.top_k,
-            )
-            excerpts = self._expand_sources(trace.results)
-            # author_rag.md is the sole authority; the retired
-            # author_rag_edited.md must never override it.
-            author_markdown = self.fs.load_generated_tracking_doc("author_rag") or ""
-            author_results: list[AuthorKnowledgeResult] = []
-            if author_markdown.strip():
-                self.author_chroma.ensure_synced(
-                    self.novel_id, branch_id, author_markdown)
-                author_results = self.author_chroma.search(
-                    self.novel_id, branch_id, trace.query, trace.top_k)
-            outcome.fact_candidates = [result.to_dict() for result in trace.results]
-            outcome.source_excerpts = [excerpt.to_dict() for excerpt in excerpts]
-            outcome.author_candidates = [result.to_dict() for result in author_results]
-            outcome.evidence = self._format_evidence(
-                trace.results, excerpts, author_results)
-        except Exception as exc:
-            raise
+        trace.results = self.chroma.search(
+            novel_id=self.novel_id,
+            branch_id=branch_id,
+            query=trace.query,
+            chapter_index=chapter_index,
+            top_k=trace.top_k,
+        )
+        excerpts = self._expand_sources(trace.results)
+        # author_rag.md is the sole authority; the retired
+        # author_rag_edited.md must never override it.
+        author_markdown = self.fs.load_generated_tracking_doc("author_rag") or ""
+        author_results: list[AuthorKnowledgeResult] = []
+        if author_markdown.strip():
+            self.author_chroma.ensure_synced(
+                self.novel_id, branch_id, author_markdown)
+            author_results = self.author_chroma.search(
+                self.novel_id, branch_id, trace.query, trace.top_k)
+        outcome.fact_candidates = [result.to_dict() for result in trace.results]
+        outcome.source_excerpts = [excerpt.to_dict() for excerpt in excerpts]
+        outcome.author_candidates = [result.to_dict() for result in author_results]
+        outcome.evidence = self._format_evidence(
+            trace.results, excerpts, author_results)
 
         try:
             outcome.trace_path = str(self._save_trace(trace))

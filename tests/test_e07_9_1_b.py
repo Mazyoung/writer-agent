@@ -210,6 +210,60 @@ class HumanFlowCase(E0791Case):
             })
         self.assertFalse(self.fs.canonical_chapter_path(2).exists())
 
+    def test_canonical_path_is_rejected_before_human_resume(self):
+        self._start(CLEAN)
+        canonical = self.fs.canonical_chapter_path(2)
+        canonical.write_text("不得作为 Candidate。", encoding="utf-8")
+
+        with self.assertRaisesRegex(ValueError, "Canonical chapter path"):
+            self._submit(canonical)
+
+        waiting = self.runner.inspect()
+        self.assertEqual(waiting["next"], ["await_human_writing"])
+        self.assertEqual(waiting["interrupts"][0]["value"]["type"], "human_writing")
+        self.manager_class.return_value.review_consistency.assert_not_called()
+        self.assertNotIn("candidate_text", waiting["values"])
+
+        canonical.unlink()
+        resumed = self._submit(self._candidate_file("合法人工正文。"))
+        self.assertEqual(
+            resumed["interrupts"][0]["value"]["type"],
+            "human_final_approval",
+        )
+        self.assertEqual(resumed["candidate_text"], "合法人工正文。")
+
+    def test_commit_collision_preserves_commit_checkpoint_and_override(self):
+        self._start(WARN)
+        self._submit(self._candidate_file())
+        self.runner.resume({"action": "approve"})
+        canonical = self.fs.canonical_chapter_path(2)
+        canonical.write_text("外部竞争写入。", encoding="utf-8")
+
+        failed = self.runner.resume({"action": "confirm_override"})
+        self.assertEqual(failed["workflow_status"], "error")
+        self.assertEqual(failed["failed_runtime_stage"], "commit_canonical_prose")
+        self.assertIn("FileExistsError", failed["error"])
+        checkpoint = self.runner.inspect()
+        self.assertEqual(checkpoint["next"], ["commit_canonical_prose"])
+        self.assertEqual(checkpoint["values"]["consistency_verdict"], "WARN")
+        self.assertTrue(checkpoint["values"]["review_override_confirmed"])
+        self.assertEqual(
+            self.manager_class.return_value.review_consistency.call_count, 1
+        )
+
+        canonical.unlink()
+        self.manager_class.return_value.update_current_state.side_effect = RuntimeError(
+            "down"
+        )
+        result = self.runner.run()
+        self.assertEqual(result["workflow_status"], "DERIVATION_ERROR")
+        self.assertEqual(self.fs.load_canonical_chapter(2), "人工正文 Candidate。")
+        self.assertEqual(result["consistency_verdict"], "WARN")
+        self.assertTrue(result["review_override_confirmed"])
+        self.assertEqual(
+            self.manager_class.return_value.review_consistency.call_count, 1
+        )
+
     def test_warn_approve_requires_confirmation_and_keeps_verdict(self):
         self._start(WARN)
         final_wait = self._submit(self._candidate_file())

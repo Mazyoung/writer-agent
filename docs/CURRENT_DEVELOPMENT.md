@@ -169,7 +169,7 @@ Tests tied to the retired src.core.orchestrator, automatic revision, PASS-to-dir
 - Atomic Fact source range parser 会在边界将单个地址项中的 ASCII/全角分号复合地址拆成既有 `{start, end}` list，并对每段继续严格 fullmatch；全部 ranges 均进入 Canonical excerpt 与 ±1 paragraph historical expansion。StyleChecker、独立 style 入口及 Stylist human-feedback 残留已删除。
 - Supervised Plan/Prose Review 的 `PASS + agent_edit` 现在于统一 runner resume seam 在 `Command(resume=...)` 前强制要求非空 feedback；拒绝时 checkpoint 不消费、Graph/LLM 不执行。`NEEDS_REVISION` 仍允许空 feedback 并只使用 Reviewer issues，PASS 中 advisory/T3 notes 不替代作者修改意见。
 - Embedding batching、WAITING_HUMAN 前台交互、既有 checkpoint 恢复、chapter_sources finalization、recovery 日志、只读 status 及既有 Derivation/RAG/TokenGuard 回归通过。
-- 完整 pytest suite：269 passed，45 subtests passed，1 warning。
+- 完整 pytest suite：305 passed，53 subtests passed，1 warning。
 - 唯一 warning 是 ChromaDB 依赖的既有 `asyncio.iscoroutinefunction` DeprecationWarning；本轮未处理无关技术债。
 - 本轮未调用真实模型 API；仅完成代码整改和本地回归验证。
 
@@ -190,12 +190,13 @@ Tests tied to the retired src.core.orchestrator, automatic revision, PASS-to-dir
 - `ModelProviderClient.complete()` retries `EmptyModelResponseError` once with identical request arguments; generation-limit behavior and final-content rules are unchanged.
 - `_guard_node` converts only explicit `GenerationLimitExceeded`; other ordinary Exceptions propagate and leave the current node uncommitted. Node-returned domain ERROR remains terminal.
 - `ChapterWorkflowRunner` reports ordinary invocation exceptions at the command boundary without `update_state`, graph rewind, or thread deletion; durable `snapshot.next` remains the failed node.
-- Duplicate Canonical Commit is explicitly handled by its owning node as a deterministic domain ERROR. Post-Canonical Derivation recovery remains unchanged.
+- Preflight 对已存在 Canonical 的明确域拒绝保持不变；审批与 preflight 之间发生的 commit-time `FileExistsError` 作为 operational conflict 冒泡，保留 `next=commit_canonical_prose`。清除冲突后 continue 只重试 commit 与下游 Derivation。Post-Canonical Derivation recovery 保持不变。
 
 ## Retrieval Service Exception Boundary
 
 - ChapterRetrievalService keeps empty Query Intent as an explicit structured domain failure, but Chroma, embedding, author-RAG, source expansion, filesystem, and unknown runtime exceptions now propagate to the existing node/Runner checkpoint boundary.
 - RetrievalOutcome.warnings is non-fatal observability only. Retrieval Trace JSON is explicitly best-effort; a trace write failure records a warning and does not invalidate successful evidence.
 - Workflow consumers no longer convert every retrieval warning into terminal ERROR. `trace.success=False` remains reserved for explicit retrieval domain validation.
-- The production agent path still combines Query Intent, Retrieval, and Planning inside `plan_chapter`; this task does not split graph nodes. A SQLite durable-node test confirms that when Query Intent is a prior checkpoint, retrieval failure leaves `next=retrieval` and continue does not rebuild Query Intent.
+- 生产 Agent 图仍在单个 `plan_chapter` 节点内完成 Query Intent、Retrieval 与 Planning；失败后 `next=plan_chapter`，重试会重做该节点内 Query Intent，但不会重做 durable `load_chapter_intent`。Human 图同理在 `prepare_human_context` 内完成 Query Intent、Retrieval 与 Writing Context，失败后 `next=prepare_human_context`。测试直接使用 `build_chapter_workflow`，未拆图或伪造 `query_intent -> retrieval` 边界。
+- Human Candidate 若解析为当前 Canonical 路径，会在 `Command(resume=...)` 前拒绝；原 `human_writing` interrupt 和 checkpoint 不消费，合法替代路径仍可继续。
 - Autonomous and Supervised modes share the same provider and runner behavior. No exception or checkpoint event was added to generation events.
