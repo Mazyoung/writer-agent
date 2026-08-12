@@ -950,10 +950,10 @@ def main():
     }
     if args.command in cmds:
         try:
-            with notification_session(), command_timing_session():
+            with notification_session() as notifications, command_timing_session():
                 cmds[args.command](args)
         except ValueError as exc:
-            session = current_notification_session()
+            session = notifications
             if session is not None and args.command != "status":
                 session.error(
                     getattr(args, "name", ""),
