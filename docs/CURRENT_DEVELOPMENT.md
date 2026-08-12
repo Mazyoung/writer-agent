@@ -191,4 +191,11 @@ Tests tied to the retired src.core.orchestrator, automatic revision, PASS-to-dir
 - `_guard_node` converts only explicit `GenerationLimitExceeded`; other ordinary Exceptions propagate and leave the current node uncommitted. Node-returned domain ERROR remains terminal.
 - `ChapterWorkflowRunner` reports ordinary invocation exceptions at the command boundary without `update_state`, graph rewind, or thread deletion; durable `snapshot.next` remains the failed node.
 - Duplicate Canonical Commit is explicitly handled by its owning node as a deterministic domain ERROR. Post-Canonical Derivation recovery remains unchanged.
+
+## Retrieval Service Exception Boundary
+
+- ChapterRetrievalService keeps empty Query Intent as an explicit structured domain failure, but Chroma, embedding, author-RAG, source expansion, filesystem, and unknown runtime exceptions now propagate to the existing node/Runner checkpoint boundary.
+- RetrievalOutcome.warnings is non-fatal observability only. Retrieval Trace JSON is explicitly best-effort; a trace write failure records a warning and does not invalidate successful evidence.
+- Workflow consumers no longer convert every retrieval warning into terminal ERROR. `trace.success=False` remains reserved for explicit retrieval domain validation.
+- The production agent path still combines Query Intent, Retrieval, and Planning inside `plan_chapter`; this task does not split graph nodes. A SQLite durable-node test confirms that when Query Intent is a prior checkpoint, retrieval failure leaves `next=retrieval` and continue does not rebuild Query Intent.
 - Autonomous and Supervised modes share the same provider and runner behavior. No exception or checkpoint event was added to generation events.

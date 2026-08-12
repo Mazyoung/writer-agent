@@ -105,6 +105,10 @@ class ChapterRetrievalService:
         )
         outcome = RetrievalOutcome(trace=trace)
 
+        if not normalized_query:
+            trace.success = False
+            trace.error_message = "\u5386\u53f2\u68c0\u7d22\u9700\u8981\u975e\u7a7a Query Intent"
+            return outcome
         try:
             if not normalized_query:
                 raise ValueError("历史检索需要非空 Query Intent")
@@ -131,10 +135,7 @@ class ChapterRetrievalService:
             outcome.evidence = self._format_evidence(
                 trace.results, excerpts, author_results)
         except Exception as exc:
-            trace.success = False
-            trace.error_message = f"{type(exc).__name__}: {exc}"
-            outcome.warnings.append(
-                f"RAG retrieval failed: {trace.error_message}")
+            raise
 
         try:
             outcome.trace_path = str(self._save_trace(trace))

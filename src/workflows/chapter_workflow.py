@@ -295,7 +295,7 @@ def _generation_limit_report(
 def _guard_node(
     node: Callable[[ChapterWorkflowState], dict[str, Any]],
 ) -> Callable[[ChapterWorkflowState], dict[str, Any]]:
-    """Keep runtime/API/database/disk failures on the error path."""
+    """Convert explicit generation limits; propagate ordinary node exceptions."""
     @wraps(node)
     def guarded(state: ChapterWorkflowState) -> dict[str, Any]:
         try:
@@ -486,8 +486,6 @@ def prepare_human_context(state: ChapterWorkflowState) -> dict[str, Any]:
         return _error_result(
             "历史检索失败：" + retrieval.trace.error_message
         )
-    if retrieval.warnings:
-        return _error_result("; ".join(retrieval.warnings))
 
     evidence = retrieval.evidence.replace(
         "## Historical Atomic Facts", "## Relevant Historical Facts"
@@ -691,8 +689,6 @@ def plan_chapter(state: ChapterWorkflowState) -> dict[str, Any]:
         return _error_result(
             "历史检索失败：" + retrieval.trace.error_message
         )
-    if retrieval.warnings:
-        return _error_result("; ".join(retrieval.warnings))
 
     planner = ChapterPlanner(novel_id)
     planning_started = _stage_start(state, "生成章节规划")
