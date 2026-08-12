@@ -16,7 +16,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
 from src.config.settings import get_settings
-from src.core.model_provider import EmptyModelResponseError, GenerationLimitExceeded
+from src.core.model_provider import GenerationLimitExceeded
 from src.core.text_windows import previous_chapter_end
 from src.storage.file_store import FileStore
 from src.storage.sqlite_store import SQLiteStore
@@ -305,14 +305,9 @@ def _guard_node(
             return _error_result(
                 _generation_limit_report(state, node.__name__, exc)
             )
-        except EmptyModelResponseError:
+        except Exception:
             cancel_active_stage_timer()
             raise
-        except Exception as exc:
-            cancel_active_stage_timer()
-            return _error_result(
-                f"{node.__name__} failed: {type(exc).__name__}: {exc}"
-            )
         if result.get("workflow_status") == "error":
             result.setdefault("error", f"{node.__name__} failed")
         return result
@@ -1567,7 +1562,14 @@ def commit_canonical_prose(state: ChapterWorkflowState) -> dict[str, Any]:
         }
     fs = FileStore(state["novel_id"], get_settings().data_dir)
     commit_started = _stage_start(state, "提交正式正文")
-    path = fs.commit_canonical_chapter(state["chapter_index"], candidate)
+    try:
+        path = fs.commit_canonical_chapter(state["chapter_index"], candidate)
+    except FileExistsError as exc:
+        return {
+            **_error_result(str(exc)),
+            "commit_success": False,
+            "commit_error": "canonical already exists",
+        }
     relative = str(path.relative_to(fs.root)).replace("\\", "/")
     commit_duration = _stage_finish(state, commit_started, "正式正文提交")
     return {

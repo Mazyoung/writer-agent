@@ -179,15 +179,16 @@ Tests tied to the retired src.core.orchestrator, automatic revision, PASS-to-dir
 
 ## Autonomous Atomic Fact Protocol & Runtime Notifications
 
-- `smoke_auto` Chapter 1 ???????????? verification????????? targeted repair `atomic_fact_repair_ch0001_002_20260812_204333.md`??????? `[P...]` provenance ?? bullet??? Builder/parser/persistence ????????? repair producer ??????
-- Atomic Fact Deriver ? targeted Repair ???? ingestion boundary ?? parse?????????????????????? producer ????????????? Derivation recovery fail-closed????????????????? provenance?
-- ????? `src/observability/system_notifications.py` ? command-local Runtime UI Adapter????? WAITING_HUMAN ??? CLI terminal success/error ?????? LangGraph node?checkpoint?recovery ? generation_events?
-- Windows backend ??????? PowerShell/WinRT Toast?? Windows no-op??? backend ??? adapter ???????????? pending interrupt ?????
-- ????? `python main.py continue smoke_auto`????? Canonical ? durable Derivation recovery checkpoint?????????????
+- Smoke evidence identified a targeted Atomic Fact repair output without `[P...]` provenance; Builder parsing and persistence had not dropped the field.
+- Deriver and targeted Repair now perform one strict protocol retry and fail closed without guessing provenance.
+- System notifications remain a command-local runtime UI adapter, outside LangGraph state, checkpoints, recovery, and generation events.
+- Windows uses a non-blocking PowerShell/WinRT toast; non-Windows and backend failures are no-op.
+- Real `continue smoke_auto` is intentionally left for the next manual smoke step.
 
-## Pre-Canonical Transient Provider Recovery
+## Unified Pre-Canonical Exception Recovery
 
-- `ModelProviderClient.complete()` ? `EmptyModelResponseError` ???? messages/model/max_tokens ???????????????????`GenerationLimitExceeded` ????`reasoning_content` ??? final content fallback?
-- `_guard_node` ?? `EmptyModelResponseError` ??? live timer ??????????? durable `workflow_status=error`????????????? LangGraph terminal ERROR?
-- `ChapterWorkflowRunner` ? `graph.invoke` ??????????? command ???????????? snapshot ?? pending stage???? `update_state` ? `delete_thread`??? continue ?? `invoke(None)` ? `snapshot.next` ???
-- Autonomous ? Supervised ???? Provider/Runner ????????? generation event?Review verdict?Canonical?Derivation?RAG ??????????
+- `ModelProviderClient.complete()` retries `EmptyModelResponseError` once with identical request arguments; generation-limit behavior and final-content rules are unchanged.
+- `_guard_node` converts only explicit `GenerationLimitExceeded`; other ordinary Exceptions propagate and leave the current node uncommitted. Node-returned domain ERROR remains terminal.
+- `ChapterWorkflowRunner` reports ordinary invocation exceptions at the command boundary without `update_state`, graph rewind, or thread deletion; durable `snapshot.next` remains the failed node.
+- Duplicate Canonical Commit is explicitly handled by its owning node as a deterministic domain ERROR. Post-Canonical Derivation recovery remains unchanged.
+- Autonomous and Supervised modes share the same provider and runner behavior. No exception or checkpoint event was added to generation events.

@@ -11,7 +11,6 @@ from typing import Any
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.types import Command, StateSnapshot
 
-from src.core.model_provider import EmptyModelResponseError
 from src.config.settings import get_settings
 from src.config.runtime_policy import NovelRuntimePolicy, load_novel_runtime_policy
 from src.storage.file_store import FileStore
@@ -172,15 +171,17 @@ class ChapterWorkflowRunner:
 
     def _result_or_interrupt(self, graph, result: Any) -> dict[str, Any]:
         snapshot = graph.get_state(self.config)
+        if isinstance(result, dict) and result.get("failed_runtime_stage"):
+            return dict(result)
         if snapshot.interrupts:
             return self._waiting_result(snapshot)
         return dict(result)
 
     def _invoke_preserving_checkpoint(self, graph, value: Any) -> Any:
-        """Surface retryable provider failure without committing error state."""
+        """Report node exceptions without committing a terminal graph state."""
         try:
             return graph.invoke(value, config=self.config)
-        except EmptyModelResponseError as exc:
+        except Exception as exc:
             snapshot = graph.get_state(self.config)
             stage = str(snapshot.next[0]) if snapshot.next else "UNKNOWN"
             return {
@@ -189,9 +190,9 @@ class ChapterWorkflowRunner:
                 "workflow_status": "error",
                 "failed_runtime_stage": stage,
                 "error": (
-                    "Retryable model provider failure: "
-                    f"{type(exc).__name__}: {exc}; checkpoint remains at "
-                    f"{stage}; continue will retry only this node."
+                    "Chapter workflow stopped due to a runtime error. "
+                    f"{type(exc).__name__}: {exc}; checkpoint remains at {stage}. "
+                    "Fix the problem and run continue to retry the failed node."
                 ),
             }
 
@@ -469,9 +470,8 @@ class ChapterWorkflowRunner:
                 print("  正在执行一致性检查……")
             else:
                 print("  [LangGraph] 正在使用人工输入恢复章节工作流。")
-            result = graph.invoke(
-                Command(resume=command_value),
-                config=self.config,
+            result = self._invoke_preserving_checkpoint(
+                graph, Command(resume=command_value)
             )
             return self._result_or_interrupt(graph, result)
         finally:

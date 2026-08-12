@@ -1,8 +1,13 @@
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
+from typing import TypedDict
+
+from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.graph import END, START, StateGraph
 
 from src.config.runtime_policy import NovelRuntimePolicy
 from src.config.settings import ModelSlot
@@ -179,3 +184,121 @@ class TestCheckpointPreservingProviderFailure(unittest.TestCase):
             [call.args[0] for call in graph.invoke.call_args_list],
             [None, None],
         )
+        checkpointer.delete_thread.assert_not_called()
+        graph.update_state.assert_not_called()
+
+    def test_unknown_and_runtime_exceptions_preserve_pending_node(self):
+        for failure in (AttributeError("review bug"), TimeoutError("provider timeout")):
+            with self.subTest(failure=type(failure).__name__):
+                runner = self._runner()
+                snapshot = self._snapshot()
+                graph = MagicMock()
+                graph.get_state.return_value = snapshot
+                graph.invoke.side_effect = failure
+                checkpointer = MagicMock()
+                with patch.object(
+                    runner, "_open_graph",
+                    return_value=(MagicMock(), checkpointer, graph),
+                ), patch(
+                    "src.workflows.chapter_progress.ensure_chapter_can_start"
+                ):
+                    result = runner.run()
+
+                self.assertEqual(result["workflow_status"], "error")
+                self.assertEqual(result["failed_runtime_stage"], "review_plan")
+                self.assertIn(type(failure).__name__, result["error"])
+                self.assertEqual(snapshot.next, ["review_plan"])
+                graph.update_state.assert_not_called()
+                checkpointer.delete_thread.assert_not_called()
+
+    def test_keyboard_interrupt_is_not_converted_to_workflow_error(self):
+        runner = self._runner()
+        snapshot = self._snapshot()
+        graph = MagicMock()
+        graph.get_state.return_value = snapshot
+        graph.invoke.side_effect = KeyboardInterrupt()
+        with patch.object(
+            runner, "_open_graph",
+            return_value=(MagicMock(), MagicMock(), graph),
+        ), patch(
+            "src.workflows.chapter_progress.ensure_chapter_can_start"
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                runner.run()
+
+    def test_guard_keeps_explicit_domain_error_terminal(self):
+        @_guard_node
+        def explicit_failure(state):
+            return {"workflow_status": "error", "error": "invalid chapter state"}
+
+        result = explicit_failure({"chapter_index": 2})
+        self.assertEqual(result["workflow_status"], "error")
+        self.assertEqual(result["error"], "invalid chapter state")
+
+    def test_guard_propagates_unknown_exception(self):
+        @_guard_node
+        def broken_review(state):
+
+            raise AttributeError("missing verdict field")
+
+        with self.assertRaisesRegex(AttributeError, "missing verdict field"):
+            broken_review({"chapter_index": 2})
+class _MiniState(TypedDict, total=False):
+    completed: list[str]
+    review_ok: bool
+
+
+class TestRealLangGraphCheckpointSemantics(unittest.TestCase):
+    def test_failed_review_is_uncommitted_and_continue_skips_upstream(self):
+        calls = {"query": 0, "retrieval": 0, "plan": 0, "review": 0}
+        fail_review = {"value": True}
+
+        def query(state):
+            calls["query"] += 1
+            return {"completed": [*state.get("completed", []), "query"]}
+
+        def retrieval(state):
+            calls["retrieval"] += 1
+            return {"completed": [*state["completed"], "retrieval"]}
+
+        def plan(state):
+            calls["plan"] += 1
+            return {"completed": [*state["completed"], "plan"]}
+
+        def review(state):
+            calls["review"] += 1
+            if fail_review["value"]:
+                raise AttributeError("review parser bug")
+            return {"completed": [*state["completed"], "review"], "review_ok": True}
+
+        builder = StateGraph(_MiniState)
+        builder.add_node("query", query)
+        builder.add_node("retrieval", retrieval)
+        builder.add_node("plan", plan)
+        builder.add_node("review_plan", review)
+        builder.add_edge(START, "query")
+        builder.add_edge("query", "retrieval")
+        builder.add_edge("retrieval", "plan")
+        builder.add_edge("plan", "review_plan")
+        builder.add_edge("review_plan", END)
+
+        connection = sqlite3.connect(":memory:", check_same_thread=False)
+        self.addCleanup(connection.close)
+        graph = builder.compile(checkpointer=SqliteSaver(connection))
+        config = {"configurable": {"thread_id": "chapter:smoke_auto:0002"}}
+
+        with self.assertRaisesRegex(AttributeError, "review parser bug"):
+            graph.invoke({"completed": []}, config=config)
+        failed = graph.get_state(config)
+        self.assertEqual(tuple(failed.next), ("review_plan",))
+        self.assertEqual(failed.values["completed"], ["query", "retrieval", "plan"])
+        self.assertEqual(calls, {"query": 1, "retrieval": 1, "plan": 1, "review": 1})
+
+        fail_review["value"] = False
+        result = graph.invoke(None, config=config)
+        self.assertTrue(result["review_ok"])
+        self.assertEqual(calls, {"query": 1, "retrieval": 1, "plan": 1, "review": 2})
+
+
+if __name__ == "__main__":
+    unittest.main()
