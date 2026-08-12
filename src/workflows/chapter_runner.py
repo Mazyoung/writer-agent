@@ -11,6 +11,7 @@ from typing import Any
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.types import Command, StateSnapshot
 
+from src.core.model_provider import EmptyModelResponseError
 from src.config.settings import get_settings
 from src.config.runtime_policy import NovelRuntimePolicy, load_novel_runtime_policy
 from src.storage.file_store import FileStore
@@ -175,6 +176,25 @@ class ChapterWorkflowRunner:
             return self._waiting_result(snapshot)
         return dict(result)
 
+    def _invoke_preserving_checkpoint(self, graph, value: Any) -> Any:
+        """Surface retryable provider failure without committing error state."""
+        try:
+            return graph.invoke(value, config=self.config)
+        except EmptyModelResponseError as exc:
+            snapshot = graph.get_state(self.config)
+            stage = str(snapshot.next[0]) if snapshot.next else "UNKNOWN"
+            return {
+                "novel_id": self.novel_id,
+                "chapter_index": self.chapter_index,
+                "workflow_status": "error",
+                "failed_runtime_stage": stage,
+                "error": (
+                    "Retryable model provider failure: "
+                    f"{type(exc).__name__}: {exc}; checkpoint remains at "
+                    f"{stage}; continue will retry only this node."
+                ),
+            }
+
     def get_workflow_status(self) -> str:
         """Return durable completion first, otherwise the execution status."""
         from src.storage.chapter_completion import is_derived_ready
@@ -268,7 +288,7 @@ class ChapterWorkflowRunner:
                     + ", ".join(snapshot.next)
                 )
                 return self._result_or_interrupt(
-                    graph, graph.invoke(None, config=self.config)
+                    graph, self._invoke_preserving_checkpoint(graph, None)
                 )
             if snapshot.values:
                 terminal_status = str(
@@ -302,7 +322,7 @@ class ChapterWorkflowRunner:
             }
             print("  [LangGraph] 正在启动 checkpointed 章节工作流。")
             return self._result_or_interrupt(
-                graph, graph.invoke(initial_state, config=self.config)
+                graph, self._invoke_preserving_checkpoint(graph, initial_state)
             )
         finally:
             connection.close()

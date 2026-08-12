@@ -16,7 +16,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
 from src.config.settings import get_settings
-from src.core.model_provider import GenerationLimitExceeded
+from src.core.model_provider import EmptyModelResponseError, GenerationLimitExceeded
 from src.core.text_windows import previous_chapter_end
 from src.storage.file_store import FileStore
 from src.storage.sqlite_store import SQLiteStore
@@ -305,6 +305,9 @@ def _guard_node(
             return _error_result(
                 _generation_limit_report(state, node.__name__, exc)
             )
+        except EmptyModelResponseError:
+            cancel_active_stage_timer()
+            raise
         except Exception as exc:
             cancel_active_stage_timer()
             return _error_result(

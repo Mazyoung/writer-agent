@@ -119,8 +119,18 @@ class ModelProviderClient:
 
     def complete(self, messages: list[dict[str, str]]) -> str:
         self._ensure_client()
-        if self.slot.provider == "anthropic":
-            return self._complete_anthropic(messages)
+        for attempt in range(2):
+            try:
+                if self.slot.provider == "anthropic":
+                    return self._complete_anthropic(messages)
+                return self._complete_openai_compatible(messages)
+            except EmptyModelResponseError:
+                if attempt == 1:
+                    raise
+
+    def _complete_openai_compatible(
+        self, messages: list[dict[str, str]]
+    ) -> str:
         kwargs: dict[str, Any] = {
             "model": self.slot.model,
             "messages": messages,
