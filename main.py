@@ -55,6 +55,10 @@ from src.workflows.chapter_runner import (
 from src.workflows.continuation import NovelContinuationService
 from src.utils.command_timing import command_timing_session, current_command_timing
 
+from src.observability.system_notifications import (
+    current_notification_session,
+    notification_session,
+)
 
 def _safe_print(text: str, max_len: int = 500):
     suffix = "..." if len(text) > max_len else ""
@@ -306,10 +310,32 @@ def _print_timing_summary(result: dict) -> None:
     print(f"  {'Total':<24} {sum(totals.values()) / 1000:.1f}s")
 
 
+def _review_notification_label(payload: dict) -> str:
+    return {
+        "plan_review": "Plan Review",
+        "chapter_review": "Prose Review",
+        "final_author_approval": "Prose Review",
+        "human_final_approval": "Consistency Review",
+        "review_override_confirmation": "Review Override",
+        "human_writing": "Human Writing",
+    }.get(payload.get("type", ""), "Human Review")
+
+
+def _notify_waiting(name: str, chapter: int, result: dict) -> None:
+    session = current_notification_session()
+    if session is not None:
+        session.waiting_human(
+            name, chapter, _review_notification_label(_waiting_payload(result))
+        )
+
 def _print_chapter_result(name: str, chapter: int, result: dict) -> None:
+
     status = result.get("workflow_status", "error")
     if status == "DERIVED_READY":
         print(f"\n第 {chapter} 章已完整完成（DERIVED_READY）。")
+        session = current_notification_session()
+        if session is not None:
+            session.finished(name, chapter)
         _print_timing_summary(result)
         return
     if status == "DERIVATION_ERROR":
@@ -317,6 +343,9 @@ def _print_chapter_result(name: str, chapter: int, result: dict) -> None:
         error = result.get("derivation_error", "未知派生错误")
         print("\nDERIVATION_ERROR")
         print(f"Chapter: {chapter}")
+        session = current_notification_session()
+        if session is not None:
+            session.error(name, chapter, stage)
         print("Canonical Commit: YES")
         print(f"Failed Stage: {stage}")
         print(f"Error: {error}")
@@ -330,9 +359,17 @@ def _print_chapter_result(name: str, chapter: int, result: dict) -> None:
         print(f"\n第 {chapter} 章的 Pre-Canonical 内容已放弃，Chapter Intent 已保留。")
         return
     if status == "BLOCKED":
+        session = current_notification_session()
+        if session is not None:
+            session.error(name, chapter, "BLOCKED")
         print(f"\n{result.get('error', '当前没有合法的下一步。')}")
         return
     if status != "WAITING_HUMAN":
+        session = current_notification_session()
+        if session is not None:
+            session.error(
+                name, chapter, str(result.get("failed_derivation_stage", status))
+            )
         print(f"\n章节工作流已中止：{result.get('error', status)}")
         return
 
@@ -568,6 +605,7 @@ def _run_interactive_chapter(
             novel_id, chapter, _waiting_payload(result)
         )
         if resume_value is None:
+            _notify_waiting(novel_id, chapter, result)
             return
         if not resume_value:
             continue
@@ -912,9 +950,16 @@ def main():
     }
     if args.command in cmds:
         try:
-            with command_timing_session():
+            with notification_session(), command_timing_session():
                 cmds[args.command](args)
         except ValueError as exc:
+            session = current_notification_session()
+            if session is not None and args.command != "status":
+                session.error(
+                    getattr(args, "name", ""),
+                    int(getattr(args, "chapter", 0) or 0),
+                    args.command,
+                )
             print(f"错误：{exc}")
     else:
         parser.print_help()

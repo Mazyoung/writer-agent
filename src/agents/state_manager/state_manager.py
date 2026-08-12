@@ -222,15 +222,29 @@ class StateManager(BaseAgent):
             raise ValueError("Current State Updater returned empty Markdown")
         return {"updated_current_state": result.content, "filepath": result.filepath}
 
-    def derive_atomic_facts(self, canonical_prose: str, chapter_index: int) -> dict:
+    def derive_atomic_facts(
+        self,
+        canonical_prose: str,
+        chapter_index: int,
+        *,
+        protocol_correction: str = "",
+    ) -> dict:
         """Generate only source-addressed natural-language fact candidates."""
         if not canonical_prose.strip():
             raise ValueError("Canonical prose is required for Atomic Fact derivation")
         numbered = _number_chapter_paragraphs(canonical_prose)
         guard_planning_context(self.model_slot, {"canonical_chapter.md": canonical_prose})
         self.system_prompt = self.load_prompt("atomic_fact_deriver.txt")
+        user_message = f"## Canonical Chapter {chapter_index}\n\n{numbered}"
+        if protocol_correction:
+            user_message += (
+                "\n\n---\n\nThe previous Atomic Facts output violated the protocol. "
+                "Return the complete Atomic Facts again. Every fact must include "
+                "valid Canonical paragraph source_ranges; never omit, guess, or "
+                f"default provenance.\n\nProtocol error:\n{protocol_correction}"
+            )
         result = self.run(
-            user_message=f"## Canonical Chapter {chapter_index}\n\n{numbered}",
+            user_message=user_message,
             save_category="states",
             save_prefix=f"atomic_fact_candidates_ch{chapter_index:04d}",
         )
@@ -275,6 +289,8 @@ class StateManager(BaseAgent):
         verifier_reason: str,
         chapter_index: int,
         fact_number: int,
+        *,
+        protocol_correction: str = "",
     ) -> dict:
         """Perform one bounded repair of one failed fact; DROP is explicit."""
         payload = (
@@ -283,6 +299,13 @@ class StateManager(BaseAgent):
             f"## Canonical Source\n{canonical_source}\n\n"
             f"## Verifier Reason\n{verifier_reason or '未提供'}"
         )
+        if protocol_correction:
+            payload += (
+                "\n\n---\n\nThe previous repair output violated the Atomic Fact "
+                "protocol. Return exactly one bullet with valid Canonical paragraph "
+                "source_ranges, or DROP. Never omit, guess, or default provenance."
+                f"\n\nProtocol error:\n{protocol_correction}"
+            )
         self.system_prompt = self.load_prompt("atomic_fact_repair.txt")
         result = self.run(
             user_message=payload,

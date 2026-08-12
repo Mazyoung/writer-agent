@@ -1768,7 +1768,18 @@ def persist_fact_digest(state: ChapterWorkflowState) -> dict[str, Any]:
         raw = manager.derive_atomic_facts(
             canonical, state["chapter_index"]
         ).get("raw_analysis", "")
-        facts = parse_atomic_facts(raw, state["chapter_index"])
+        try:
+            facts = parse_atomic_facts(raw, state["chapter_index"])
+        except ValueError as protocol_error:
+            corrected_raw = manager.derive_atomic_facts(
+                canonical,
+                state["chapter_index"],
+                protocol_correction=(
+                    f"{type(protocol_error).__name__}: {protocol_error}\n\n"
+                    f"Previous raw output:\n{raw}"
+                ),
+            ).get("raw_analysis", "")
+            facts = parse_atomic_facts(corrected_raw, state["chapter_index"])
         paragraphs = chapter_paragraphs(canonical)
         numbered = "\n\n".join(
             f"[P{index:04d}] {paragraph}"
@@ -1864,7 +1875,20 @@ def _repair_failed_fact(manager: Any, fact: Any, paragraphs: list[str],
     ).get("raw_analysis", "").strip()
     if raw.upper() == "DROP":
         return None
-    repaired = parse_atomic_facts("## Atomic Facts\n\n" + raw, chapter_index)
+    try:
+        repaired = parse_atomic_facts("## Atomic Facts\n\n" + raw, chapter_index)
+    except ValueError as protocol_error:
+        raw = manager.repair_atomic_fact(
+            fact.fact_text, format_source_ranges(fact.source_ranges),
+            source_excerpt(fact, paragraphs), reason, chapter_index, fact_number,
+            protocol_correction=(
+                f"{type(protocol_error).__name__}: {protocol_error}\n\n"
+                f"Previous raw output:\n{raw}"
+            ),
+        ).get("raw_analysis", "").strip()
+        if raw.upper() == "DROP":
+            return None
+        repaired = parse_atomic_facts("## Atomic Facts\n\n" + raw, chapter_index)
     if len(repaired) != 1:
         raise ValueError("Targeted Fact Repair must return one fact or DROP")
     validate_source_ranges(repaired[0], len(paragraphs))
