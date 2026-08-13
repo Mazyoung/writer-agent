@@ -11,6 +11,7 @@ from unittest.mock import MagicMock, patch
 from src.agents.author.chapter_planner import ChapterPlanner
 from src.agents.author.query_intent_builder import QueryIntentBuilder
 from src.config.settings import ModelSlot, get_settings
+from src.config.runtime_policy import NovelRuntimePolicy
 from src.core.text_windows import trailing_complete_paragraphs
 from src.core.token_guard import estimate_tokens
 from src.storage.chapter_completion import (
@@ -205,7 +206,9 @@ class DurableCompletionTests(FocusCase):
             "inspect",
             return_value={"values": {}, "next": [], "interrupts": []},
         ):
-            decision = NovelContinuationService("focus").route()
+            decision = NovelContinuationService(
+                "focus", NovelRuntimePolicy("agent", "supervised", 0, 5)
+            ).route()
         self.assertEqual(
             {"action": "start_chapter", "chapter_index": 81},
             decision,

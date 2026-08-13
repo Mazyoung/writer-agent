@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from src.config.settings import get_settings
+from src.config.runtime_policy import NovelRuntimePolicy
 from src.storage.atomic_fact_store import FactSearchResult
 from src.storage.file_store import FileStore
 from src.workflows.chapter_runner import ChapterWorkflowRunner
@@ -183,7 +184,10 @@ class TestSemanticSeparation(ClosureCase):
         mocks["manager"].return_value.update_current_state.side_effect = RuntimeError(
             "current-state updater unavailable")
 
-        runner = ChapterWorkflowRunner("closure", 1)
+        runner = ChapterWorkflowRunner(
+            "closure", 1,
+            runtime_policy=NovelRuntimePolicy("agent", "supervised", 0, 5),
+        )
         waiting = runner.run()
         self.assertEqual(waiting["workflow_status"], "WAITING_HUMAN")
         payload = waiting["interrupts"][0]["value"]

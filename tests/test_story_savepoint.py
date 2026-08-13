@@ -18,6 +18,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 
 import main as cli
 from src.config.settings import get_settings
+from src.config.runtime_policy import NovelRuntimePolicy
 from src.storage.document_formats import (
     CurrentChapterMeta, CurrentItemState, CurrentState,
 )
@@ -357,7 +358,8 @@ class StorySavepointTests(unittest.TestCase):
                 return_value={"values": {}, "next": [], "interrupts": []},
             ):
                 decision = NovelContinuationService(
-                    self.manager.novel_id
+                    self.manager.novel_id,
+                    NovelRuntimePolicy("agent", "supervised", 0, 5),
                 ).route()
         finally:
             settings.data_dir = old_data_dir
