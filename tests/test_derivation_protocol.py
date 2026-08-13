@@ -13,7 +13,9 @@ from src.storage.atomic_fact_protocol import (
 )
 from src.storage.atomic_fact_store import FactSearchResult
 from src.storage.current_state_store import CurrentStateStore
-from src.storage.document_formats import AtomicFact, CurrentItemState, CurrentState
+from src.storage.document_formats import (
+    AtomicFact, CurrentForeshadowState, CurrentItemState, CurrentState,
+)
 from src.storage.file_store import FileStore
 from src.storage.sqlite_store import SQLiteStore
 from src.workflows.chapter_workflow import (
@@ -110,6 +112,53 @@ class TestCurrentStateRawMarkdown(DerivationProtocolCase):
         )
         self.assertEqual(parsed.items[0].acquired_chapter, 0)
 
+    def test_invalid_foreshadow_rejects_then_valid_candidate_commits(self):
+        sqlite = SQLiteStore(self.fs.root / "state.db")
+        try:
+            store = CurrentStateStore("protocol", self.fs, sqlite)
+            old_state = CurrentState(through_chapter=1)
+            old_state.chapter.chapter_index = 1
+            old = old_state.to_markdown()
+            self.fs.save_generated_tracking_doc("current_state", old)
+            candidate = CurrentState(
+                through_chapter=1,
+                foreshadows=[CurrentForeshadowState(
+                    foreshadow_id="F0001", description="门后低语",
+                    status="OPEN", planted_chapter=1,
+                    last_progress_chapter=1, resolved_chapter=0,
+                )],
+            )
+            candidate.chapter.chapter_index = 1
+            valid = candidate.to_markdown()
+            invalid = valid.replace("F0001", "FS-001")
+
+            failed = store.commit_raw(
+                store.content_hash(old), invalid, 1, "chapters/chapter_0001.md"
+            )
+            self.assertFalse(failed.success)
+            self.assertIn("Invalid foreshadow ID: FS-001", failed.error_message)
+            self.assertEqual(old, self.fs.load_generated_tracking_doc("current_state"))
+            self.assertFalse(
+                (self.fs.root / "states" / "chapter_0001_derived").exists()
+            )
+            self.assertEqual(
+                self.fs.load_canonical_chapter(1),
+                "第一段。\n\n第二段。\n\n第三段。",
+            )
+
+            recovered = store.commit_raw(
+                store.content_hash(old), valid, 1, "chapters/chapter_0001.md"
+            )
+        finally:
+            sqlite.close()
+        self.assertTrue(recovered.success, recovered.error_message)
+        persisted = CurrentState.from_markdown(
+            self.fs.load_generated_tracking_doc("current_state")
+        )
+        self.assertEqual(persisted.foreshadows[0].foreshadow_id, "F0001")
+        self.assertTrue(
+            (self.fs.root / "states" / "chapter_0001_derived").exists()
+        )
     def test_invalid_candidate_becomes_derivation_failure_without_canonical_change(self):
         valid = CurrentState(through_chapter=1)
         valid.chapter.chapter_index = 1

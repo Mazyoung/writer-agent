@@ -94,22 +94,33 @@ class TestContracts(E079Case):
         ):
             self.assertIn(marker, prompt)
 
-    def test_current_state_updater_prompt_requires_numeric_chapter_fields(self):
+    def test_current_state_updater_prompt_closes_machine_contract(self):
         prompt = (
             Path("src/config/prompts/current_state_updater.txt")
             .read_text(encoding="utf-8")
         )
         for marker in (
-            "所有 chapter-index 字段必须输出非负十进制整数",
-            "`0` 表示正式第 1 章之前",
-            "Acquired Chapter",
-            "Last Interaction Chapter",
-            "Planted Chapter",
-            "禁止在这些字段输出",
-            "正文前",
-            "未知",
+            "Schema Version` 必须存在且必须是整数 `2`",
+            "所有 chapter-index 字段",
+            "`0` 表示正式 Chapter 1 之前",
+            "F0001",
+            "FS-001",
+            "OPEN`、`RESOLVED`、`ABANDONED",
+            "Word Count 必须是非负十进制整数",
+            "空表只能保留标准 Markdown 表头和分隔行",
+            "不得改列名、增加列、删除列或调换列",
+            "新增伏笔时扫描 Previous Current State",
+            "Alive 当前是描述字段，不是程序枚举",
         ):
             self.assertIn(marker, prompt)
+        for header in (
+            "| Character | Alive | Location | Physical State | Identity | Updated Chapter |",
+            "| Character A | Character B | Type | Current State | Attitude | Last Interaction Chapter |",
+            "| Item | Holder | Status | Source | Acquired Chapter | Attributes | Notes | Updated Chapter |",
+            "| Foreshadow ID | Description | Status | Planted Chapter | Expected Resolve | Last Progress Chapter | Resolved Chapter |",
+            "| Chapter Index | Title | Word Count | Canonical Source |",
+        ):
+            self.assertIn(header, prompt)
     def test_workflow_current_state_updater_receives_no_volume_plan(self):
         self.fs.commit_canonical_chapter(1, "CANONICAL EVENT")
         for status in ("ACTIVE", "DRAFT"):

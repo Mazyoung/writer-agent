@@ -158,6 +158,100 @@ class TestCurrentStateFormat(E078Case):
                 with self.assertRaisesRegex(ValueError, "Invalid Acquired Chapter"):
                     CurrentState.from_markdown(malformed)
 
+    def test_foreshadow_id_contract(self):
+        for valid in ("F0001", "F0002", "F0123"):
+            with self.subTest(valid=valid):
+                state = CurrentState(foreshadows=[CurrentForeshadowState(
+                    foreshadow_id=valid, description=f"线索-{valid}",
+                )])
+                self.assertEqual(
+                    CurrentState.from_markdown(state.to_markdown())
+                    .foreshadows[0].foreshadow_id,
+                    valid,
+                )
+        base = CurrentState(foreshadows=[CurrentForeshadowState(
+            foreshadow_id="F0001", description="线索",
+        )]).to_markdown()
+        for invalid in ("FS-001", "F1", "FOO1", "伏笔001"):
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(ValueError, "Invalid foreshadow ID"):
+                    CurrentState.from_markdown(base.replace("F0001", invalid))
+
+    def test_foreshadow_status_contract(self):
+        for valid in ("OPEN", "RESOLVED", "ABANDONED"):
+            with self.subTest(valid=valid):
+                state = CurrentState(foreshadows=[CurrentForeshadowState(
+                    foreshadow_id="F0001", description="线索", status=valid,
+                )])
+                self.assertEqual(
+                    CurrentState.from_markdown(state.to_markdown())
+                    .foreshadows[0].status,
+                    valid,
+                )
+        base = CurrentState(foreshadows=[CurrentForeshadowState(
+            foreshadow_id="F0001", description="线索", status="OPEN",
+        )]).to_markdown()
+        for invalid in ("OPENED", "CLOSED", "DONE", "已解决"):
+            with self.subTest(invalid=invalid):
+                malformed = base.replace("| OPEN |", f"| {invalid} |")
+                with self.assertRaisesRegex(ValueError, "Invalid foreshadow status"):
+                    CurrentState.from_markdown(malformed)
+
+    def test_word_count_contract(self):
+        for valid in (0, 1, 2034):
+            with self.subTest(valid=valid):
+                state = CurrentState()
+                state.chapter.word_count = valid
+                self.assertEqual(
+                    CurrentState.from_markdown(state.to_markdown()).chapter.word_count,
+                    valid,
+                )
+        base = CurrentState().to_markdown()
+        for invalid in ("未统计", "约2000字", "2k"):
+            with self.subTest(invalid=invalid):
+                malformed = base.replace("| 0 |  | 0 |  |", f"| 0 |  | {invalid} |  |")
+                with self.assertRaisesRegex(
+                    ValueError, "Current Chapter numeric metadata is invalid"
+                ):
+                    CurrentState.from_markdown(malformed)
+
+    def test_empty_table_has_headers_only_and_rejects_free_text_tail(self):
+        text = CurrentState().to_markdown()
+        self.assertEqual(CurrentState.from_markdown(text).cultivation, [])
+        malformed = text.replace(
+            "| --- | --- | --- | --- | --- | --- |\n\n## Foreshadowing",
+            "| --- | --- | --- | --- | --- | --- |\n暂无相关内容\n\n"
+            "## Foreshadowing",
+            1,
+        )
+        with self.assertRaisesRegex(ValueError, "Invalid Current State table row"):
+            CurrentState.from_markdown(malformed)
+
+    def test_complete_schema_fails_closed_on_structural_drift(self):
+        base = CurrentState().to_markdown()
+        mutations = {
+            "missing section": base.replace("## Cultivation", "## Missing"),
+            "renamed column": base.replace("| Character | Alive |", "| Name | Alive |", 1),
+            "added column": base.replace(
+                "| Character | Alive | Location | Physical State | Identity | Updated Chapter |",
+                "| Character | Alive | Location | Physical State | Identity | Updated Chapter | Extra |",
+                1,
+            ),
+            "removed column": base.replace(
+                "| Character | Alive | Location | Physical State | Identity | Updated Chapter |",
+                "| Character | Alive | Location | Physical State | Identity |",
+                1,
+            ),
+            "reordered columns": base.replace(
+                "| Character | Alive | Location | Physical State | Identity | Updated Chapter |",
+                "| Alive | Character | Location | Physical State | Identity | Updated Chapter |",
+                1,
+            ),
+        }
+        for case, malformed in mutations.items():
+            with self.subTest(case=case):
+                with self.assertRaises(ValueError):
+                    CurrentState.from_markdown(malformed)
     def test_generated_current_state_ignores_edited_override(self):
         original = CurrentState().to_markdown()
         self.fs.save_generated_tracking_doc("current_state", original)

@@ -206,3 +206,8 @@ Tests tied to the retired src.core.orchestrator, automatic revision, PASS-to-dir
 - Current State Updater prompt 保留完整 schema 结构，并要求所有 chapter-index 字段输出非负十进制整数。`CurrentStateStore.commit_raw()` 在 hash 检查与任何正式文件写入前先执行 `CurrentState.from_markdown()`；非法候选不会覆盖旧 Current State 或创建 derived marker，Canonical 不受影响。
 - Story Savepoint 未增加兼容逻辑；legacy regression 直接通过 CurrentState parser 验证。只读 smoke_auto 审计发现该既有文档另有非 chapter-index 的历史格式漂移（Cultivation 说明行、非数字 Word Count/旧 foreshadow 表示），本轮未越界兼容，实际 savepoint create 仍需单独处理该历史数据问题。
 - 定向测试：69 passed，4 subtests passed；完整 suite：313 passed，57 subtests passed，1 个既有 ChromaDB DeprecationWarning；`git diff --check` 通过。
+## Current State Writer/Reader Contract Closure
+
+- Current State Updater prompt now mirrors the strict schema-v2 reader contract: required title/metadata/sections, exact table headers/order, key uniqueness, undirected relationship pairs, chapter-index bounds, foreshadow ID regex and status enum, integer Word Count, standard empty tables, and descriptive-vs-machine fields. New foreshadows continue the unused `F` + at least four digits sequence from Previous Current State.
+- Parser、renderer、`CurrentStateStore.commit_raw()` validation 与 Story Savepoint 生产代码均未修改；`FS-001`、非法 status、非整数 Word Count、自由文本空表及 schema drift 继续 fail closed。非法 Candidate 不覆盖旧 Current State、不创建 derived marker，Canonical 保持。
+- 定向测试：49 passed，29 subtests passed。完整 suite 在显式 Agent/Supervised 测试环境下：319 passed，82 subtests passed，1 个既有 ChromaDB DeprecationWarning；仓库根 `.env` 当前为 Human/Supervised，若不隔离会使 3 个假设 Agent 模式的既有基线测试失败。
