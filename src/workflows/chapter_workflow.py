@@ -170,6 +170,9 @@ class ChapterWorkflowState(TypedDict, total=False):
     chapter_outline: str
     extra_instructions: str
     chapter_intent: str
+    intent_status: str
+    rag_status: str
+    skip_reason: str
     chapter_mode: str
     agent_execution: str
     auto_savepoint_every: int
@@ -461,6 +464,56 @@ def _build_query_intent(
     return query_intent, final_attempt, events
 
 
+def _prepare_human_direct_write(
+    state: ChapterWorkflowState,
+) -> dict[str, Any]:
+    chapter_index = state["chapter_index"]
+    fs = FileStore(state["novel_id"], get_settings().data_dir)
+    context = "\n".join([
+        f"# Chapter {chapter_index} Writing Context",
+        "",
+        "> Human direct-write mode; no Chapter Intent or RAG retrieval was used.",
+        "",
+        "## Workflow Input Status",
+        "- Intent Status: SKIPPED",
+        "- RAG Status: SKIPPED",
+        "- Skip Reason: human_direct_write",
+        "",
+        "## Chapter Intent",
+        "Not provided (human direct write).",
+        "",
+        "## Current State",
+        state.get("current_state_text", "").strip() or "No current state content.",
+        "",
+        "## Relevant Historical Facts",
+        "- Retrieval skipped for human direct write.",
+        "",
+        "## Relevant Historical Prose",
+        "- Retrieval skipped for human direct write.",
+        "",
+        "## Author Knowledge",
+        "- Retrieval skipped for human direct write.",
+        "",
+    ])
+    path = fs.save_generated_tracking_doc(
+        f"writing_context_ch{chapter_index:04d}", context
+    )
+    return {
+        "historical_evidence": "",
+        "query_intent": "",
+        "intent_status": "SKIPPED",
+        "rag_status": "SKIPPED",
+        "skip_reason": "human_direct_write",
+        "retrieval_success": False,
+        "retrieval_result_count": 0,
+        "retrieval_trace_path": "",
+        "retrieved_facts": [],
+        "expanded_sources": [],
+        "writing_context_path": str(path.relative_to(fs.root)).replace("\\", "/"),
+        "warnings": [],
+        "workflow_status": "HUMAN_CONTEXT_READY",
+    }
+
 @_guard_node
 def prepare_human_context(state: ChapterWorkflowState) -> dict[str, Any]:
     """Retrieve bounded history and persist an author-readable generated report."""
@@ -468,9 +521,7 @@ def prepare_human_context(state: ChapterWorkflowState) -> dict[str, Any]:
 
     intent = state.get("chapter_intent", "").strip()
     if not intent:
-        return _error_result(
-            "Human Mode 执行历史检索前必须提供非空 Chapter Intent。"
-        )
+        return _prepare_human_direct_write(state)
     query_started = _stage_start(state, "生成 Query Intent")
     query_intent, query_attempt, query_events = _build_query_intent(state)
     query_duration = _stage_finish(state, query_started, "Query Intent 生成")
@@ -537,6 +588,9 @@ def prepare_human_context(state: ChapterWorkflowState) -> dict[str, Any]:
     return {
         "historical_evidence": retrieval.evidence,
         "query_intent": query_intent,
+        "intent_status": "AVAILABLE",
+        "rag_status": "COMPLETED",
+        "skip_reason": "",
         "retrieval_success": True,
         "retrieval_result_count": len(retrieval.trace.results),
         "retrieval_trace_path": retrieval.trace_path,
@@ -938,7 +992,10 @@ def render_chapter_sources(state: ChapterWorkflowState) -> str:
         f"# Chapter {chapter_index} 内容来源与生成记录", "",
         "## 1. 本章创作意图",
         f"- Human Intent: {state.get('chapter_intent', '') or '未提供'}",
-        f"- Query Intent: {state.get('query_intent', '') or '未生成'}", "",
+        f"- Query Intent: {state.get('query_intent', '') or '未生成'}",
+        f"- Intent Status: {state.get('intent_status', '') or 'AVAILABLE'}",
+        f"- RAG Status: {state.get('rag_status', '') or 'COMPLETED'}",
+        f"- Skip Reason: {state.get('skip_reason', '') or 'N/A'}", "",
         "## 2. 历史内容来源",
         f"- Retrieval Trace: `{state.get('retrieval_trace_path', '') or '未执行'}`",
     ]

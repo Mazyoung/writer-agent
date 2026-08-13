@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import sqlite3
 from typing import Any
 
 from src.config.settings import get_settings
@@ -11,6 +12,9 @@ from src.storage.chapter_completion import is_derived_ready
 from src.storage.volume_metadata import read_volume_metadata
 from src.storage.file_store import FileStore
 from src.workflows.chapter_runner import ChapterWorkflowRunner
+
+
+_TERMINAL_WORKFLOW_STATUSES = {"DERIVED_READY", "DISCARDED", "STOPPED_NON_PASS"}
 
 
 class NovelContinuationService:
@@ -36,6 +40,67 @@ class NovelContinuationService:
         indexes = self._canonical_indexes()
         return indexes[-1] if indexes else 0
 
+    def _workflow_states(self) -> dict[int, str]:
+
+        checkpoint_path = self.fs.root / "workflow_checkpoints.sqlite"
+        if not checkpoint_path.is_file():
+            return {}
+        from langgraph.checkpoint.sqlite import SqliteSaver
+
+        connection = sqlite3.connect(checkpoint_path, check_same_thread=False)
+        saver = SqliteSaver(connection)
+        states: dict[int, str] = {}
+        try:
+            for item in saver.list(None):
+                thread_id = str(
+                    item.config.get("configurable", {}).get("thread_id", "")
+                )
+                match = re.fullmatch(
+                    rf"chapter:{re.escape(self.novel_id)}:([0-9]{{4,}})", thread_id
+                )
+                if not match:
+                    continue
+                chapter = int(match.group(1))
+                if chapter in states:
+                    continue
+                status = item.checkpoint.get("channel_values", {}).get(
+                    "workflow_status", ""
+                )
+                states[chapter] = str(status).upper()
+        finally:
+            connection.close()
+        return states
+
+    def _pending_workflow_chapters(self) -> dict[int, str]:
+        return {
+            chapter: status for chapter, status in self._workflow_states().items()
+            if status not in _TERMINAL_WORKFLOW_STATUSES
+        }
+
+    def _precanonical_artifact_chapters(self) -> set[int]:
+        chapters: set[int] = set()
+        patterns = (
+            "briefs/chapter_intent_ch*.md",
+            "tracking/writing_context_ch*.md",
+            "tracking/rag_traces/retrieval_trace_ch*.json",
+            "outlines/chapter_plan_ch*.md",
+            "outlines/scene_plan_ch*.md",
+            "chapters/chapter_*_draft*.md",
+            "chapters/chapter_*_revision*.md",
+            "chapters/chapter_*_styled*.md",
+            "chapters/chapter_*_human_candidate*.md",
+            "chapters/scene_ch*.md",
+            "states/review_ch*.md",
+            "states/consistency_review_ch*.md",
+        )
+        for pattern in patterns:
+            for path in self.fs.root.glob(pattern):
+                match = re.search(r"(?:chapter_|_ch)0*([0-9]+)", path.name)
+                if match:
+                    chapters.add(int(match.group(1)))
+        return chapters
+
+
     def route(self) -> dict[str, Any]:
         latest = self._latest_canonical()
         # Creative-state completion is durable and Savepoint-restored. LangGraph
@@ -56,6 +121,29 @@ class NovelContinuationService:
                 }
 
         chapter_index = latest + 1
+        expected = latest + 1
+        stale = {
+            chapter: status
+            for chapter, status in self._pending_workflow_chapters().items()
+            if chapter > expected
+        }
+        if stale:
+            conflicts = ", ".join(str(chapter) for chapter in sorted(stale))
+            newline = chr(10)
+            message = newline.join([
+                "检测到未完成章节工作流:", "",
+                f"Workflow Chapter: {conflicts}",
+                f"Current Durable Chapter: {latest}", "",
+                "该工作流与当前正式故事状态不一致。",
+                "请执行:", "",
+                f"python main.py clean {self.novel_id}", "",
+                "清理未完成章节工作流。",
+            ])
+            return {
+                "action": "stale_workflow",
+                "chapter_index": min(stale),
+                "message": message,
+            }
         runner = ChapterWorkflowRunner(
             self.novel_id, chapter_index, runtime_policy=self.runtime_policy
         )
@@ -91,16 +179,6 @@ class NovelContinuationService:
                     "请先生成、审阅并编辑下一卷 Volume Plan。"
                 ),
             }
-        if self.runtime_policy.chapter_mode == "human":
-            return {
-                "action": "waiting_human_intent",
-                "chapter_index": chapter_index,
-                "message": (
-                    f"数据管理模式正在等待第 {chapter_index} 章 Chapter Intent。\n"
-                    f"请运行：python main.py write {self.novel_id} "
-                    f"--chapter {chapter_index} --intent <本章意图>"
-                ),
-            }
         return {"action": "start_chapter", "chapter_index": chapter_index}
 
     def continue_once(self) -> dict[str, Any]:
@@ -134,7 +212,10 @@ class NovelContinuationService:
                 self.novel_id, chapter, runtime_policy=self.runtime_policy
             ).run()
         if action == "start_chapter":
-            print(f"继续第 {chapter} 章规划……")
+            if self.runtime_policy.chapter_mode == "human":
+                print(f"继续第 {chapter} 章人工创作……")
+            else:
+                print(f"继续第 {chapter} 章规划……")
             return ChapterWorkflowRunner(
                 self.novel_id, chapter, runtime_policy=self.runtime_policy
             ).run()
@@ -142,6 +223,29 @@ class NovelContinuationService:
             "workflow_status": "BLOCKED",
             "continuation_action": action,
             "error": decision.get("message", "当前没有合法的下一步。"),
+        }
+
+    def clean(self) -> dict[str, Any]:
+        latest = self._latest_canonical()
+        pending = {
+            chapter for chapter in self._pending_workflow_chapters()
+            if chapter > latest
+        }
+        pending.update(
+            chapter for chapter in self._precanonical_artifact_chapters()
+            if chapter > latest
+        )
+        removed: dict[int, list[str]] = {}
+        for chapter in sorted(pending):
+            result = ChapterWorkflowRunner(
+                self.novel_id, chapter, runtime_policy=self.runtime_policy
+            ).clean()
+            removed[chapter] = list(result.get("removed_candidates", []))
+        return {
+            "workflow_status": "CLEANED",
+            "latest_completed_chapter": latest,
+            "cleaned_chapters": sorted(pending),
+            "removed_candidates": removed,
         }
 
     def run_to_chapter(self, target: int) -> dict[str, Any]:

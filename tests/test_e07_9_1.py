@@ -271,18 +271,34 @@ class TestHumanWorkflow(E0791Case):
         self.assertEqual(still_waiting["workflow_status"], "WAITING_HUMAN")
         self.assertEqual(still_waiting["chapter_mode"], "human")
 
-    def test_human_execution_without_intent_errors_before_retrieval(self):
+    def test_human_execution_without_intent_skips_query_and_retrieval(self):
         self.settings.chapter_mode = "human"
         with patch(
             "src.storage.current_state_store.CurrentStateStore.ensure_initialized",
             return_value=(SimpleNamespace(), "# Current State", "hash"),
         ), patch(
+            "src.agents.author.query_intent_builder.QueryIntentBuilder.build"
+        ) as query_intent, patch(
             "src.workflows.retrieval_service.ChapterRetrievalService"
         ) as retrieval:
             result = ChapterWorkflowRunner("human-mode", 3).run()
-        self.assertEqual(result["workflow_status"], "error")
-        self.assertIn("必须提供非空 Chapter Intent", result["error"])
+        self.assertEqual(result["workflow_status"], "WAITING_HUMAN")
+        self.assertEqual(result["intent_status"], "SKIPPED")
+        self.assertEqual(result["rag_status"], "SKIPPED")
+        self.assertEqual(result["skip_reason"], "human_direct_write")
+        self.assertEqual(
+            result["interrupts"][0]["value"]["type"], "human_writing"
+        )
+        query_intent.assert_not_called()
         retrieval.assert_not_called()
+        report = (
+            self.fs.root / result["writing_context_path"]
+        ).read_text(encoding="utf-8")
+        self.assertIn("Intent Status: SKIPPED", report)
+        self.assertIn("RAG Status: SKIPPED", report)
+        self.assertIn("Skip Reason: human_direct_write", report)
+        traces = self.fs.root / "tracking" / "rag_traces"
+        self.assertEqual([], list(traces.glob("*ch0003*")))
 
 
 if __name__ == "__main__":

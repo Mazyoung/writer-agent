@@ -516,6 +516,57 @@ class ProgressAndContinuationTests(SmokeClosureCase):
             {"action": "start_chapter", "chapter_index": 2}, decision
         )
 
+    def test_stale_future_workflow_is_blocked_with_clean_guidance(self):
+        service = NovelContinuationService("smoke")
+        for chapter in (1, 2):
+            service.fs.commit_canonical_chapter(chapter, f"chapter {chapter}")
+            mark_derived_ready(service.fs, chapter)
+        with patch.object(
+            service, "_pending_workflow_chapters",
+            return_value={5: "INTENT_LOADED"},
+        ), patch.object(ChapterWorkflowRunner, "inspect") as inspect:
+            decision = service.route()
+        self.assertEqual("stale_workflow", decision["action"])
+        self.assertEqual(5, decision["chapter_index"])
+        self.assertIn("Workflow Chapter: 5", decision["message"])
+        self.assertIn("Current Durable Chapter: 2", decision["message"])
+        self.assertIn("python main.py clean smoke", decision["message"])
+        inspect.assert_not_called()
+
+    def test_clean_orchestrates_all_pending_future_workflows(self):
+        service = NovelContinuationService("smoke")
+        service.fs.commit_canonical_chapter(2, "canonical two")
+        with patch.object(
+            service, "_pending_workflow_chapters",
+            return_value={3: "INTENT_LOADED", 5: "WAITING_HUMAN"},
+        ), patch.object(
+            ChapterWorkflowRunner, "clean",
+            return_value={"removed_candidates": ["temporary"]},
+        ) as clean:
+            result = service.clean()
+        self.assertEqual([3, 5], result["cleaned_chapters"])
+        self.assertEqual(2, result["latest_completed_chapter"])
+        self.assertEqual(2, clean.call_count)
+        self.assertEqual("canonical two", service.fs.load_canonical_chapter(2))
+
+    def test_clean_includes_orphaned_precanonical_artifacts(self):
+        service = NovelContinuationService("smoke")
+        service.fs.commit_canonical_chapter(2, "canonical two")
+        intent = (
+            service.fs.root / "briefs" / "chapter_intent_ch0003.md"
+        )
+        intent.parent.mkdir(parents=True, exist_ok=True)
+        intent.write_text("orphan intent", encoding="utf-8")
+        with patch.object(
+            service, "_pending_workflow_chapters", return_value={}
+        ), patch.object(
+            ChapterWorkflowRunner, "clean",
+            return_value={"removed_candidates": [str(intent)]},
+        ) as clean:
+            result = service.clean()
+        self.assertEqual([3], result["cleaned_chapters"])
+        clean.assert_called_once()
+
     def test_continue_stops_at_volume_and_human_boundaries(self):
         service = NovelContinuationService("smoke")
         completed = VOLUME_DRAFT.replace("DRAFT", "COMPLETED")
@@ -535,11 +586,11 @@ class ProgressAndContinuationTests(SmokeClosureCase):
         with patch.object(
             ChapterWorkflowRunner, "inspect",
             return_value={"values": {}, "next": [], "interrupts": []},
-        ), patch.object(ChapterWorkflowRunner, "run") as run:
-            result = service.continue_once()
-        self.assertEqual("BLOCKED", result["workflow_status"])
-        self.assertIn("Chapter Intent", result["error"])
-        run.assert_not_called()
+        ):
+            decision = service.route()
+        self.assertEqual(
+            {"action": "start_chapter", "chapter_index": 1}, decision
+        )
 
     def test_run_reuses_continue_router(self):
         self.settings.agent_execution = "autonomous"
@@ -578,6 +629,38 @@ class ProgressAndContinuationTests(SmokeClosureCase):
         self.assertTrue(intent.exists())
         self.assertTrue(all(not path.exists() for path in candidates))
 
+    def test_clean_removes_intent_candidates_and_checkpoint_only(self):
+        runner = ChapterWorkflowRunner("smoke", 3)
+        root = runner.file_store.root
+        intent = root / "briefs" / "chapter_intent_ch0003.md"
+        context = root / "tracking" / "writing_context_ch0003.md"
+        trace = (
+            root / "tracking" / "rag_traces"
+            / "retrieval_trace_ch0003_x.json"
+        )
+        for path in (intent, context, trace):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("temporary", encoding="utf-8")
+        checkpointer = MagicMock()
+        runner._open_graph = MagicMock(
+            return_value=(MagicMock(), checkpointer, MagicMock())
+        )
+        result = runner.clean()
+        self.assertEqual("CLEANED", result["workflow_status"])
+        self.assertFalse(intent.exists())
+        self.assertFalse(context.exists())
+        self.assertFalse(trace.exists())
+        checkpointer.delete_thread.assert_called_once_with(runner.thread_id)
+
+    def test_clean_rejects_canonical_chapter(self):
+        runner = ChapterWorkflowRunner("smoke", 2)
+        runner.file_store.commit_canonical_chapter(2, "canonical")
+        runner._open_graph = MagicMock(
+            return_value=(MagicMock(), MagicMock(), MagicMock())
+
+        )
+        with self.assertRaisesRegex(ValueError, "Canonical commit"):
+            runner.clean()
     def test_status_distinguishes_error_ready_and_waiting_without_writes(self):
         cases = (
             (

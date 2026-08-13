@@ -733,6 +733,22 @@ def cmd_continue(args):
     _print_chapter_result(args.name, chapter, result)
 
 
+def cmd_clean(args):
+    if not _get_novel_dir(args.name):
+        return
+    service = NovelContinuationService(args.name)
+    result = service.clean()
+    chapters = result.get("cleaned_chapters", [])
+    latest = result.get("latest_completed_chapter", 0)
+    if chapters:
+        rendered = ", ".join(str(chapter) for chapter in chapters)
+        print(f"已清理未完成章节工作流：{rendered}")
+    else:
+        print("没有需要清理的未完成章节工作流。")
+    print(f"当前 durable boundary：Chapter {latest}")
+    print(f"下一动作：python main.py continue {args.name}")
+
+
 def cmd_run(args):
     if not _get_novel_dir(args.name):
         return
@@ -888,6 +904,8 @@ def main():
     p = subparsers.add_parser("restart", help="放弃本章 Pre-Canonical 内容并重新规划")
     p.add_argument("name")
     p.add_argument("--chapter", type=int, required=True)
+    p = subparsers.add_parser("clean", help="放弃未完成章节工作流并恢复 durable boundary")
+    p.add_argument("name")
 
 
     # repair-derivation
@@ -944,6 +962,7 @@ def main():
         "repair-derivation": cmd_repair_derivation,
         "restart": cmd_restart,
         "continue": cmd_continue,
+        "clean": cmd_clean,
         "run": cmd_run,
         "rag-index": cmd_rag_index,
         "savepoint": cmd_savepoint,

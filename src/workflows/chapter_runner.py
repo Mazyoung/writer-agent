@@ -396,8 +396,10 @@ class ChapterWorkflowRunner:
             raise ValueError(f"人工正文 Candidate 文件为空: {path}")
         return text
 
-    def _discard_candidate(self, checkpointer: SqliteSaver) -> list[str]:
-        """Delete only this pre-canonical execution; preserve Chapter Intent."""
+    def _discard_candidate(
+        self, checkpointer: SqliteSaver, *, preserve_intent: bool = True
+    ) -> list[str]:
+        """Delete only one pre-canonical execution."""
         if self.file_store.canonical_chapter_path(self.chapter_index).exists():
             raise ValueError("Canonical commit 后禁止 restart")
         removed = []
@@ -416,6 +418,9 @@ class ChapterWorkflowRunner:
             f"states/derivation_ch{self.chapter_index:04d}_*.md",
             f"states/fact_digest_ch{self.chapter_index:04d}_*.md",
         ]
+        if not preserve_intent:
+            patterns.append(
+                f"briefs/chapter_intent_ch{self.chapter_index:04d}*.md")
         for pattern in patterns:
             for path in self.file_store.root.glob(pattern):
                 path.unlink()
@@ -499,6 +504,22 @@ class ChapterWorkflowRunner:
                 "workflow_status": "RESTARTED",
                 "removed_candidates": self._discard_candidate(checkpointer),
                 "chapter_intent_preserved": True,
+
+            }
+        finally:
+            connection.close()
+    @_novel_mutation_locked
+    def clean(self) -> dict[str, Any]:
+        """Abandon one unfinished pre-Canonical workflow at durable boundary."""
+        connection, checkpointer, _graph = self._open_graph()
+        try:
+            return {
+                "workflow_status": "CLEANED",
+                "chapter_index": self.chapter_index,
+                "removed_candidates": self._discard_candidate(
+                    checkpointer, preserve_intent=False
+                ),
+                "chapter_intent_preserved": False,
             }
         finally:
             connection.close()
@@ -621,3 +642,13 @@ def restart_chapter_workflow(
     return ChapterWorkflowRunner(
         novel_id, chapter_index, runtime_policy=runtime_policy
     ).restart()
+
+
+def clean_chapter_workflow(
+    novel_id: str,
+    chapter_index: int,
+    runtime_policy: NovelRuntimePolicy | None = None,
+) -> dict[str, Any]:
+    return ChapterWorkflowRunner(
+        novel_id, chapter_index, runtime_policy=runtime_policy
+    ).clean()
