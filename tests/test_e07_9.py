@@ -111,6 +111,9 @@ class TestContracts(E079Case):
             "不得改列名、增加列、删除列或调换列",
             "新增伏笔时扫描 Previous Current State",
             "Alive 当前是描述字段，不是程序枚举",
+            "Items 必须完整记录 Canonical Chapter",
+            "包括本章已在使用的既有随身工具",
+            "Acquired Chapter 填 `0`",
         ):
             self.assertIn(marker, prompt)
         for header in (

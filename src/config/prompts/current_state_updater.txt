@@ -33,6 +33,7 @@
 5. 描述字段
 - Location、Physical State、Identity、Relationship Type / Current State / Attitude、Item Holder / Status / Source / Attributes / Notes、Cultivation Stage / Distance to Next / Special Ability / Limitation、Foreshadow Description / Expected Resolve、Current Chapter Title / Canonical Source 均可使用自然语言；Holder、Title、Canonical Source 可为空。
 - 描述字段可以为空，但不得用描述文本替代任何 machine-readable 字段的整数、ID 或枚举。
+- Items 必须完整记录 Canonical Chapter 中被明确持有、携带、取用、获得、失去、损坏或状态变化的具体物品，包括本章已在使用的既有随身工具；不得只记录新获得或发生异常的物品。若 Canonical 明确物品在 Chapter 1 之前已由角色持有或一直随身使用，其 Acquired Chapter 填 `0`。
 
 【必须输出的完整表格 schema】
 
