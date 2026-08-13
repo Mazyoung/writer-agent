@@ -4,6 +4,7 @@ import unittest
 
 from src.storage.atomic_fact_protocol import (
     expand_source_ranges,
+    format_source_ranges,
     parse_atomic_facts,
     parse_source_ranges,
     source_excerpt,
@@ -12,6 +13,21 @@ from src.storage.document_formats import AtomicFact
 
 
 class CompoundSourceRangeTests(unittest.TestCase):
+    def test_formatter_uses_canonical_paragraph_addresses(self):
+        cases = (
+            ([{"start": 23, "end": 25}], "P0023-P0025"),
+            ([{"start": 13, "end": 13}], "P0013"),
+            ([
+                {"start": 4, "end": 6},
+                {"start": 13, "end": 13},
+                {"start": 20, "end": 22},
+            ], "P0004-P0006; P0013; P0020-P0022"),
+            ([], ""),
+        )
+        for ranges, expected in cases:
+            with self.subTest(ranges=ranges):
+                self.assertEqual(expected, format_source_ranges(ranges))
+
     def test_single_and_compound_addresses_canonicalize_to_range_list(self):
         cases = {
             "P0004": [{"start": 4, "end": 4}],

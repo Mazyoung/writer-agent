@@ -48,9 +48,13 @@ def parse_source_ranges(value: str) -> list[dict[str, int]]:
 
 
 def format_source_ranges(ranges: list[dict[str, int]]) -> str:
-    return "; ".join(
-        f"P{item['start']:04d}-P{item['end']:04d}" for item in ranges
-    )
+    addresses = []
+    for item in ranges:
+        start, end = item["start"], item["end"]
+        addresses.append(
+            f"P{start:04d}" if start == end else f"P{start:04d}-P{end:04d}"
+        )
+    return "; ".join(addresses)
 
 
 def parse_atomic_facts(text: str, chapter_index: int) -> list[AtomicFact]:

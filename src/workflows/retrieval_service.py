@@ -14,6 +14,7 @@ from src.storage.atomic_fact_store import (
     DEFAULT_BRANCH_ID,
     FactSearchResult,
 )
+from src.storage.atomic_fact_protocol import format_source_ranges
 from src.storage.author_rag_store import AuthorRAGStore, AuthorKnowledgeResult
 from src.storage.file_store import FileStore
 
@@ -150,10 +151,14 @@ class ChapterRetrievalService:
             return ""
         lines = ["## Historical Atomic Facts"]
         for result in results:
+            source_address = (
+                format_source_ranges(result.source_ranges)
+                if result.source_ranges else "source unavailable"
+            )
             lines.append(
                 f"- **{result.fact_id}** | Chapter {result.chapter_index} | "
-                f"{result.fact_type} | paragraphs {result.paragraph_start or '?'}"
-                f"-{result.paragraph_end or '?'} | distance={result.distance:.4f}"
+                f"{result.fact_type} | {source_address} | "
+                f"distance={result.distance:.4f}"
             )
             lines.append(f"  {result.text}")
         if excerpts:

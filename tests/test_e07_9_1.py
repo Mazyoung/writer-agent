@@ -67,11 +67,16 @@ class E0791Case(unittest.TestCase):
             fact_type="event",
             paragraph_start=3,
             paragraph_end=3,
+            source_ranges=[
+                {"start": 4, "end": 6},
+                {"start": 13, "end": 13},
+                {"start": 20, "end": 22},
+            ],
             source_path="chapters/chapter_0001.md",
             text="林默发现门锁被破坏。",
         )
         return RetrievalOutcome(
-            evidence=EVIDENCE,
+            evidence=ChapterRetrievalService._format_evidence([result], []) + EVIDENCE[EVIDENCE.index("## On-demand Historical Source Excerpts") - 1:],
             trace=FactRetrievalTrace(
                 chapter_index=2,
                 query="intent",
@@ -204,12 +209,26 @@ class TestHumanWorkflow(E0791Case):
             "## Current State",
             "## Relevant Historical Facts",
             "FACT-0001-001",
+            "P0004-P0006; P0013; P0020-P0022",
             "## Relevant Historical Prose",
             "门锁上留着新鲜划痕",
             "## Author Knowledge",
             "supplemental only",
         ):
             self.assertIn(marker, report)
+        self.assertNotIn("paragraphs ?-?", report)
+
+    def test_missing_fact_source_ranges_uses_unavailable_placeholder(self):
+        result = FactSearchResult(
+            fact_id="FACT-0001-002", chapter_index=1,
+            fact_type="event", paragraph_start=23, paragraph_end=25,
+            text="Legacy fact without formal provenance.",
+        )
+        evidence = ChapterRetrievalService._format_evidence([result], [])
+        self.assertIn("source unavailable", evidence)
+        self.assertNotIn("P0000", evidence)
+        self.assertNotIn("paragraphs 23-25", evidence)
+
 
     def test_human_execution_waits_without_agent_or_canonical_side_effects(self):
         self.settings.chapter_mode = "human"
