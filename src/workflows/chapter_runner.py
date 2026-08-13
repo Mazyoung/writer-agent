@@ -552,7 +552,10 @@ class ChapterWorkflowRunner:
                     graph, graph.invoke(None, config=self.config)
                 )
 
-            if not values.get("updated_current_state_text"):
+            failed_stage = str(values.get("failed_derivation_stage", ""))
+            if failed_stage == "current-state":
+                as_node, status = "commit_canonical_prose", "CANONICAL_COMMITTED"
+            elif not values.get("updated_current_state_text"):
                 as_node, status = "commit_canonical_prose", "CANONICAL_COMMITTED"
             elif values.get("current_state_persisted") is not True:
                 as_node, status = "derive_semantics", "SEMANTICS_DERIVED"

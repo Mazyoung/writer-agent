@@ -200,6 +200,30 @@ class TestRepair(E079Case):
         self.assertIn("已恢复到 checkpoint：persist_current_state", rendered)
 
 
+    def test_current_state_validation_failure_regenerates_candidate(self):
+        runner = ChapterWorkflowRunner("e079", 1)
+        self.fs.commit_canonical_chapter(1, "canonical")
+        values = {
+            "novel_id": "e079", "chapter_index": 1,
+            "commit_success": True, "workflow_status": "DERIVATION_ERROR",
+            "updated_current_state_text": "invalid FS-001 candidate",
+            "current_state_persisted": False,
+            "failed_derivation_stage": "current-state",
+        }
+        snapshot = SimpleNamespace(values=values, interrupts=[])
+        connection = MagicMock()
+        graph = MagicMock()
+        graph.get_state.return_value = snapshot
+        graph.invoke.return_value = {**values, "workflow_status": "SEMANTICS_DERIVED"}
+        runner._open_graph = MagicMock(return_value=(connection, MagicMock(), graph))
+
+        runner.repair_derivation()
+
+        update = graph.update_state.call_args
+        self.assertEqual(update.kwargs["as_node"], "commit_canonical_prose")
+        self.assertEqual(update.args[1]["workflow_status"], "CANONICAL_COMMITTED")
+        graph.invoke.assert_called_once_with(None, config=runner.config)
+
 class TestVolumeLifecycle(E079Case):
     def _service(self):
         service = NovelLifecycleService("e079")

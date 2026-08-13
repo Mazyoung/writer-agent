@@ -209,5 +209,6 @@ Tests tied to the retired src.core.orchestrator, automatic revision, PASS-to-dir
 ## Current State Writer/Reader Contract Closure
 
 - Current State Updater prompt now mirrors the strict schema-v2 reader contract: required title/metadata/sections, exact table headers/order, key uniqueness, undirected relationship pairs, chapter-index bounds, foreshadow ID regex and status enum, integer Word Count, standard empty tables, and descriptive-vs-machine fields. New foreshadows continue the unused `F` + at least four digits sequence from Previous Current State.
+- `failed_derivation_stage=current-state` 现在明确回到 `derive_semantics` 重新调用 Updater，不再复用已被严格 Parser 拒绝的旧候选；其他 Derivation stage 的恢复映射不变。
 - Parser、renderer、`CurrentStateStore.commit_raw()` validation 与 Story Savepoint 生产代码均未修改；`FS-001`、非法 status、非整数 Word Count、自由文本空表及 schema drift 继续 fail closed。非法 Candidate 不覆盖旧 Current State、不创建 derived marker，Canonical 保持。
-- 定向测试：49 passed，29 subtests passed。完整 suite 在显式 Agent/Supervised 测试环境下：319 passed，82 subtests passed，1 个既有 ChromaDB DeprecationWarning；仓库根 `.env` 当前为 Human/Supervised，若不隔离会使 3 个假设 Agent 模式的既有基线测试失败。
+- 定向测试：50 passed，29 subtests passed。完整 suite 在显式 Agent/Supervised 测试环境下：320 passed，82 subtests passed，1 个既有 ChromaDB DeprecationWarning；仓库根 `.env` 当前为 Human/Supervised，若不隔离会使 3 个假设 Agent 模式的既有基线测试失败。
