@@ -14,9 +14,9 @@ Writer-Agent 是一个面向长篇小说创作的本地 Agent 工作流。它不
 
 | 使用方式 | 谁规划 | 谁写正文 | 系统主要负责 | 推荐用途 |
 |---|---|---|---|---|
-| 自主创作 | Agent | Agent | RAG、规划、写作、审阅、状态维护、自动推进 | 批量测试、低人工干预创作 |
+| 自主创作 | Agent | Agent | RAG、规划、写作、审阅、状态维护、自动推进 | 批量生成、低人工干预创作 |
 | 监督创作 | Agent | Agent | 同上，但在关键 Review 节点等待作者 | 日常精细创作 |
-| 数据管理 | 作者 | 作者 | 可选历史检索、连续性检查、正式提交、Current State、长期记忆、Savepoint | 作者自己写正文，只让系统管理小说数据 |
+| 数据管理 | 作者 | 作者 | 可选历史检索、连续性检查、正式提交、Current State、长期记忆、Savepoint | 作者自己写正文，只让系统管理历史 |
 
 所有模式最终都维护同一套正式故事历史：
 
@@ -78,31 +78,31 @@ SYSTEM_PROVIDER=deepseek
 SYSTEM_API_KEY=
 SYSTEM_BASE_URL=https://api.deepseek.com
 SYSTEM_MODEL=
-SYSTEM_MAX_TOKENS=16384
+SYSTEM_MAX_TOKENS=163840
 
-ARCHITECT_PROVIDER=
+ARCHITECT_PROVIDER=（默认均使用系统配置）
 ARCHITECT_API_KEY=
 ARCHITECT_BASE_URL=
 ARCHITECT_MODEL=
-ARCHITECT_MAX_TOKENS=32768
+ARCHITECT_MAX_TOKENS=163840
 
 PLAN_PROVIDER=
 PLAN_API_KEY=
 PLAN_BASE_URL=
 PLAN_MODEL=
-PLAN_MAX_TOKENS=16384
+PLAN_MAX_TOKENS=163840
 
-QUERY_INTENT_PROVIDER=
+QUERY_INTENT_PROVIDER==（默认使用plan配置）
 QUERY_INTENT_API_KEY=
 QUERY_INTENT_BASE_URL=
 QUERY_INTENT_MODEL=
-QUERY_INTENT_MAX_TOKENS=
+QUERY_INTENT_MAX_TOKENS
 
 WRITE_PROVIDER=
 WRITE_API_KEY=
 WRITE_BASE_URL=
 WRITE_MODEL=
-WRITE_MAX_TOKENS=32768
+WRITE_MAX_TOKENS=163840
 ```
 
 ### 2.4 Embedding
@@ -242,7 +242,7 @@ skip_reason=human_direct_write
 
 ---
 
-## 5. 最常用命令
+## 5. 命令
 
 | 命令 | 作用 | 是否推进故事 |
 |---|---|---|
@@ -251,7 +251,7 @@ skip_reason=human_direct_write
 | `python main.py write <novel> --chapter N` | 开始 / 恢复指定章节 | 是 |
 | `python main.py write <novel> --chapter N --intent "..."` | 带作者创作意图开始章节 | 是 |
 | `python main.py restart <novel> --chapter N` | 放弃当前章 Pre-Canonical 工作并重做，保留 Intent | 是 |
-| `python main.py clean <novel>` | 放弃所有当前未完成章节 workflow，恢复 durable boundary | 是 |
+| `python main.py clean <novel>` | 放弃当前未完成章节 workflow，恢复 durable boundary | 是 |
 | `python main.py repair-derivation <novel> --chapter N` | 修复 Canonical 后未完成的派生 | 是 |
 | `python main.py run <novel> --to-chapter N` | Autonomous 连续运行到目标章节 | 是 |
 | `python main.py rag-index <novel>` | 补齐 RAG 索引 | 维护 |
@@ -259,7 +259,7 @@ skip_reason=human_direct_write
 | `python main.py close-volume <novel>` | 人工关闭当前卷 | 是 |
 | `python main.py new-volume <novel>` | 生成下一卷 DRAFT | 是 |
 
-### 最重要的区别
+### 常用命令
 
 ```text
 status   = 只看
@@ -506,7 +506,7 @@ Query Intent 严重异常达到 10000 字时会自动尝试压缩一次；连续
 
 ## 12. Token Warning
 
-项目不会为了 Token 预算静默截断 World Setting、Book Plan、Volume Plan、Current State、Human Intent 等正式上下文。
+项目不会为了 Token 预算截断 World Setting、Book Plan、Volume Plan、Current State、Human Intent 等正式上下文。
 
 当前 Token Guard 的行为是：
 
@@ -519,7 +519,7 @@ Query Intent 严重异常达到 10000 字时会自动尝试压缩一次；连续
 → 继续把完整上下文交给远端模型 API
 ```
 
-因此 `*_MAX_TOKENS` 当前更接近上下文容量提示 / 诊断基准，不是本地硬拒绝线。
+因此 `*_MAX_TOKENS` 当前更接近上下文容量提示 / 诊断基准，不是硬拒绝线。
 
 ---
 
@@ -642,4 +642,4 @@ python main.py clean <novel>
 - Story Savepoint 的完整快照与事务式恢复；
 - generation events 与 chapter_sources；
 - 测试架构与 Real Smoke；
-- 当前技术债与 Chapter-level Timeline Rewind Future Design。
+- 当前开发进度与 Chapter-level Timeline Rewind Future Design。
