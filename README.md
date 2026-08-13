@@ -5,6 +5,8 @@
 > 当前文档基线：`f5d1697` 及 2026-08-13 Real Smoke 验收结果。
 >
 > 需要了解系统架构、状态机、RAG、Canonical/Derivation、Savepoint 内部实现或继续开发时，请阅读：[开发技术文档](docs/DEVELOPER_GUIDE.md)。
+>
+> 想直接查看一套完成闭环的可读目录，请参考：[smoke_final_demo](examples/smoke_final_demo/)。
 
 ---
 
@@ -630,6 +632,8 @@ python main.py clean <novel>
 需要继续开发或理解内部实现时，请阅读：
 
 **[Writer-Agent 开发技术文档](docs/DEVELOPER_GUIDE.md)**
+
+配套数据样例：[smoke_final_demo](examples/smoke_final_demo/)。它展示 Human Intent + RAG、Human Direct Write 与 Agent 生成路径，但不是可加载的 Story Savepoint。
 
 其中包括：
 

@@ -1,55 +1,48 @@
-# Writer-Agent Project Instructions
+# Writer-Agent AI 开发入口
 
-## Stable Architecture Rules
+## 1. Source of Truth
 
-- Current source code and tests are the highest sources of truth; verify runtime paths before trusting documentation.
-- LangGraph owns only the single-chapter production workflow.
-- Novel management, volume management, and broad rollback do not belong in the Chapter Graph.
-- Canonical planning hierarchy is Book Plan → Volume Plan → Chapter Plan → execution.
-- `plot_structure.md` is legacy data and must not be restored as canonical planning state.
-- Normal Generate must never overwrite a completed chapter.
-- Review `UNKNOWN` or any decision parse failure must fail closed and must never reach commit.
-- Runtime, API, and database errors must remain errors; never disguise them as `NEEDS_REVISION`.
-- `PASS` is required for canonical commit; commit failure must block Fact Digest and RAG.
-- Resume restores the original checkpointed execution; it is not a new Generate operation.
-- Canonical Markdown/story state outranks derived SQLite, Chroma, and diagnostic state.
-- Planning changes must respect L1/L2/L3 human-authority boundaries; never silently alter higher-level plans.
+- 事实来源优先级：生产代码 > 自动测试 > `docs/DEVELOPER_GUIDE.md` > `README.md`。
+- `README.md` 是使用者手册；`docs/DEVELOPER_GUIDE.md` 是当前生产架构与维护规范。
+- `examples/smoke_final_demo/` 是通过 Real Smoke 验收的只读参考样例，不是可加载 Savepoint。
+- 文档与实现冲突时，以代码和测试为准，并在同一变更中修正文档。
 
-## Engineering Rules
+## 2. Stable Architecture Invariants
 
-- Make the smallest coherent change and preserve existing correct behavior.
-- Do not add Agents, LLM calls, architectural layers, or future-stage behavior without an explicit requirement.
-- Do not perform unrelated refactors or silently change canonical state.
-- Verify changes at a level appropriate to their scope, and state clearly what was or was not tested; do not default to expanding the test suite or creating a separate Test Alignment stage.
-- `docs/E07_REMAINING_PLAN.md` is the authoritative roadmap for current E07 development; the old migration guide is historical migration reference only.
-- Use the Conda `writer` environment for Python; do not use the repository-local `venv`.
-- Do not scan the entire repository by default; inspect only files required by the current task.
-- 本项目的开发文档和用户可见输出应尽量使用中文，包括 CLI 输出、日志提示和 Git 提交信息；代码标识符、协议字段、第三方原文及必须保持兼容的既有内容除外。
+- LangGraph 只负责单章生产；小说管理、卷管理与 Story Savepoint 不进入 Chapter Graph。
+- 正式规划层级为 Book Plan → Volume Plan → Chapter Plan → execution。
+- Canonical Markdown / durable story state 高于 SQLite、Chroma、checkpoint 与诊断数据。
+- 普通生产流程不得覆盖已 Canonical 的章节；Canonical 后失败应恢复 Derivation，不得重写正文。
+- 正常提交要求 Review `PASS`（Human Mode 为 Consistency `CLEAN`）并获得 Final Human Approval。
+- 非 `PASS` / `WARN` 只能经显式 Review Override 与 `confirm_override` 授权提交。
+- `UNKNOWN`、解析失败与运行时错误一律 fail closed，不得伪装成可接受 verdict。
+- Review、Canonical、Derivation、supervised / autonomous 的职责边界不得静默改变。
+- Agent Mode 要求 Query Intent 与 RAG；Human Mode 可无 Intent 直接写作，但必须记录 Intent/RAG `SKIPPED`。
+- `continue` 只推进合法状态；`restart` 重做当前章并保留 Intent；`clean` 放弃未完成章；Savepoint Load 恢复整个小说世界。
 
-## Current Project Snapshot
+## 3. Engineering Rules
 
-- 当前已完成 E07 Story Savepoint、自动 Savepoint、四模型槽位、小说级 Embedding 配置，以及 Agent/Human 两条章节创作链。
-- 章节正式边界为：明确 Review 结果 → 人工批准或显式 Override → Canonical Commit → Derivation → `DERIVED_READY`。
-- Book Plan / Volume Plan 的完整原始 Markdown 是正式下游上下文；parser 只读取机器元数据，不判断自然语言规划质量或完整性。
-- Volume Plan 校验只保留非空、卷号、status enum/lifecycle 等机器约束，不再用字段提取结果或关键词判断“内容缺失/写成章纲”。
-- Plan/Prose/Consistency Review 的显式 verdict 是唯一语义结论；Python 不再根据 major/minor/T1/T2/T3 或自然语言正文二次改写 verdict。缺失或非法 verdict 仍 fail closed。
-- StyleChecker 及独立手动 style 入口已删除；正式链保持 Writer → Stylist → Prose Reviewer，Review 后修改只由 Writer revision 处理。
-- Chapter State 已包含 checkpointed、幂等的 `generation_events`；`chapter_sources.md` 统一记录 Intent、Query Intent、Retrieval 来源、正式上下文、Review/Edit/Regenerate/Override、Canonical 和 Derivation/recovery，并在 `DERIVED_READY` 后按 durable checkpoint 幂等刷新最终状态，不扫描 Markdown 猜测事实。
-- Current State 是 Human/LLM Raw Markdown，由独立 SYSTEM Updater 基于 Previous Current State + Canonical 生成完整文档；StateDelta/semantic parser 已退出正式 Current State 路径。
-- Atomic Facts 新协议仅含 source ranges + 自包含 fact_text；Python 校验地址并生成 deterministic metadata，独立 batch Verifier 与有限 corrective pass 后才进入 Chroma。API Embedding 由 Runtime 按最多 10 条分批，全部成功后才替换章节旧索引；write/continue 自动恢复首个未完成 Derivation stage。
-- 小说级运行策略保存在 `data/novels/<novel_id>/.env`，仅允许 Chapter Mode、Agent Execution、Auto Savepoint 与 RAG Top-K；命令启动时形成只读 snapshot，不污染全局环境，已开始章节仍以 checkpoint 冻结模式为准。
-- 主要 Chapter Workflow 阶段使用 `perf_counter()` 计时并把 `duration_ms` 写入 `generation_events`；CLI 汇总节点实际耗时，人工 checkpoint 外部等待不计入。
-- TTY 阶段计时由单一 daemon UI thread 原地刷新，非 TTY 安全降级；Prose Agent Edit 使用 WRITE slot，完整接收 Reviewer issues，并按 MUST FIX 与局部修改约束执行后重新 Review。
-- Proposal 已不再承诺生成“前50章章纲”；Book Plan 初始化输出的 `vv1` 已修复为 `v1`。
-- 2026-08-11 最近一次完整测试结果：`258 passed, 31 subtests passed, 1 warning`；唯一 warning 是未处理的 ChromaDB 依赖弃用提示，无测试失败。
-- 当前详细状态、验证记录和 `Next Task` 仍以 `docs/CURRENT_DEVELOPMENT.md` 为准；不要在本文件继续累积阶段历史。
+- 做满足需求的最小一致变更，不新增未要求的 Agent、LLM 调用、架构层或未来功能。
+- 不做无关重构，不迁移已退出的旧规则，不静默改动正式故事数据。
+- Runtime、Provider、API、数据库错误保持技术错误语义；可恢复失败不得消费 durable checkpoint。
+- 使用 Conda `writer` 环境；不要使用仓库内 `venv`。
+- 用户可见输出、开发文档和提交信息优先使用中文；协议字段、标识符和兼容文本除外。
+- 测试强度与变更风险匹配；提交前至少运行相关测试、`git diff --check`，任务要求时运行全量测试。
+- 保留用户已有改动，先检查 `git status`，不要使用破坏性 Git 命令。
 
-## Continuing Development
+## 4. Current Documentation Entry
 
-1. Read `CLAUDE.md`.
-2. Read `docs/CURRENT_DEVELOPMENT.md`.
-3. Run `git status`.
-4. Run `git log -5 --oneline`.
-5. Read only files directly relevant to `Next Task`.
+- 使用与运维：[`README.md`](README.md)
+- 架构、状态机、恢复与测试：[`docs/DEVELOPER_GUIDE.md`](docs/DEVELOPER_GUIDE.md)
+- 可读数据样例：[`examples/smoke_final_demo/`](examples/smoke_final_demo/)
 
-Do not scan the entire repository unless necessary. After each development stage, update `docs/CURRENT_DEVELOPMENT.md`; only refresh the compact snapshot above when the current architecture or handoff baseline materially changes.
+不要以阶段报告、历史迁移文档、固定测试数量或旧提交快照作为当前规范。
+
+## 5. Continuing Development Checklist
+
+1. 阅读本文件及与任务相关的 `README.md` / `docs/DEVELOPER_GUIDE.md` 章节。
+2. 运行 `git status --short --branch` 与 `git log -5 --oneline`。
+3. 定位生产入口、状态协议和现有测试，只读取任务相关文件。
+4. 先补或更新能证明目标语义的测试，再做最小实现。
+5. 运行定向测试、全量测试（如任务要求）和 `git diff --check`。
+6. 检查最终 diff 未引入架构扩张、正式数据变更或过期文档引用。
