@@ -13,10 +13,12 @@ from src.storage.atomic_fact_protocol import (
 )
 from src.storage.atomic_fact_store import FactSearchResult
 from src.storage.current_state_store import CurrentStateStore
-from src.storage.document_formats import AtomicFact
+from src.storage.document_formats import AtomicFact, CurrentItemState, CurrentState
 from src.storage.file_store import FileStore
 from src.storage.sqlite_store import SQLiteStore
-from src.workflows.chapter_workflow import _derived_failure, verify_atomic_facts
+from src.workflows.chapter_workflow import (
+    _derived_failure, persist_current_state, verify_atomic_facts,
+)
 from src.workflows.retrieval_service import ChapterRetrievalService
 
 
@@ -42,7 +44,7 @@ class DerivationProtocolCase(unittest.TestCase):
 
 
 class TestCurrentStateRawMarkdown(DerivationProtocolCase):
-    def test_arbitrary_nonempty_markdown_is_saved_without_semantic_parse(self):
+    def test_non_schema_markdown_is_rejected_before_persistence(self):
         sqlite = SQLiteStore(self.fs.root / "state.db")
         try:
             store = CurrentStateStore("protocol", self.fs, sqlite)
@@ -53,8 +55,85 @@ class TestCurrentStateRawMarkdown(DerivationProtocolCase):
             )
         finally:
             sqlite.close()
-        self.assertTrue(result.success)
-        self.assertIn("自由标题", self.fs.load_generated_tracking_doc("current_state"))
+        self.assertFalse(result.success)
+        self.assertIn("Invalid Updated Current State", result.error_message)
+        self.assertEqual(old, self.fs.load_generated_tracking_doc("current_state"))
+
+
+    def test_invalid_candidate_does_not_replace_valid_current_state(self):
+        sqlite = SQLiteStore(self.fs.root / "state.db")
+        try:
+            store = CurrentStateStore("protocol", self.fs, sqlite)
+            old_state = CurrentState(
+                through_chapter=1,
+                items=[CurrentItemState(
+                    name="旧钥匙", acquired_chapter=0, updated_chapter=1,
+                )],
+            )
+            old_state.chapter.chapter_index = 1
+            old = old_state.to_markdown()
+            self.fs.save_generated_tracking_doc("current_state", old)
+            invalid = old.replace(
+                "| 旧钥匙 |  |  |  | 0 |",
+                "| 旧钥匙 |  |  |  | 正文前 |",
+            )
+            result = store.commit_raw(
+                store.content_hash(old), invalid, 1, "chapters/chapter_0001.md"
+            )
+        finally:
+            sqlite.close()
+        self.assertFalse(result.success)
+        self.assertIn("Invalid Acquired Chapter", result.error_message)
+        self.assertEqual(old, self.fs.load_generated_tracking_doc("current_state"))
+        self.assertFalse((self.fs.root / "states" / "chapter_0001_derived").exists())
+
+    def test_valid_zero_candidate_persists_and_workflow_can_continue(self):
+        sqlite = SQLiteStore(self.fs.root / "state.db")
+        try:
+            store = CurrentStateStore("protocol", self.fs, sqlite)
+            old, digest = store.ensure_raw_initialized()
+            valid = CurrentState(
+                through_chapter=1,
+                items=[CurrentItemState(
+                    name="旧钥匙", acquired_chapter=0, updated_chapter=1,
+                )],
+            )
+            valid.chapter.chapter_index = 1
+            result = store.commit_raw(
+                digest, valid.to_markdown(), 1, "chapters/chapter_0001.md"
+            )
+        finally:
+            sqlite.close()
+        self.assertTrue(result.success, result.error_message)
+        parsed = CurrentState.from_markdown(
+            self.fs.load_generated_tracking_doc("current_state")
+        )
+        self.assertEqual(parsed.items[0].acquired_chapter, 0)
+
+    def test_invalid_candidate_becomes_derivation_failure_without_canonical_change(self):
+        valid = CurrentState(through_chapter=1)
+        valid.chapter.chapter_index = 1
+        old = valid.to_markdown()
+        self.fs.save_generated_tracking_doc("current_state", old)
+        invalid = valid.to_markdown().replace(
+            "- **Through Chapter**: 1", "- **Through Chapter**: 正文前"
+        )
+        result = persist_current_state({
+            "novel_id": "protocol",
+            "chapter_index": 1,
+            "current_state_sha256": CurrentStateStore.content_hash(old),
+            "updated_current_state_text": invalid,
+            "canonical_source_path": "chapters/chapter_0001.md",
+            "generation_events": [],
+            "warnings": [],
+        })
+        self.assertEqual(result["workflow_status"], "DERIVATION_ERROR")
+        self.assertEqual(result["failed_derivation_stage"], "current-state")
+        self.assertEqual(old, self.fs.load_generated_tracking_doc("current_state"))
+        self.assertEqual(
+            self.fs.load_canonical_chapter(1),
+            "第一段。\n\n第二段。\n\n第三段。",
+        )
 
 
 class TestAtomicFactProtocol(unittest.TestCase):

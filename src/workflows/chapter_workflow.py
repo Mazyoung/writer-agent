@@ -1691,7 +1691,7 @@ def derive_semantics(state: ChapterWorkflowState) -> dict[str, Any]:
 
 
 def persist_current_state(state: ChapterWorkflowState) -> dict[str, Any]:
-    """Atomically save checkpointed raw Markdown without semantic parsing."""
+    """Parse, validate, then atomically save checkpointed Current State."""
     from src.storage.current_state_store import CurrentStateStore
 
     fs = FileStore(state["novel_id"], get_settings().data_dir)

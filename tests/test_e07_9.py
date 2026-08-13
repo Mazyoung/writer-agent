@@ -94,6 +94,22 @@ class TestContracts(E079Case):
         ):
             self.assertIn(marker, prompt)
 
+    def test_current_state_updater_prompt_requires_numeric_chapter_fields(self):
+        prompt = (
+            Path("src/config/prompts/current_state_updater.txt")
+            .read_text(encoding="utf-8")
+        )
+        for marker in (
+            "所有 chapter-index 字段必须输出非负十进制整数",
+            "`0` 表示正式第 1 章之前",
+            "Acquired Chapter",
+            "Last Interaction Chapter",
+            "Planted Chapter",
+            "禁止在这些字段输出",
+            "正文前",
+            "未知",
+        ):
+            self.assertIn(marker, prompt)
     def test_workflow_current_state_updater_receives_no_volume_plan(self):
         self.fs.commit_canonical_chapter(1, "CANONICAL EVENT")
         for status in ("ACTIVE", "DRAFT"):

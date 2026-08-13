@@ -18,7 +18,9 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 
 import main as cli
 from src.config.settings import get_settings
-from src.storage.document_formats import CurrentChapterMeta, CurrentState
+from src.storage.document_formats import (
+    CurrentChapterMeta, CurrentItemState, CurrentState,
+)
 from src.storage.chapter_completion import mark_derived_ready
 from src.storage.story_savepoint import (
     NovelOperationLock,
@@ -197,6 +199,33 @@ class StorySavepointTests(unittest.TestCase):
         self.assertFalse(lock_path.exists())
         with NovelOperationLock(self.manager.root):
             self.assertTrue(lock_path.exists())
+
+    def test_create_accepts_legacy_prestory_via_current_state_parser(self):
+        current = self.manager.root / "tracking" / "current_state.md"
+        state = CurrentState(
+            through_chapter=1,
+            items=[CurrentItemState(
+                name="旧钥匙", acquired_chapter=0, updated_chapter=1,
+            )],
+            chapter=CurrentChapterMeta(
+                chapter_index=1,
+                title="world-one",
+                word_count=100,
+                canonical_source_path="chapters/chapter_0001.md",
+            ),
+        )
+        legacy = state.to_markdown().replace(
+            "| 旧钥匙 |  |  |  | 0 |",
+            "| 旧钥匙 |  |  |  | 前史 |",
+        )
+        current.write_text(legacy, encoding="utf-8")
+
+        manifest = self.manager.create()
+
+        self.assertEqual(manifest["status"], "READY")
+        self.assertEqual(
+            CurrentState.from_markdown(legacy).items[0].acquired_chapter, 0
+        )
 
     def test_create_manifest_and_verify_include_sqlite_and_embeddings(self):
         manifest = self.manager.create()

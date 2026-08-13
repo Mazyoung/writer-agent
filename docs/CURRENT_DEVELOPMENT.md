@@ -200,3 +200,9 @@ Tests tied to the retired src.core.orchestrator, automatic revision, PASS-to-dir
 - 生产 Agent 图仍在单个 `plan_chapter` 节点内完成 Query Intent、Retrieval 与 Planning；失败后 `next=plan_chapter`，重试会重做该节点内 Query Intent，但不会重做 durable `load_chapter_intent`。Human 图同理在 `prepare_human_context` 内完成 Query Intent、Retrieval 与 Writing Context，失败后 `next=prepare_human_context`。测试直接使用 `build_chapter_workflow`，未拆图或伪造 `query_intent -> retrieval` 边界。
 - Human Candidate 若解析为当前 Canonical 路径，会在 `Command(resume=...)` 前拒绝；原 `human_writing` interrupt 和 checkpoint 不消费，合法替代路径仍可继续。
 - Autonomous and Supervised modes share the same provider and runner behavior. No exception or checkpoint event was added to generation events.
+## Current State Chapter-Index Contract
+
+- CurrentState 的所有 chapter-index 字段统一为非负整数；`0` 表示正式 Chapter 1 之前。Parser 保留现有 `第N章` / `Chapter N`，并仅将精确 legacy 值 `前史` 映射为 0；其他自然语言章节描述 fail closed。
+- Current State Updater prompt 保留完整 schema 结构，并要求所有 chapter-index 字段输出非负十进制整数。`CurrentStateStore.commit_raw()` 在 hash 检查与任何正式文件写入前先执行 `CurrentState.from_markdown()`；非法候选不会覆盖旧 Current State 或创建 derived marker，Canonical 不受影响。
+- Story Savepoint 未增加兼容逻辑；legacy regression 直接通过 CurrentState parser 验证。只读 smoke_auto 审计发现该既有文档另有非 chapter-index 的历史格式漂移（Cultivation 说明行、非数字 Word Count/旧 foreshadow 表示），本轮未越界兼容，实际 savepoint create 仍需单独处理该历史数据问题。
+- 定向测试：69 passed，4 subtests passed；完整 suite：313 passed，57 subtests passed，1 个既有 ChromaDB DeprecationWarning；`git diff --check` 通过。

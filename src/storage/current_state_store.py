@@ -200,6 +200,11 @@ class CurrentStateStore:
             result.error_message = "Updated Current State is empty"
             return result
         candidate += "\n"
+        try:
+            CurrentState.from_markdown(candidate)
+        except ValueError as exc:
+            result.error_message = f"Invalid Updated Current State: {exc}"
+            return result
         previous = self.load_text()
         current_sha256 = self.content_hash(previous) if previous else ""
         candidate_sha256 = self.content_hash(candidate)

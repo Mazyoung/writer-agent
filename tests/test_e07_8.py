@@ -12,6 +12,8 @@ from src.storage.document_formats import (
     CurrentCharacterState,
     CurrentForeshadowState,
     CurrentItemState,
+    CurrentRelationshipState,
+    CurrentCultivationState,
     CurrentState,
     StateDelta,
 )
@@ -112,6 +114,49 @@ class TestCurrentStateFormat(E078Case):
             CurrentItemState(name="芯片"), CurrentItemState(name="芯片")])
         with self.assertRaisesRegex(ValueError, "duplicate"):
             state.to_markdown()
+
+    def test_all_chapter_index_fields_accept_zero_and_round_trip(self):
+        state = CurrentState(
+            through_chapter=0,
+            characters=[CurrentCharacterState(name="林默", updated_chapter=0)],
+            relationships=[CurrentRelationshipState(
+                character_a="林默", character_b="赵诚",
+                last_interaction_chapter=0,
+            )],
+            items=[CurrentItemState(
+                name="旧钥匙", acquired_chapter=0, updated_chapter=0
+            )],
+            cultivation=[CurrentCultivationState(name="林默", updated_chapter=0)],
+            foreshadows=[CurrentForeshadowState(
+                foreshadow_id="F0001", description="旧事", planted_chapter=0,
+                last_progress_chapter=0, resolved_chapter=0,
+            )],
+        )
+        text = state.to_markdown()
+        parsed = CurrentState.from_markdown(text)
+        self.assertEqual(parsed.through_chapter, 0)
+        self.assertEqual(parsed.relationships[0].last_interaction_chapter, 0)
+        self.assertEqual(parsed.items[0].acquired_chapter, 0)
+        self.assertEqual(parsed.cultivation[0].updated_chapter, 0)
+        self.assertEqual(parsed.foreshadows[0].planted_chapter, 0)
+        self.assertEqual(parsed.to_markdown(), text)
+
+    def test_legacy_prestory_maps_only_to_zero(self):
+        text = CurrentState(items=[CurrentItemState(name="旧钥匙")]).to_markdown()
+        legacy = text.replace("| 旧钥匙 |  |  |  | 0 |", "| 旧钥匙 |  |  |  | 前史 |")
+        parsed = CurrentState.from_markdown(legacy)
+        self.assertEqual(parsed.items[0].acquired_chapter, 0)
+
+    def test_unknown_natural_language_chapters_fail_closed(self):
+        text = CurrentState(items=[CurrentItemState(name="旧钥匙")]).to_markdown()
+        for invalid in ("正文前", "故事开始前", "开篇前", "未知"):
+            with self.subTest(invalid=invalid):
+                malformed = text.replace(
+                    "| 旧钥匙 |  |  |  | 0 |",
+                    f"| 旧钥匙 |  |  |  | {invalid} |",
+                )
+                with self.assertRaisesRegex(ValueError, "Invalid Acquired Chapter"):
+                    CurrentState.from_markdown(malformed)
 
     def test_generated_current_state_ignores_edited_override(self):
         original = CurrentState().to_markdown()

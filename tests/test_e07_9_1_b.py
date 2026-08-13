@@ -13,7 +13,9 @@ import main as cli
 from src.agents.state_manager.state_manager import StateManager
 from src.config.settings import get_settings
 from src.storage.atomic_fact_store import AtomicFactStore
-from src.storage.document_formats import AtomicFact, ChapterPlan, FactDigest
+from src.storage.document_formats import (
+    AtomicFact, ChapterPlan, CurrentItemState, CurrentState, FactDigest,
+)
 from src.storage.file_store import FileStore
 from src.workflows.chapter_runner import ChapterWorkflowRunner
 from src.workflows.chapter_workflow import (
@@ -314,8 +316,17 @@ class HumanFlowCase(E0791Case):
         self._start(CLEAN)
         self._submit(self._candidate_file("最终人工正文。"))
         manager = self.manager_class.return_value
+        updated = CurrentState(
+            through_chapter=2,
+            items=[CurrentItemState(
+                name="门锁", status="已检查", acquired_chapter=0,
+                updated_chapter=2,
+            )],
+        )
+        updated.chapter.chapter_index = 2
+        updated.chapter.canonical_source_path = "chapters/chapter_0002.md"
         manager.update_current_state.return_value = {
-            "updated_current_state": "# Current State\n林默检查了门锁。"
+            "updated_current_state": updated.to_markdown()
         }
         manager.derive_atomic_facts.return_value = {
             "raw_analysis": "## Atomic Facts\n\n- [P1-P1] 林默检查门锁。"

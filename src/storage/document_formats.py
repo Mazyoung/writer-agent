@@ -1014,14 +1014,20 @@ def _strict_state_table(text: str, headers: list[str]) -> list[dict[str, str]]:
     return rows
 
 
-def _state_chapter(value: str, field_name: str, allow_empty: bool = True) -> int:
+def _state_chapter(
+    value: str, field_name: str, *, allow_empty: bool = True
+) -> int:
     value = str(value or "").strip()
-    if not value and allow_empty:
+    if value == "前史":
         return 0
-    numbers = re.findall(r"\d+", value)
-    if len(numbers) != 1:
+    if value in {"", "-", "—"} and allow_empty:
+        return 0
+    match = re.fullmatch(
+        r"(?:(\d+)|第\s*(\d+)\s*章|Chapter\s+(\d+))", value
+    )
+    if not match:
         raise ValueError(f"Invalid {field_name}: {value!r}")
-    return int(numbers[0])
+    return int(next(group for group in match.groups() if group is not None))
 
 
 def _normalize_relationship_pair(character_a: str, character_b: str) -> tuple[str, str]:
@@ -1137,17 +1143,20 @@ class CurrentState:
                 raise ValueError(f"Invalid foreshadow ID: {entry.foreshadow_id}")
             if entry.status not in {"OPEN", "RESOLVED", "ABANDONED"}:
                 raise ValueError(f"Invalid foreshadow status: {entry.status}")
-        update_chapters = [
+        chapter_fields = [
             *(entry.updated_chapter for entry in self.characters),
             *(entry.last_interaction_chapter for entry in self.relationships),
+            *(entry.acquired_chapter for entry in self.items),
             *(entry.updated_chapter for entry in self.items),
             *(entry.updated_chapter for entry in self.cultivation),
+            *(entry.planted_chapter for entry in self.foreshadows),
             *(entry.last_progress_chapter for entry in self.foreshadows),
+            *(entry.resolved_chapter for entry in self.foreshadows),
             self.chapter.chapter_index,
         ]
-        if any(value < 0 for value in update_chapters):
+        if any(value < 0 for value in chapter_fields):
             raise ValueError("Current State chapter fields cannot be negative")
-        if any(value > self.through_chapter for value in update_chapters):
+        if any(value > self.through_chapter for value in chapter_fields):
             raise ValueError("Current State entry is newer than Through Chapter")
 
     @staticmethod
@@ -1226,7 +1235,9 @@ class CurrentState:
         try:
             state = cls(
                 schema_version=int(metadata["Schema Version"]),
-                through_chapter=int(metadata["Through Chapter"]),
+                through_chapter=_state_chapter(
+                    metadata["Through Chapter"], "Through Chapter", allow_empty=False
+                ),
             )
         except ValueError as exc:
             raise ValueError("Current State metadata is invalid") from exc
@@ -1295,7 +1306,9 @@ class CurrentState:
             raise ValueError("Current State must contain exactly one Current Chapter row")
         chapter = chapter_rows[0]
         try:
-            chapter_index = int(chapter["Chapter Index"])
+            chapter_index = _state_chapter(
+                chapter["Chapter Index"], "Chapter Index", allow_empty=False
+            )
             word_count = int(chapter["Word Count"])
         except ValueError as exc:
             raise ValueError("Current Chapter numeric metadata is invalid") from exc
